@@ -1,0 +1,73 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+    apply from: "variables.gradle"
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.7.2'
+        classpath 'com.google.gms:google-services:4.4.4'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+
+        // NOTE: Do not place your application dependencies here; they belong
+        // in the individual module build.gradle files
+    }
+}
+
+apply from: "variables.gradle"
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    configurations.all {
+        resolutionStrategy {
+            force 'androidx.core:core:1.15.0'
+            force 'androidx.core:core-ktx:1.15.0'
+            force 'androidx.activity:activity:1.9.3'
+            force 'androidx.activity:activity-ktx:1.9.3'
+            force 'androidx.appcompat:appcompat:1.7.0'
+            force 'androidx.fragment:fragment:1.8.5'
+            force 'androidx.fragment:fragment-ktx:1.8.5'
+            force 'androidx.webkit:webkit:1.12.1'
+            force 'com.google.android.material:material:1.12.0'
+            force 'androidx.exifinterface:exifinterface:1.3.7'
+            force 'org.jetbrains.kotlin:kotlin-stdlib:1.9.25'
+            force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.25'
+            force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.25'
+        }
+    }
+}
+
+subprojects {
+    afterEvaluate { project ->
+        def activeJava = JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21)
+            ? JavaVersion.VERSION_21
+            : JavaVersion.VERSION_17
+        def activeJavaInt = JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21) ? 21 : 17
+
+        if (project.hasProperty('android') && project.android != null) {
+            project.android.compileOptions {
+                sourceCompatibility activeJava
+                targetCompatibility activeJava
+            }
+        }
+        if (project.extensions.findByName('kotlin') != null) {
+            try {
+                project.kotlin.jvmToolchain(activeJavaInt)
+            } catch (Exception ignored) {}
+        }
+        project.tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+            kotlinOptions {
+                jvmTarget = activeJavaInt.toString()
+            }
+        }
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}

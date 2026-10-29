@@ -1,0 +1,14 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Buzz</string>
+    <string name="title_activity_main">Buzz</string>
+    <string name="package_name">com.smartrooti.billing</string>
+    <string name="custom_url_scheme">com.smartrooti.billing</string>
+    
+    <!-- WEB CLIENT ID CONFIGURATION -->
+    <!-- PRODUCTION DATABASE (buzz-8521): Matches android/app/google-services.json -->
+    <string name="default_web_client_id">327146649300-b186rkv6aj4la2fco79adj10smbrr8b2.apps.googleusercontent.com</string>
+    
+    <!-- DEVELOPMENT SANDBOX (tidy-byte-g5xj8) -->
+    <!-- <string name="default_web_client_id">1080691680431-aop4epc4mvhp4den0thrlv17pt3op6rt.apps.googleusercontent.com</string> -->
+</resources>

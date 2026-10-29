@@ -1,0 +1,55 @@
+{
+  "project_info": {
+    "project_number": "327146649300",
+    "project_id": "buzz-8521",
+    "storage_bucket": "buzz-8521.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:327146649300:android:7e41638d6c75f4c781ed41",
+        "android_client_info": {
+          "package_name": "com.smartrooti.billing"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "327146649300-rscqmdn03je5aij6govsjeis34fk6ujd.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.smartrooti.billing",
+            "certificate_hash": "c84b6408fe8840a54f6cc320b4819f0fea06d6d4"
+          }
+        },
+        {
+          "client_id": "327146649300-rscqmdn03je5aij6govsjeis34fk6ujd.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.smartrooti.billing",
+            "certificate_hash": "321e1473a738fd78c710ebde08b71da19c28f30a"
+          }
+        },
+        {
+          "client_id": "327146649300-b186rkv6aj4la2fco79adj10smbrr8b2.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCYBq7RGM0Qc-tPIqqwmjBtR0VW5hAzWAk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "327146649300-b186rkv6aj4la2fco79adj10smbrr8b2.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,164 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "A product available for billing.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "bio": { "type": "string" },
+        "price": { "type": "number" },
+        "costPrice": { "type": "number" },
+        "stock": { "type": "number" },
+        "soldCount": { "type": "number" },
+        "image": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["name", "price", "stock", "createdAt"]
+    },
+    "Bill": {
+      "title": "Bill",
+      "description": "A generated bill.",
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "total": { "type": "number" },
+        "date": { "type": "number" },
+        "status": { "type": "string" },
+        "isUdhar": { "type": "boolean" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "udhaarNote": { "type": "string" },
+        "linkedOtherCostId": { "type": "string" },
+        "costCategory": { "type": "string" }
+      },
+      "required": ["items", "total", "date"]
+    },
+    "OtherCost": {
+      "title": "OtherCost",
+      "description": "Other expenses, dues, or borrow records that reduce revenue.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "amount": { "type": "number" },
+        "category": { "type": "string" },
+        "date": { "type": "number" },
+        "ownerId": { "type": "string" },
+        "linkedBillId": { "type": "string" },
+        "customerName": { "type": "string" },
+        "customerPhone": { "type": "string" },
+        "udhaarNote": { "type": "string" }
+      },
+      "required": ["title", "amount", "date", "ownerId"]
+    },
+    "SecurityAlert": {
+      "title": "SecurityAlert",
+      "description": "An alert created when someone fails to log in as admin multiple times.",
+      "type": "object",
+      "properties": {
+        "userName": { "type": "string" },
+        "timestamp": { "type": "number" }
+      },
+      "required": ["userName", "timestamp"]
+    },
+    "Settings": {
+      "title": "Settings",
+      "description": "Application settings, user profiles, or configuration data.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "customPhotoURL": { "type": "string" },
+        "isAdmin": { "type": "boolean" },
+        "role": { "type": "string" },
+        "theme": { "type": "string" },
+        "hapticsEnabled": { "type": "boolean" },
+        "notifications": { "type": "boolean" },
+        "keepScreenOn": { "type": "boolean" },
+        "isPrinterConnected": { "type": "boolean" },
+        "isBlocked": { "type": "boolean" },
+        "blockedAt": { "type": "number" },
+        "updatedAt": { "type": "number" },
+        "forcedLogoutAt": { "type": "number" },
+        "adminUid": { "type": "string" }
+      }
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "An audit log representing a critical event in the system.",
+      "type": "object",
+      "properties": {
+        "eventType": { "type": "string" },
+        "description": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userEmail": { "type": "string" }
+      },
+      "required": ["eventType", "description", "timestamp", "userId", "userName", "userEmail"]
+    },
+    "SyncConflict": {
+      "title": "SyncConflict",
+      "description": "A record of an offline bill that failed validation upon reconnecting due to concurrent online stock updates.",
+      "type": "object",
+      "properties": {
+        "billId": { "type": "string" },
+        "total": { "type": "number" },
+        "billDate": { "type": "number" },
+        "failedAt": { "type": "number" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "reason": { "type": "string" },
+        "status": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "conflictingItems": {
+          "type": "array",
+          "items": { "type": "object" }
+        }
+      },
+      "required": ["billId", "total", "billDate", "failedAt", "reason", "status"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Products for the pos stock."
+    },
+    "/bills/{billId}": {
+      "schema": { "$ref": "#/entities/Bill" },
+      "description": "Generated bills."
+    },
+    "/other_costs/{costId}": {
+      "schema": { "$ref": "#/entities/OtherCost" },
+      "description": "Other operational expenses or dues tracked by admin."
+    },
+    "/security_alerts/{alertId}": {
+      "schema": { "$ref": "#/entities/SecurityAlert" },
+      "description": "Security alerts."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/Settings" },
+      "description": "Settings documents."
+    },
+    "/activity_logs/{logId}": {
+      "schema": { "$ref": "#/entities/ActivityLog" },
+      "description": "Audit and activity logs for administrative actions."
+    },
+    "/sync_conflicts/{conflictId}": {
+      "schema": { "$ref": "#/entities/SyncConflict" },
+      "description": "Offline billing sync conflicts recorded when offline checkouts fail server stock validation."
+    }
+  }
+}

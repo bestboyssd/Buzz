@@ -1,0 +1,254 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  --color-slate-850: #171b26;
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer components {
+  .glass {
+    @apply bg-[#f3edf7]/90 dark:bg-[#1d202a]/90 backdrop-blur-xl border border-slate-200/80 dark:border-slate-800/80 shadow-xs;
+  }
+  
+  .glass-dark {
+    @apply bg-[#fef7ff]/95 dark:bg-[#141720]/95 backdrop-blur-xl border border-slate-200/90 dark:border-slate-800/90 shadow-lg;
+  }
+
+  /* Material Design 3 Surface Container Card (28px Extra-Large shape token) */
+  .glass-card {
+    @apply bg-white dark:bg-[#1b1f2b] hover:bg-[#f8f5fc] dark:hover:bg-[#222736] active:bg-[#f0ebf8] dark:active:!bg-[#262b3c] transition-colors duration-150 border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] hover:shadow-[0_4px_14px_rgba(79,70,229,0.07)] dark:shadow-none;
+  }
+  
+  /* Material Design 3 Search & Text Input (Full pill / Large tonal field) */
+  .glass-input {
+    @apply bg-[#f3edf7] dark:bg-[#1b1f2b] border border-slate-200/80 dark:border-white/[0.08] focus:bg-white dark:focus:bg-[#222736] focus:border-indigo-600 dark:focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/15 transition-[background-color,border-color,box-shadow,color] duration-150 rounded-full px-5 py-3 outline-none text-slate-900 dark:text-slate-100 placeholder-slate-500 dark:placeholder-slate-400 shadow-2xs hover:border-slate-300 dark:hover:border-white/[0.14];
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  
+  /* Material Design 3 Elevated Dialog / Sheet Surface */
+  .glass-panel {
+    @apply bg-[#fcf8ff] dark:bg-[#161923] border border-slate-200/80 dark:border-white/[0.08] shadow-2xl rounded-[28px];
+  }
+
+  /* Material Design 3 Segmented Button Track */
+  .m3-segmented-track {
+    @apply flex items-center gap-1 p-1 bg-[#ece6f0] dark:bg-[#161922] border border-slate-200/80 dark:border-white/[0.07] rounded-full overflow-hidden;
+  }
+
+  /* Material Design 3 Tonal Icon Button */
+  .m3-icon-btn {
+    @apply w-11 h-11 rounded-full flex items-center justify-center bg-[#ece6f0] hover:bg-[#e2dce7] dark:bg-[#1f2432] dark:hover:bg-[#282e40] text-slate-800 dark:text-slate-100 border border-slate-200/70 dark:border-white/[0.08] shadow-2xs active:scale-92 transition-[background-color,border-color,color,transform] duration-150 outline-none cursor-pointer;
+  }
+
+  /* Material Design 3 Error Tonal Icon Button */
+  .m3-icon-btn-error {
+    @apply w-11 h-11 rounded-full flex items-center justify-center bg-[#f9dedc]/80 hover:bg-[#f2b8b5]/60 dark:bg-rose-500/15 dark:hover:bg-rose-500/25 text-rose-700 dark:text-rose-300 border border-rose-200/70 dark:border-rose-500/25 shadow-2xs active:scale-92 transition-[background-color,border-color,color,transform] duration-150 outline-none cursor-pointer disabled:opacity-40 disabled:pointer-events-none;
+  }
+
+  /* Material Design 3 Search Bar */
+  .m3-search-bar {
+    @apply w-full pl-11 pr-10 py-3.5 rounded-full bg-[#ece6f0] dark:bg-[#1b1f2b] border border-slate-200/80 dark:border-white/[0.08] text-sm font-semibold text-slate-900 dark:text-slate-100 placeholder-slate-500 dark:placeholder-slate-400 focus:bg-white dark:focus:bg-[#222736] focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400 focus:ring-4 focus:ring-indigo-500/15 hover:border-slate-300 dark:hover:border-white/[0.14] transition-[background-color,border-color,box-shadow,color] duration-150 shadow-2xs;
+  }
+
+  .pt-safe {
+    padding-top: max(calc(env(safe-area-inset-top, 0px) + 0.75rem), 2.75rem);
+  }
+
+  .pb-safe {
+    padding-bottom: max(calc(env(safe-area-inset-bottom, 0px) + 0.85rem), 1.5rem);
+  }
+}
+
+/* Material Design 3 Indeterminate Circular & Linear Progress Animations */
+@keyframes m3-circular-rotate {
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes m3-circular-dash {
+  0% {
+    stroke-dasharray: 1, 150;
+    stroke-dashoffset: 0;
+  }
+  50% {
+    stroke-dasharray: 90, 150;
+    stroke-dashoffset: -35;
+  }
+  100% {
+    stroke-dasharray: 90, 150;
+    stroke-dashoffset: -124;
+  }
+}
+
+@keyframes m3-linear-indeterminate-1 {
+  0% {
+    left: -35%;
+    right: 100%;
+  }
+  60% {
+    left: 100%;
+    right: -90%;
+  }
+  100% {
+    left: 100%;
+    right: -90%;
+  }
+}
+
+@keyframes m3-linear-indeterminate-2 {
+  0% {
+    left: -200%;
+    right: 100%;
+  }
+  60% {
+    left: 107%;
+    right: -8%;
+  }
+  100% {
+    left: 107%;
+    right: -8%;
+  }
+}
+
+.m3-circular-spinner {
+  animation: m3-circular-rotate 1.8s linear infinite;
+}
+
+.m3-circular-spinner circle {
+  stroke-linecap: round;
+  animation: m3-circular-dash 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.m3-linear-bar-1 {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background-color: currentColor;
+  border-radius: 9999px;
+  animation: m3-linear-indeterminate-1 2.1s cubic-bezier(0.65, 0.815, 0.735, 0.395) infinite;
+}
+
+.m3-linear-bar-2 {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background-color: currentColor;
+  border-radius: 9999px;
+  animation: m3-linear-indeterminate-2 2.1s cubic-bezier(0.165, 0.84, 0.44, 1) 1.15s infinite;
+}
+
+.font-mono,
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Low-power, GPU-efficient ambient glows for low-end Android phones */
+@keyframes blob-pulse-1 {
+  0%, 100% { transform: scale(1) translate3d(0, 0, 0); opacity: 0.45; }
+  50% { transform: scale(1.08) translate3d(20px, -20px, 0); opacity: 0.65; }
+}
+
+@keyframes blob-pulse-2 {
+  0%, 100% { transform: scale(1) translate3d(0, 0, 0); opacity: 0.45; }
+  50% { transform: scale(1.1) translate3d(-20px, 20px, 0); opacity: 0.60; }
+}
+
+@keyframes blob-pulse-3 {
+  0%, 100% { transform: scale(1) translate3d(0, 0, 0); opacity: 0.40; }
+  50% { transform: scale(1.06) translate3d(15px, 15px, 0); opacity: 0.58; }
+}
+
+.animate-blob-1 { animation: blob-pulse-1 14s infinite ease-in-out; will-change: opacity, transform; }
+.animate-blob-2 { animation: blob-pulse-2 18s infinite ease-in-out; will-change: opacity, transform; }
+.animate-blob-3 { animation: blob-pulse-3 16s infinite ease-in-out; will-change: opacity, transform; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-blob-1, .animate-blob-2, .animate-blob-3 {
+    animation: none !important;
+  }
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  position: fixed;
+  top: 0;
+  left: 0;
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+body {
+  background-color: #f8fafc;
+  color: #0f172a;
+  padding: 0;
+  transition: background-color 0.4s ease;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  -khtml-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Allow selection in inputs */
+input, textarea {
+  -webkit-user-select: auto;
+  user-select: auto;
+}
+
+/* Disable drag-ghost on all images to make them feel like native graphic views */
+img {
+  -webkit-user-drag: none;
+  -khtml-user-drag: none;
+  -moz-user-drag: none;
+  -o-user-drag: none;
+  user-drag: none;
+}
+
+/* Hide default browser scrollbars for a highly polished native app console experience */
+::-webkit-scrollbar {
+  display: none !important;
+}
+
+* {
+  -ms-overflow-style: none !important;
+  scrollbar-width: none !important;
+}
+
+.dark body {
+  background-color: #020617;
+  color: #f8fafc;
+}
+
+@media print {
+  html, body {
+    position: static !important;
+    overflow: visible !important;
+    height: auto !important;
+    width: 100% !important;
+    background-color: white !important;
+    color: black !important;
+  }
+  body > *:not(.receipt-print-portal) {
+    display: none !important;
+  }
+  .no-print, .no-print * {
+    display: none !important;
+  }
+  .print-only {
+    display: block !important;
+  }
+  @page {
+    size: 80mm auto;
+    margin: 3mm;
+  }
+}

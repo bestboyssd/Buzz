@@ -1,0 +1,10 @@
+{
+  "name": "Buzz - v1.0.0",
+  "description": "Stock management and billing app for SmartRooti with offline support and glassmorphism UI.",
+  "requestFramePermissions": [
+    "screen-wake-lock"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    
+    <!-- PWA & Android Meta Tags -->
+    <meta name="theme-color" content="#0B0F19" />
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="application-name" content="Buzz">
+    <meta name="description" content="Stock management and billing app for SmartRooti with offline support and glassmorphism UI." />
+    <meta property="og:title" content="Buzz - v1.0.0" />
+    <meta property="og:description" content="Stock management and billing app for SmartRooti with offline support and glassmorphism UI." />
+    <!-- Apple Meta Tags for iOS fallback -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Buzz" />
+    <link rel="manifest" href="/manifest.json" />
+    
+    <!-- PWA Icons -->
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    
+    <title>Buzz - v1.0.0</title>
+    <script>
+      (function () {
+        // 1. Suppress Vite HMR WebSocket errors in Cloud Run / AI Studio preview where HMR WebSockets are disabled
+        var isViteWsError = function (val) {
+          var str = String((val && (val.message || val.stack || val)) || '');
+          return (
+            str.indexOf('WebSocket closed without opened') !== -1 ||
+            str.indexOf('failed to connect to websocket') !== -1 ||
+            str.indexOf('/@vite/client') !== -1
+          );
+        };
+
+        window.addEventListener(
+          'unhandledrejection',
+          function (event) {
+            if (isViteWsError(event.reason)) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (isViteWsError(event.error || event.message || event.filename)) {
+              event.preventDefault();
+              event.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+
+        // 2. Shim window.WebSocket specifically for 'vite-hmr' protocol so @vite/client connects silently without network failure
+        var NativeWebSocket = window.WebSocket;
+        if (NativeWebSocket) {
+          var PatchedWebSocket = function (url, protocols) {
+            var protoStr = Array.isArray(protocols) ? protocols.join(',') : String(protocols || '');
+            var urlStr = String(url || '');
+            if (protoStr.indexOf('vite-hmr') !== -1 || urlStr.indexOf('vite-hmr') !== -1) {
+              var target = new EventTarget();
+              var mockWs = {
+                url: urlStr,
+                protocol: 'vite-hmr',
+                readyState: 1, // OPEN
+                bufferedAmount: 0,
+                extensions: '',
+                binaryType: 'blob',
+                CONNECTING: 0,
+                OPEN: 1,
+                CLOSING: 2,
+                CLOSED: 3,
+                onopen: null,
+                onmessage: null,
+                onerror: null,
+                onclose: null,
+                send: function () {},
+                close: function () {
+                  mockWs.readyState = 3;
+                },
+                addEventListener: target.addEventListener.bind(target),
+                removeEventListener: target.removeEventListener.bind(target),
+                dispatchEvent: target.dispatchEvent.bind(target)
+              };
+              setTimeout(function () {
+                var openEvt = new Event('open');
+                if (typeof mockWs.onopen === 'function') mockWs.onopen(openEvt);
+                target.dispatchEvent(openEvt);
+                var msgEvt = new MessageEvent('message', {
+                  data: JSON.stringify({ type: 'connected' })
+                });
+                if (typeof mockWs.onmessage === 'function') mockWs.onmessage(msgEvt);
+                target.dispatchEvent(msgEvt);
+              }, 0);
+              return mockWs;
+            }
+            return protocols !== undefined
+              ? new NativeWebSocket(url, protocols)
+              : new NativeWebSocket(url);
+          };
+          PatchedWebSocket.prototype = NativeWebSocket.prototype;
+          PatchedWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+          PatchedWebSocket.OPEN = NativeWebSocket.OPEN;
+          PatchedWebSocket.CLOSING = NativeWebSocket.CLOSING;
+          PatchedWebSocket.CLOSED = NativeWebSocket.CLOSED;
+          window.WebSocket = PatchedWebSocket;
+        }
+
+        // 3. Unregister any stale dev-sw.js service worker while preserving production Workbox sw.js
+        if ('serviceWorker' in navigator) {
+          navigator.serviceWorker.getRegistrations().then(function (regs) {
+            regs.forEach(function (reg) {
+              var scriptUrl =
+                (reg.active && reg.active.scriptURL) ||
+                (reg.waiting && reg.waiting.scriptURL) ||
+                (reg.installing && reg.installing.scriptURL) ||
+                '';
+              if (scriptUrl.indexOf('dev-sw.js') !== -1) {
+                reg.unregister();
+              }
+            });
+          }).catch(function () {});
+        }
+      })();
+
+      // Use saved theme if available; otherwise follow the device's default system theme (light or dark)
+      (function () {
+        var savedTheme = localStorage.getItem('theme');
+        var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        var useDark = savedTheme === 'dark' || (!savedTheme && prefersDark);
+        if (useDark) {
+          document.documentElement.classList.add('dark');
+        } else {
+          document.documentElement.classList.remove('dark');
+        }
+        var metaTheme = document.querySelector('meta[name="theme-color"]');
+        if (metaTheme) {
+          metaTheme.setAttribute('content', useDark ? '#020617' : '#f8fafc');
+        }
+      })();
+    </script>
+  </head>
+  <body style="margin: 0;">
+    <div id="root"></div>
+    <script>
+      (function () {
+        var isDark = document.documentElement.classList.contains('dark');
+        document.body.style.backgroundColor = isDark ? '#0B0F19' : '#f8fafc';
+      })();
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
