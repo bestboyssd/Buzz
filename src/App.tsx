@@ -34,7 +34,9 @@ import { KeepAwake } from "@capacitor-community/keep-awake";
 import { Capacitor } from "@capacitor/core";
 import { SplashScreen } from "@capacitor/splash-screen";
 import { LocalNotifications } from "@capacitor/local-notifications";
-import { AlertOctagon, Bell, WifiOff, RefreshCw, AlertTriangle, IndianRupee } from "lucide-react";
+import { AlertOctagon, Bell, WifiOff, RefreshCw, AlertTriangle, IndianRupee, Download, ArrowRight } from "lucide-react";
+import { useAppVersionCheck, triggerInstantApkDownload } from "./lib/versionCheck";
+import { triggerHaptic } from "./lib/haptics";
 import {
   doc,
   onSnapshot,
@@ -139,6 +141,13 @@ function AnimatedRoutes({ performanceMode }: { performanceMode: boolean }) {
 
 function AppContent() {
   const { user, loading, isAdmin, isRealAdmin } = useAuth();
+  const {
+    appVersion,
+    latestRelease,
+    checkingVersion,
+    isOutdated,
+    refreshVersionCheck,
+  } = useAppVersionCheck();
   const [performanceMode, setPerformanceMode] = useState<boolean>(() =>
     isPerformanceModeEnabled(user?.uid)
   );
@@ -1634,6 +1643,133 @@ function AppContent() {
                 </button>
               </div>
             </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Mandatory App Update Lock Screen & In-App Notification */}
+      <AnimatePresence>
+        {isOutdated && latestRelease && (
+          <div className="fixed inset-0 z-[10000] flex flex-col items-center justify-between p-4 sm:p-6 select-none overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-slate-950/85 dark:bg-[#06080f]/92 backdrop-blur-xl pointer-events-auto"
+            />
+
+            {/* Top In-App Notification Banner */}
+            <motion.div
+              initial={{ opacity: 0, y: -16, scale: 0.96 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -12, scale: 0.96 }}
+              className="relative z-10 w-full max-w-sm mt-2 sm:mt-4 bg-rose-500/15 dark:bg-rose-500/15 border border-rose-500/35 rounded-2xl px-4 py-3 flex items-center gap-3 shadow-lg"
+            >
+              <span className="relative flex h-2.5 w-2.5 shrink-0">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500" />
+              </span>
+              <div className="min-w-0 flex-1 text-left">
+                <p className="text-[11px] font-extrabold uppercase tracking-wider text-rose-600 dark:text-rose-300 leading-tight">
+                  App Outdated • Update Required
+                </p>
+                <p className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate mt-0.5">
+                  Buzz v{latestRelease.version} is required to continue
+                </p>
+              </div>
+            </motion.div>
+
+            {/* Center Mandatory Update Card */}
+            <motion.div
+              initial={{ scale: 0.94, opacity: 0, y: 16 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.94, opacity: 0, y: 12 }}
+              transition={{ type: "spring", stiffness: 380, damping: 28, mass: 0.75 }}
+              className="relative z-10 w-full max-w-sm my-auto bg-white dark:bg-[#131722] border border-slate-200/90 dark:border-white/[0.09] rounded-[2rem] p-6 shadow-2xl text-center"
+            >
+              <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-indigo-500/12 dark:bg-indigo-500/20 border border-indigo-500/25 flex items-center justify-center text-indigo-600 dark:text-indigo-400 shadow-inner">
+                <Download size={30} strokeWidth={2.25} />
+              </div>
+
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/25 text-[10px] font-extrabold uppercase tracking-widest mb-2.5">
+                Mandatory Update
+              </span>
+
+              <h2 className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white mb-2">
+                Update Buzz POS
+              </h2>
+
+              <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed mb-5">
+                Your installed version of Buzz POS is outdated. To keep your store inventory and billing in sync, please download and install the latest version.
+              </p>
+
+              {/* Version Comparison Box */}
+              <div className="rounded-2xl bg-slate-50 dark:bg-[#0c0f17] border border-slate-200/80 dark:border-white/[0.07] p-3.5 mb-5">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex-1 text-left">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                      Installed
+                    </div>
+                    <div className="font-mono text-sm font-bold text-rose-600 dark:text-rose-400 mt-0.5">
+                      v{appVersion}
+                    </div>
+                  </div>
+
+                  <div className="w-8 h-8 rounded-xl bg-slate-200/70 dark:bg-slate-800/80 flex items-center justify-center text-slate-500 dark:text-slate-400 shrink-0">
+                    <ArrowRight size={15} />
+                  </div>
+
+                  <div className="flex-1 text-right">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+                      Latest Release
+                    </div>
+                    <div className="font-mono text-sm font-extrabold text-emerald-600 dark:text-emerald-400 mt-0.5">
+                      v{latestRelease.version}
+                    </div>
+                  </div>
+                </div>
+
+                {latestRelease.notes && (
+                  <div className="mt-3 pt-2.5 border-t border-slate-200/70 dark:border-white/[0.06] text-left">
+                    <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 mb-1">
+                      What's New
+                    </div>
+                    <p className="text-xs text-slate-600 dark:text-slate-300 line-clamp-3 leading-relaxed">
+                      {latestRelease.notes}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic("heavy");
+                    triggerInstantApkDownload(latestRelease.downloadUrl);
+                  }}
+                  className="w-full py-3.5 px-4 bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] text-white font-extrabold rounded-2xl text-sm shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Download size={17} strokeWidth={2.5} />
+                  <span>Update Now (Download APK)</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={checkingVersion}
+                  onClick={() => {
+                    triggerHaptic("light");
+                    refreshVersionCheck();
+                  }}
+                  className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 active:scale-[0.98] text-slate-600 dark:text-slate-300 font-bold rounded-xl text-xs border border-slate-200/80 dark:border-white/[0.06] transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw size={13} className={checkingVersion ? "animate-spin" : ""} />
+                  <span>{checkingVersion ? "Checking version..." : "Already updated? Check again"}</span>
+                </button>
+              </div>
+            </motion.div>
+
+            <div className="h-4 shrink-0" />
           </div>
         )}
       </AnimatePresence>

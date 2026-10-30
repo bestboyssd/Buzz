@@ -21,10 +21,7 @@ import { updateStatusBarTheme } from "../lib/capacitor";
 import { isPerformanceModeEnabled, applyPerformanceMode } from "../lib/utils";
 
 import { Capacitor } from "@capacitor/core";
-import { App as CapApp } from "@capacitor/app";
 import { LocalNotifications } from "@capacitor/local-notifications";
-import metadata from "../../metadata.json";
-import pkg from "../../package.json";
 import { db } from "../lib/firebase";
 import { doc, setDoc } from "firebase/firestore";
 import { PWAInstallButton } from "../components/PWAInstallButton";
@@ -35,232 +32,23 @@ import {
   connectRealPrinter,
   disconnectRealPrinter,
 } from "../lib/printerManager";
-
-const GITHUB_RELEASES_API = "https://api.github.com/repos/bestboyssd/Buzz/releases";
-const GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/bestboyssd/Buzz/releases/latest";
-const GITHUB_RELEASES_FALLBACK_URL = "https://github.com/bestboyssd/Buzz/releases/latest";
-
-function extractCleanVersion(raw?: string | null): string | null {
-  if (!raw) return null;
-  const match = String(raw).match(/(\d+\.\d+\.\d+(?:\.\d+)?)/);
-  return match ? match[1] : null;
-}
-
-function compareSemver(a: string, b: string): number {
-  const pa = (extractCleanVersion(a) || "0.0.0")
-    .split(".")
-    .map((n) => parseInt(n, 10) || 0);
-  const pb = (extractCleanVersion(b) || "0.0.0")
-    .split(".")
-    .map((n) => parseInt(n, 10) || 0);
-  const len = Math.max(pa.length, pb.length, 3);
-  for (let i = 0; i < len; i++) {
-    const na = pa[i] ?? 0;
-    const nb = pb[i] ?? 0;
-    if (na > nb) return 1;
-    if (na < nb) return -1;
-  }
-  return 0;
-}
-
-interface ReleaseCheckResult {
-  version: string;
-  downloadUrl: string;
-  htmlUrl: string;
-}
-
-function parseReleaseEntry(rel: any): ReleaseCheckResult | null {
-  if (!rel || rel.draft) return null;
-  const assets = Array.isArray(rel.assets) ? rel.assets : [];
-  const apkAsset =
-    assets.find(
-      (a: any) =>
-        typeof a?.browser_download_url === "string" &&
-        (String(a?.name || "").toLowerCase().endsWith(".apk") ||
-          String(a?.content_type || "")
-            .toLowerCase()
-            .includes("android.package-archive"))
-    ) || assets.find((a: any) => typeof a?.browser_download_url === "string");
-
-  const ver =
-    extractCleanVersion(rel.tag_name) ||
-    extractCleanVersion(rel.name) ||
-    extractCleanVersion(apkAsset?.name);
-
-  if (!ver) return null;
-
-  const tag = String(rel.tag_name || `v${ver}`).trim();
-  const downloadUrl =
-    apkAsset?.browser_download_url ||
-    `https://github.com/bestboyssd/Buzz/releases/download/${tag}/Buzz-${tag}.apk`;
-
-  return {
-    version: ver,
-    downloadUrl,
-    htmlUrl: rel.html_url || GITHUB_RELEASES_FALLBACK_URL,
-  };
-}
-
-async function fetchLatestGithubRelease(): Promise<ReleaseCheckResult | null> {
-  const headers: Record<string, string> = {
-    Accept: "application/vnd.github+json",
-  };
-
-  try {
-    const res = await fetch(`${GITHUB_RELEASES_API}?per_page=10&t=${Date.now()}`, {
-      cache: "no-store",
-      headers,
-    });
-    if (res.ok) {
-      const list = await res.json();
-      if (Array.isArray(list) && list.length > 0) {
-        let best: ReleaseCheckResult | null = null;
-        for (const item of list) {
-          const parsed = parseReleaseEntry(item);
-          if (parsed && (!best || compareSemver(parsed.version, best.version) > 0)) {
-            best = parsed;
-          }
-        }
-        if (best) return best;
-      }
-    }
-  } catch (e) {
-    console.warn("GitHub releases list check failed, trying /latest:", e);
-  }
-
-  try {
-    const res = await fetch(`${GITHUB_LATEST_RELEASE_API}?t=${Date.now()}`, {
-      cache: "no-store",
-      headers,
-    });
-    if (res.ok) {
-      const item = await res.json();
-      const parsed = parseReleaseEntry(item);
-      if (parsed) return parsed;
-    }
-  } catch (e) {
-    console.warn("GitHub latest release check failed:", e);
-  }
-
-  return null;
-}
-
-function triggerInstantApkDownload(url: string) {
-  const targetUrl = (url || GITHUB_RELEASES_FALLBACK_URL).trim();
-
-  // 1. Native Android bridge if available
-  try {
-    const nativeExporter = (window as any).AndroidExporter;
-    if (
-      nativeExporter &&
-      typeof nativeExporter.openExternalDownload === "function"
-    ) {
-      const opened = nativeExporter.openExternalDownload(targetUrl);
-      if (opened) return;
-    }
-  } catch {}
-
-  // 2. Native Capacitor WebView: navigating to an external host triggers Bridge.shouldOverrideUrlLoading -> Intent.ACTION_VIEW
-  if (Capacitor.isNativePlatform()) {
-    window.location.href = targetUrl;
-    return;
-  }
-
-  // 3. Web / Mobile Browser / PWA: anchor click with download & _blank
-  try {
-    const a = document.createElement("a");
-    a.href = targetUrl;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.setAttribute("download", "");
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  } catch {
-    window.location.assign(targetUrl);
-  }
-}
+import {
+  useAppVersionCheck,
+  compareSemver,
+  triggerInstantApkDownload,
+} from "../lib/versionCheck";
 
 export function Settings() {
   const navigate = useNavigate();
   const { user } = useAuth();
-
-  const getInitialBundledVersion = () => {
-    try {
-      const metaVer = extractCleanVersion((metadata as any)?.name) || "1.0.0";
-      const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.0.0";
-      return compareSemver(pkgVer, metaVer) > 0 ? pkgVer : metaVer;
-    } catch {
-      return "1.0.0";
-    }
-  };
-
-  const [appVersion, setAppVersion] = useState<string>(() =>
-    getInitialBundledVersion()
-  );
-  const [latestRelease, setLatestRelease] = useState<ReleaseCheckResult | null>(() => {
-    try {
-      const cached = localStorage.getItem("buzz_github_latest_release");
-      return cached ? (JSON.parse(cached) as ReleaseCheckResult) : null;
-    } catch {
-      return null;
-    }
-  });
-  const [checkingVersion, setCheckingVersion] = useState<boolean>(false);
-
-  useEffect(() => {
-    let mounted = true;
-
-    const syncVersionAndCheckRepo = async () => {
-      let currentVer = getInitialBundledVersion();
-      if (Capacitor.isNativePlatform()) {
-        try {
-          const info = await CapApp.getInfo();
-          const nativeVer = extractCleanVersion(info?.version);
-          if (nativeVer && compareSemver(nativeVer, currentVer) > 0) {
-            currentVer = nativeVer;
-          }
-        } catch {}
-      }
-      if (mounted) {
-        setAppVersion(currentVer);
-        setCheckingVersion(true);
-      }
-
-      const release = await fetchLatestGithubRelease();
-      if (!mounted) return;
-      setCheckingVersion(false);
-      if (release) {
-        setLatestRelease(release);
-        try {
-          localStorage.setItem(
-            "buzz_github_latest_release",
-            JSON.stringify(release)
-          );
-        } catch {}
-      }
-    };
-
-    syncVersionAndCheckRepo();
-
-    const handleResumeOrFocus = () => {
-      syncVersionAndCheckRepo();
-    };
-    window.addEventListener("appResumed", handleResumeOrFocus);
-    window.addEventListener("focus", handleResumeOrFocus);
-    return () => {
-      mounted = false;
-      window.removeEventListener("appResumed", handleResumeOrFocus);
-      window.removeEventListener("focus", handleResumeOrFocus);
-    };
-  }, []);
-
-  const isOutdated = Boolean(
-    latestRelease && compareSemver(latestRelease.version, appVersion) > 0
-  );
-  const isUpdated = Boolean(
-    latestRelease && compareSemver(latestRelease.version, appVersion) <= 0
-  );
+  const {
+    appVersion,
+    latestRelease,
+    checkingVersion,
+    isOutdated,
+    isUpdated,
+    refreshVersionCheck,
+  } = useAppVersionCheck();
 
   const handleAppVersionClick = async () => {
     if (isOutdated && latestRelease) {
@@ -269,23 +57,14 @@ export function Settings() {
       return;
     }
 
-    // Re-verify live with GitHub when tapped; if a newer release was just published, download it immediately
     triggerHaptic("light");
-    setCheckingVersion(true);
-    const freshRelease = await fetchLatestGithubRelease();
-    setCheckingVersion(false);
-    if (freshRelease) {
-      setLatestRelease(freshRelease);
-      try {
-        localStorage.setItem(
-          "buzz_github_latest_release",
-          JSON.stringify(freshRelease)
-        );
-      } catch {}
-      if (compareSemver(freshRelease.version, appVersion) > 0) {
-        triggerHaptic("heavy");
-        triggerInstantApkDownload(freshRelease.downloadUrl);
-      }
+    const result = await refreshVersionCheck();
+    if (
+      result?.release &&
+      compareSemver(result.release.version, result.currentVer) > 0
+    ) {
+      triggerHaptic("heavy");
+      triggerInstantApkDownload(result.release.downloadUrl);
     }
   };
 
