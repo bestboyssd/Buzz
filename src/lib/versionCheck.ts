@@ -9,6 +9,7 @@ const GITHUB_RELEASES_API = "https://api.github.com/repos/bestboyssd/Buzz/releas
 const GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/bestboyssd/Buzz/releases/latest";
 export const GITHUB_RELEASES_FALLBACK_URL = "https://github.com/bestboyssd/Buzz/releases/latest";
 const STORAGE_CACHE_KEY = "buzz_github_latest_release";
+const GRACE_PERIOD_MS = 3 * 24 * 60 * 60 * 1000; // 3 days in milliseconds
 
 export interface ReleaseCheckResult {
   version: string;
@@ -179,6 +180,24 @@ export function triggerInstantApkDownload(url?: string | null) {
   }
 }
 
+function getOrSetOutdatedFirstSeen(remoteVersion: string): number {
+  const key = `buzz_outdated_first_seen_${remoteVersion}`;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = parseInt(raw, 10);
+      if (!isNaN(parsed) && parsed > 0) {
+        return parsed;
+      }
+    }
+    const now = Date.now();
+    localStorage.setItem(key, String(now));
+    return now;
+  } catch {
+    return Date.now();
+  }
+}
+
 export function useAppVersionCheck() {
   const [appVersion, setAppVersion] = useState<string>(() =>
     getInitialBundledVersion()
@@ -192,6 +211,13 @@ export function useAppVersionCheck() {
     }
   });
   const [checkingVersion, setCheckingVersion] = useState<boolean>(false);
+  const [passedThisSession, setPassedThisSession] = useState<boolean>(() => {
+    try {
+      return sessionStorage.getItem("buzz_update_passed_session") === "true";
+    } catch {
+      return false;
+    }
+  });
 
   const refreshVersionCheck = useCallback(async () => {
     setCheckingVersion(true);
@@ -212,14 +238,21 @@ export function useAppVersionCheck() {
         );
 
         if (compareSemver(release.version, currentVer) > 0) {
+          const firstSeen = getOrSetOutdatedFirstSeen(release.version);
+          const remMs = Math.max(0, GRACE_PERIOD_MS - (Date.now() - firstSeen));
+          const daysLeft = Math.max(0, Math.ceil(remMs / (24 * 60 * 60 * 1000)));
           const notifKey = `buzz_outdated_notified_${release.version}`;
           if (sessionStorage.getItem(notifKey) !== "true") {
             sessionStorage.setItem(notifKey, "true");
             showLocalNotification(
-              `Update Required (v${release.version})`,
-              `Your app (v${currentVer}) is outdated. Please update to Buzz v${release.version} to continue using the app.`,
+              remMs > 0
+                ? `App Update Available (v${release.version})`
+                : `Mandatory Update Required (v${release.version})`,
+              remMs > 0
+                ? `Buzz v${release.version} is available. You can pass for ${daysLeft} more ${daysLeft === 1 ? "day" : "days"} before updating is mandatory.`
+                : `Your 3-day update grace period has expired. Please update to Buzz v${release.version} to continue using the app.`,
               "/pwa-192x192.png",
-              `mandatory_update_${release.version}`
+              `update_notice_${release.version}`
             );
           }
         }
@@ -237,12 +270,16 @@ export function useAppVersionCheck() {
       const custom = e as CustomEvent<{
         release?: ReleaseCheckResult;
         appVersion?: string;
+        passedSession?: boolean;
       }>;
       if (custom.detail?.release) {
         setLatestRelease(custom.detail.release);
       }
       if (custom.detail?.appVersion) {
         setAppVersion(custom.detail.appVersion);
+      }
+      if (custom.detail?.passedSession !== undefined) {
+        setPassedThisSession(Boolean(custom.detail.passedSession));
       }
     };
 
@@ -277,12 +314,41 @@ export function useAppVersionCheck() {
     latestRelease && compareSemver(latestRelease.version, appVersion) <= 0
   );
 
+  let remainingGraceMs = GRACE_PERIOD_MS;
+  if (isOutdated && latestRelease) {
+    const firstSeen = getOrSetOutdatedFirstSeen(latestRelease.version);
+    remainingGraceMs = Math.max(0, GRACE_PERIOD_MS - (Date.now() - firstSeen));
+  }
+
+  const canPassUpdate = isOutdated && remainingGraceMs > 0;
+  const graceDaysLeft = Math.max(
+    0,
+    Math.ceil(remainingGraceMs / (24 * 60 * 60 * 1000))
+  );
+
+  const passUpdateThisTime = useCallback(() => {
+    if (!canPassUpdate) return;
+    setPassedThisSession(true);
+    try {
+      sessionStorage.setItem("buzz_update_passed_session", "true");
+    } catch {}
+    window.dispatchEvent(
+      new CustomEvent("appReleaseCheckUpdated", {
+        detail: { passedSession: true },
+      })
+    );
+  }, [canPassUpdate]);
+
   return {
     appVersion,
     latestRelease,
     checkingVersion,
     isOutdated,
     isUpdated,
+    canPassUpdate,
+    graceDaysLeft,
+    passedThisSession,
+    passUpdateThisTime,
     refreshVersionCheck,
   };
 }

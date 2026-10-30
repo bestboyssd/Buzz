@@ -8,7 +8,7 @@ import { Bill } from '../lib/firestoreHooks';
 import { triggerHaptic } from '../lib/haptics';
 import { ProfileMenu } from '../components/ProfileMenu';
 import { BillReceiptModal } from '../components/BillReceiptModal';
-import { formatPrice, useOptimizedTransition, useHardwareAcceleration, getBillCalendarIsoDate } from '../lib/utils';
+import { formatPrice, useOptimizedTransition, useHardwareAcceleration, getBillCalendarIsoDate, isPerformanceModeEnabled } from '../lib/utils';
 
 const formatDateToDMY = (timestamp: number | string | Date) => {
   const d = new Date(timestamp);
@@ -107,10 +107,10 @@ export function History() {
 
       <div className="grid grid-cols-2 gap-3.5 mb-7">
         <motion.div
-          initial={{ y: 14, opacity: 0, scale: 0.96 }}
+          initial={isPerformanceModeEnabled() ? false : { y: 14, opacity: 0, scale: 0.96 }}
           animate={{ y: 0, opacity: 1, scale: 1 }}
-          whileHover={{ y: -2, scale: 1.01 }}
-          transition={{ type: "spring", stiffness: 460, damping: 30, delay: 0.04 }}
+          whileHover={isPerformanceModeEnabled() ? undefined : { y: -2, scale: 1.01 }}
+          transition={isPerformanceModeEnabled() ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 30, delay: 0.04 }}
         >
           <StatCard
             icon={<DollarSign size={20} className="text-indigo-600 dark:text-indigo-400" />}
@@ -120,10 +120,10 @@ export function History() {
           />
         </motion.div>
         <motion.div
-          initial={{ y: 14, opacity: 0, scale: 0.96 }}
+          initial={isPerformanceModeEnabled() ? false : { y: 14, opacity: 0, scale: 0.96 }}
           animate={{ y: 0, opacity: 1, scale: 1 }}
-          whileHover={{ y: -2, scale: 1.01 }}
-          transition={{ type: "spring", stiffness: 460, damping: 30, delay: 0.08 }}
+          whileHover={isPerformanceModeEnabled() ? undefined : { y: -2, scale: 1.01 }}
+          transition={isPerformanceModeEnabled() ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 30, delay: 0.08 }}
         >
           <StatCard
             icon={<TrendingUp size={20} className="text-emerald-600 dark:text-emerald-400" />}
@@ -134,7 +134,12 @@ export function History() {
         </motion.div>
       </div>
 
-      <motion.div initial={{ y: 12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.12 }} className="flex-1 flex flex-col">
+      <motion.div
+        initial={isPerformanceModeEnabled() ? false : { y: 12, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={isPerformanceModeEnabled() ? { duration: 0 } : { delay: 0.12 }}
+        className="flex-1 flex flex-col"
+      >
         <div className="flex items-center justify-between px-1 mb-3">
           <h2 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
             <Activity size={18} className="text-indigo-600 dark:text-indigo-400" />
@@ -190,21 +195,26 @@ export function History() {
             >
               <AnimatePresence initial={false}>
               {filtered.map((bill, idx) => {
+                const perfMode = isPerformanceModeEnabled();
                 return (
                   <motion.li
-                    layout
-                    initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                    layout={!perfMode}
+                    initial={perfMode ? false : { opacity: 0, y: 10, scale: 0.97 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.15 } }}
-                    whileHover={{ y: -1.5, scale: 1.005 }}
-                    whileTap={{ scale: 0.975 }}
-                    transition={{
-                      type: 'spring',
-                      stiffness: 480,
-                      damping: 32,
-                      mass: 0.65,
-                      delay: Math.min(idx * 0.03, 0.18),
-                    }}
+                    exit={perfMode ? undefined : { opacity: 0, scale: 0.95, transition: { duration: 0.15 } }}
+                    whileHover={perfMode ? undefined : { y: -1.5, scale: 1.005 }}
+                    whileTap={perfMode ? undefined : { scale: 0.975 }}
+                    transition={
+                      perfMode
+                        ? { duration: 0 }
+                        : {
+                            type: 'spring',
+                            stiffness: 480,
+                            damping: 32,
+                            mass: 0.65,
+                            delay: Math.min(idx * 0.03, 0.18),
+                          }
+                    }
                     key={bill.id ? `${bill.id}_${idx}` : `bill_${idx}`}
                     onClick={() => {
                       triggerHaptic('medium');

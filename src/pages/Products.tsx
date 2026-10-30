@@ -19,6 +19,7 @@ import {
   MAX_BILL_AMOUNT,
   useOptimizedTransition,
   useHardwareAcceleration,
+  isPerformanceModeEnabled,
 } from "../lib/utils";
 import {
   addProduct,
@@ -116,7 +117,14 @@ export function Products() {
   const [search, setSearch] = useState("");
   const [stockFilter, setStockFilter] = useState<"all" | "low" | "out">("all");
   const [optionsShake, setOptionsShake] = useState(false);
+  const [perfMode, setPerfMode] = useState(() => isPerformanceModeEnabled());
   const segDragRef = useRef<{ startX: number; dragged: boolean }>({ startX: 0, dragged: false });
+
+  React.useEffect(() => {
+    const syncPerf = () => setPerfMode(isPerformanceModeEnabled());
+    window.addEventListener("performanceModeChanged", syncPerf);
+    return () => window.removeEventListener("performanceModeChanged", syncPerf);
+  }, []);
 
   // Close active modal on Escape key or Android hardware back button
   React.useEffect(() => {
@@ -607,34 +615,42 @@ export function Products() {
                 className="fixed inset-0 z-[100] flex items-center justify-center p-4"
               >
                 <motion.div
-                  initial={{ opacity: 0 }}
+                  initial={perfMode ? false : { opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={SHEET_BACKDROP_TRANSITION}
+                  exit={perfMode ? undefined : { opacity: 0 }}
+                  transition={perfMode ? { duration: 0 } : SHEET_BACKDROP_TRANSITION}
                   onClick={() => setConfirmDeleteId(null)}
                   className="absolute inset-0 bg-slate-900/45 dark:bg-slate-950/70 backdrop-blur-md transform-gpu"
                 />
                 <motion.div
-                  initial={{ scale: 0.9, opacity: 0, y: 12, filter: "blur(6px)" }}
+                  initial={perfMode ? false : { scale: 0.9, opacity: 0, y: 12, filter: "blur(6px)" }}
                   animate={{ scale: 1, opacity: 1, y: 0, filter: "blur(0px)" }}
-                  exit={{ scale: 0.93, opacity: 0, y: 8, filter: "blur(4px)" }}
-                  transition={{
-                    type: "spring",
-                    stiffness: 420,
-                    damping: 29,
-                    mass: 0.75,
-                  }}
+                  exit={perfMode ? undefined : { scale: 0.93, opacity: 0, y: 8, filter: "blur(4px)" }}
+                  transition={
+                    perfMode
+                      ? { duration: 0 }
+                      : {
+                          type: "spring",
+                          stiffness: 420,
+                          damping: 29,
+                          mass: 0.75,
+                        }
+                  }
                   className="bg-white dark:bg-[#1b1f2b] w-full max-w-sm p-6 relative z-10 rounded-[2rem] text-center shadow-2xl border border-slate-200/80 dark:border-white/[0.08] transform-gpu will-change-transform"
                 >
                   <motion.div
-                    initial={{ scale: 0.7, opacity: 0, rotate: -10 }}
+                    initial={perfMode ? false : { scale: 0.7, opacity: 0, rotate: -10 }}
                     animate={{ scale: 1, opacity: 1, rotate: 0 }}
-                    transition={{
-                      type: "spring",
-                      stiffness: 440,
-                      damping: 22,
-                      delay: 0.04,
-                    }}
+                    transition={
+                      perfMode
+                        ? { duration: 0 }
+                        : {
+                            type: "spring",
+                            stiffness: 440,
+                            damping: 22,
+                            delay: 0.04,
+                          }
+                    }
                     className="mx-auto w-16 h-16 bg-red-100 dark:bg-red-500/20 text-red-600 dark:text-red-400 rounded-full flex items-center justify-center mb-4"
                   >
                     <AlertTriangle size={32} />
@@ -649,8 +665,8 @@ export function Products() {
                   <div className="flex gap-3">
                     <motion.button
                       type="button"
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.96 }}
+                      whileHover={perfMode ? undefined : { scale: 1.02 }}
+                      whileTap={perfMode ? undefined : { scale: 0.96 }}
                       onClick={() => setConfirmDeleteId(null)}
                       className="flex-1 py-3 rounded-xl font-bold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150 cursor-pointer"
                     >
@@ -658,8 +674,8 @@ export function Products() {
                     </motion.button>
                     <motion.button
                       type="button"
-                      whileHover={{ scale: 1.02 }}
-                      whileTap={{ scale: 0.96 }}
+                      whileHover={perfMode ? undefined : { scale: 1.02 }}
+                      whileTap={perfMode ? undefined : { scale: 0.96 }}
                       onClick={confirmDelete}
                       className="flex-1 py-3 rounded-xl font-bold text-white bg-red-600 hover:bg-red-700 transition-colors duration-150 shadow-lg shadow-red-600/30 cursor-pointer"
                     >
@@ -678,10 +694,10 @@ export function Products() {
                 className="fixed inset-0 z-[100] flex items-end justify-center p-0"
               >
                 <motion.div
-                  initial={{ opacity: 0 }}
+                  initial={perfMode ? false : { opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={SHEET_BACKDROP_TRANSITION}
+                  exit={perfMode ? undefined : { opacity: 0 }}
+                  transition={perfMode ? { duration: 0 } : SHEET_BACKDROP_TRANSITION}
                   onClick={() => setShowAddOptions(false)}
                   className="absolute inset-0 bg-slate-900/45 dark:bg-slate-950/70 backdrop-blur-md transform-gpu"
                 />
@@ -701,10 +717,10 @@ export function Products() {
                       setShowAddOptions(false);
                     }
                   }}
-                  variants={SHEET_VARIANTS}
-                  initial="hidden"
-                  animate="visible"
-                  exit="exit"
+                  variants={perfMode ? undefined : SHEET_VARIANTS}
+                  initial={perfMode ? false : "hidden"}
+                  animate={perfMode ? undefined : "visible"}
+                  exit={perfMode ? undefined : "exit"}
                   className="bg-[#fcf8ff] dark:bg-[#161923] border border-slate-200/80 dark:border-white/[0.08] w-full max-w-lg p-6 pb-[calc(env(safe-area-inset-bottom)+2rem)] relative z-10 flex flex-col rounded-t-[2.5rem] rounded-b-none border-b-0 overflow-visible space-y-3 shadow-2xl transform-gpu will-change-transform"
                 >
                   <div
@@ -712,7 +728,7 @@ export function Products() {
                     className="pointer-events-none absolute top-[calc(100%-2px)] inset-x-[-1px] h-[100dvh] bg-[#fcf8ff] dark:bg-[#161923] border-x border-slate-200/80 dark:border-white/[0.08]"
                   />
                   <motion.div
-                    variants={SHEET_ITEM_VARIANTS}
+                    variants={perfMode ? undefined : SHEET_ITEM_VARIANTS}
                     className="flex flex-col items-center"
                   >
                     <motion.div
@@ -731,9 +747,9 @@ export function Products() {
 
                   <motion.button
                     type="button"
-                    variants={SHEET_ITEM_VARIANTS}
-                    whileHover={{ scale: 1.012, y: -1 }}
-                    whileTap={{ scale: 0.975 }}
+                    variants={perfMode ? undefined : SHEET_ITEM_VARIANTS}
+                    whileHover={perfMode ? undefined : { scale: 1.012, y: -1 }}
+                    whileTap={perfMode ? undefined : { scale: 0.975 }}
                     onClick={() => {
                       triggerHaptic("medium");
                       setShowAddOptions(false);
@@ -746,9 +762,9 @@ export function Products() {
 
                   <motion.button
                     type="button"
-                    variants={SHEET_ITEM_VARIANTS}
-                    whileHover={{ scale: 1.012, y: -1 }}
-                    whileTap={{ scale: 0.975 }}
+                    variants={perfMode ? undefined : SHEET_ITEM_VARIANTS}
+                    whileHover={perfMode ? undefined : { scale: 1.012, y: -1 }}
+                    whileTap={perfMode ? undefined : { scale: 0.975 }}
                     onClick={() => {
                       triggerHaptic("medium");
                       setShowAddOptions(false);
@@ -827,6 +843,7 @@ function AddProductModal({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [productShake, setProductShake] = useState(false);
   const [formError, setFormError] = useState("");
+  const perfMode = isPerformanceModeEnabled();
   const productDragControls = useDragControls();
 
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -1044,10 +1061,10 @@ function AddProductModal({
   return (
     <div className="fixed inset-0 z-[70] flex items-end justify-center p-0">
       <motion.div
-        initial={{ opacity: 0 }}
+        initial={perfMode ? false : { opacity: 0 }}
         animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={SHEET_BACKDROP_TRANSITION}
+        exit={perfMode ? undefined : { opacity: 0 }}
+        transition={perfMode ? { duration: 0 } : SHEET_BACKDROP_TRANSITION}
         onClick={onClose}
         className="absolute inset-0 bg-slate-900/45 dark:bg-slate-950/70 backdrop-blur-md transform-gpu"
       />
@@ -1069,10 +1086,10 @@ function AddProductModal({
             onClose();
           }
         }}
-        variants={SHEET_VARIANTS}
-        initial="hidden"
-        animate="visible"
-        exit="exit"
+        variants={perfMode ? undefined : SHEET_VARIANTS}
+        initial={perfMode ? false : "hidden"}
+        animate={perfMode ? undefined : "visible"}
+        exit={perfMode ? undefined : "exit"}
         className="bg-[#fcf8ff] dark:bg-[#161923] border border-slate-200/80 dark:border-white/[0.08] shadow-2xl w-full max-w-lg p-5 pb-8 sm:pb-6 relative z-10 max-h-[90dvh] flex flex-col rounded-t-[2.5rem] rounded-b-none border-b-0 overflow-visible transform-gpu will-change-transform"
       >
         <div
@@ -1080,7 +1097,7 @@ function AddProductModal({
           className="pointer-events-none absolute top-[calc(100%-2px)] inset-x-[-1px] h-[100dvh] bg-[#fcf8ff] dark:bg-[#161923] border-x border-slate-200/80 dark:border-white/[0.08]"
         />
         <motion.div
-          variants={SHEET_ITEM_VARIANTS}
+          variants={perfMode ? undefined : SHEET_ITEM_VARIANTS}
           onPointerDown={(e) => productDragControls.start(e)}
           className="pt-1 pb-2 -mt-1 cursor-row-resize touch-none select-none shrink-0"
         >
@@ -1099,9 +1116,9 @@ function AddProductModal({
             </h2>
             <motion.button
               type="button"
-              whileHover={{ scale: 1.06, rotate: 90 }}
-              whileTap={{ scale: 0.9 }}
-              transition={{ type: "spring", stiffness: 420, damping: 24 }}
+              whileHover={perfMode ? undefined : { scale: 1.06, rotate: 90 }}
+              whileTap={perfMode ? undefined : { scale: 0.9 }}
+              transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 24 }}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={onClose}
               className="p-2 bg-slate-100/50 dark:bg-slate-800/50 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-full text-slate-500 dark:text-slate-400 transition-colors shrink-0 cursor-pointer"
@@ -1115,10 +1132,10 @@ function AddProductModal({
           {formError && (
             <motion.div
               key="product-form-error"
-              initial={{ opacity: 0, y: -8, scale: 0.97 }}
+              initial={perfMode ? false : { opacity: 0, y: -8, scale: 0.97 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -6, scale: 0.97 }}
-              transition={{ type: "spring", stiffness: 420, damping: 28 }}
+              exit={perfMode ? undefined : { opacity: 0, y: -6, scale: 0.97 }}
+              transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 28 }}
               className="p-3 mb-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-900/30 text-red-600 dark:text-red-400 rounded-xl text-xs font-semibold flex items-center justify-between shrink-0"
             >
               <span className="flex items-center gap-2">
@@ -1135,13 +1152,13 @@ function AddProductModal({
         <div className="space-y-2 text-slate-800 dark:text-slate-200 flex-1 px-1 flex flex-col justify-between">
           <div>
             <motion.div
-              variants={SHEET_ITEM_VARIANTS}
+              variants={perfMode ? undefined : SHEET_ITEM_VARIANTS}
               className="flex justify-center mb-3 relative"
             >
               <motion.label
-                whileHover={{ scale: 1.03, y: -1 }}
-                whileTap={{ scale: 0.96 }}
-                transition={{ type: "spring", stiffness: 420, damping: 25 }}
+                whileHover={perfMode ? undefined : { scale: 1.03, y: -1 }}
+                whileTap={perfMode ? undefined : { scale: 0.96 }}
+                transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 420, damping: 25 }}
                 onClick={handlePickProductPhoto}
                 className={`w-24 h-24 rounded-[1.25rem] border-2 border-dashed ${
                   image
@@ -1183,11 +1200,11 @@ function AddProductModal({
                   <motion.button
                     key="remove-product-photo"
                     type="button"
-                    initial={{ scale: 0, opacity: 0 }}
+                    initial={perfMode ? false : { scale: 0, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
-                    exit={{ scale: 0, opacity: 0 }}
-                    whileHover={{ scale: 1.12 }}
-                    whileTap={{ scale: 0.9 }}
+                    exit={perfMode ? undefined : { scale: 0, opacity: 0 }}
+                    whileHover={perfMode ? undefined : { scale: 1.12 }}
+                    whileTap={perfMode ? undefined : { scale: 0.9 }}
                     onClick={() => {
                       setImage(undefined);
                       setIsImageChanged(true);
@@ -1200,7 +1217,7 @@ function AddProductModal({
               </AnimatePresence>
             </motion.div>
 
-            <motion.div variants={SHEET_ITEM_VARIANTS} className="mb-2">
+            <motion.div variants={perfMode ? undefined : SHEET_ITEM_VARIANTS} className="mb-2">
               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 pl-1">
                 Product Name
               </label>
@@ -1214,7 +1231,7 @@ function AddProductModal({
             </motion.div>
 
             <motion.div
-              variants={SHEET_ITEM_VARIANTS}
+              variants={perfMode ? undefined : SHEET_ITEM_VARIANTS}
               className="grid grid-cols-2 gap-3 mb-3"
             >
               <div>
@@ -1276,7 +1293,7 @@ function AddProductModal({
               </div>
             </motion.div>
 
-            <motion.div variants={SHEET_ITEM_VARIANTS} className="mb-4">
+            <motion.div variants={perfMode ? undefined : SHEET_ITEM_VARIANTS} className="mb-4">
               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 pl-1">
                 Category
               </label>
@@ -1292,12 +1309,16 @@ function AddProductModal({
                         : 200
                     }%`,
                   }}
-                  transition={{
-                    type: "spring",
-                    stiffness: 400,
-                    damping: 30,
-                    mass: 0.65,
-                  }}
+                  transition={
+                    perfMode
+                      ? { duration: 0 }
+                      : {
+                          type: "spring",
+                          stiffness: 400,
+                          damping: 30,
+                          mass: 0.65,
+                        }
+                  }
                   style={{ width: "calc((100% - 8px) / 3)" }}
                   className="absolute top-1 bottom-1 left-1 bg-[#e0e7ff] dark:bg-indigo-500/25 rounded-full border border-indigo-200/70 dark:border-indigo-400/30 shadow-2xs pointer-events-none transform-gpu will-change-transform"
                 />
@@ -1325,12 +1346,12 @@ function AddProductModal({
           </div>
 
           <motion.div
-            variants={SHEET_ITEM_VARIANTS}
+            variants={perfMode ? undefined : SHEET_ITEM_VARIANTS}
             className="pt-2 bg-transparent shrink-0"
           >
             <motion.button
-              whileHover={isSubmitting ? undefined : { scale: 1.01, y: -1 }}
-              whileTap={isSubmitting ? undefined : { scale: 0.975, y: 1 }}
+              whileHover={isSubmitting || perfMode ? undefined : { scale: 1.01, y: -1 }}
+              whileTap={isSubmitting || perfMode ? undefined : { scale: 0.975, y: 1 }}
               disabled={isSubmitting}
               onClick={() => {
                 if (!isSubmitting) {
@@ -1373,6 +1394,7 @@ function AddStockModal({
   const [searchQuery, setSearchQuery] = useState("");
   const [isMobile, setIsMobile] = useState(false);
   const [stockError, setStockError] = useState("");
+  const perfMode = isPerformanceModeEnabled();
   const stockDragControls = useDragControls();
 
   React.useEffect(() => {
@@ -1455,10 +1477,10 @@ function AddStockModal({
   return (
     <div className="fixed inset-0 z-[70] flex items-end justify-center p-0">
       <motion.div
-        initial={{ opacity: 0 }}
+        initial={perfMode ? false : { opacity: 0 }}
         animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={SHEET_BACKDROP_TRANSITION}
+        exit={perfMode ? undefined : { opacity: 0 }}
+        transition={perfMode ? { duration: 0 } : SHEET_BACKDROP_TRANSITION}
         onClick={onClose}
         className="absolute inset-0 bg-slate-950/45 dark:bg-slate-950/70 backdrop-blur-md transform-gpu"
       />
@@ -1500,25 +1522,33 @@ function AddStockModal({
             }
           }
         }}
-        initial={{ y: "100%", opacity: 0.6, height: targetSheetHeight }}
+        initial={perfMode ? false : { y: "100%", opacity: 0.6, height: targetSheetHeight }}
         animate={{
           y: 0,
           opacity: 1,
           height: targetSheetHeight,
         }}
-        exit={{
-          y: "104%",
-          opacity: 0,
-          transition: {
-            y: { duration: 0.2, ease: [0.32, 0, 0.67, 0] },
-            opacity: { duration: 0.16, ease: "easeIn" },
-          },
-        }}
-        transition={{
-          y: { type: "spring", stiffness: 390, damping: 32, mass: 0.8 },
-          height: { type: "spring", stiffness: 370, damping: 32, mass: 0.8 },
-          opacity: { duration: 0.18, ease: "easeOut" },
-        }}
+        exit={
+          perfMode
+            ? undefined
+            : {
+                y: "104%",
+                opacity: 0,
+                transition: {
+                  y: { duration: 0.2, ease: [0.32, 0, 0.67, 0] },
+                  opacity: { duration: 0.16, ease: "easeIn" },
+                },
+              }
+        }
+        transition={
+          perfMode
+            ? { duration: 0 }
+            : {
+                y: { type: "spring", stiffness: 390, damping: 32, mass: 0.8 },
+                height: { type: "spring", stiffness: 370, damping: 32, mass: 0.8 },
+                opacity: { duration: 0.18, ease: "easeOut" },
+              }
+        }
         className="bg-[#fcf8ff] dark:bg-[#161923] w-full max-w-lg p-5 pb-6 sm:pb-6 relative z-10 flex flex-col rounded-t-[2.5rem] rounded-b-none border-b-0 max-h-[92dvh] overflow-visible shadow-2xl border border-slate-200/80 dark:border-white/[0.08] transform-gpu will-change-transform"
       >
         <div

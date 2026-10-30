@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Shield, Settings, X, User } from 'lucide-react';
 import { useAuth } from '../lib/AuthContext';
 import { triggerHaptic } from '../lib/haptics';
+import { isPerformanceModeEnabled } from '../lib/utils';
 import { useNavigate } from 'react-router-dom';
 
 const sheetVariants = {
@@ -73,7 +74,14 @@ export function ProfileMenu() {
   const { user, isAdmin, isRealAdmin } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const [imageError, setImageError] = useState(false);
+  const [perfMode, setPerfMode] = useState(() => isPerformanceModeEnabled());
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const syncPerf = () => setPerfMode(isPerformanceModeEnabled());
+    window.addEventListener('performanceModeChanged', syncPerf);
+    return () => window.removeEventListener('performanceModeChanged', syncPerf);
+  }, []);
 
   useEffect(() => {
     setImageError(false);
@@ -141,10 +149,10 @@ export function ProfileMenu() {
           {isOpen && (
             <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-4 sm:p-0">
               <motion.div
-                initial={{ opacity: 0 }}
+                initial={perfMode ? false : { opacity: 0 }}
                 animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+                exit={perfMode ? undefined : { opacity: 0 }}
+                transition={perfMode ? { duration: 0 } : { duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
                 onClick={() => {
                   triggerHaptic("light");
                   setIsOpen(false);
@@ -152,14 +160,14 @@ export function ProfileMenu() {
                 className="absolute inset-0 bg-slate-900/45 dark:bg-slate-950/70 backdrop-blur-md transform-gpu"
               />
               <motion.div
-                variants={sheetVariants}
-                initial="hidden"
-                animate="visible"
-                exit="exit"
+                variants={perfMode ? undefined : sheetVariants}
+                initial={perfMode ? false : "hidden"}
+                animate={perfMode ? undefined : "visible"}
+                exit={perfMode ? undefined : "exit"}
                 className="bg-[#fcf8ff] dark:bg-[#161923] border border-slate-200/80 dark:border-white/[0.08] shadow-2xl w-full max-w-sm p-6 relative z-10 overflow-hidden rounded-[2.25rem] origin-bottom sm:origin-center transform-gpu will-change-[transform,opacity,filter]"
               >
                 <motion.div
-                  variants={itemVariants}
+                  variants={perfMode ? undefined : itemVariants}
                   className="flex justify-between items-center mb-6"
                 >
                   <div>
@@ -185,9 +193,9 @@ export function ProfileMenu() {
                   </div>
                   <motion.button
                     type="button"
-                    whileHover={{ scale: 1.06, rotate: 90 }}
-                    whileTap={{ scale: 0.9 }}
-                    transition={{ type: "spring", stiffness: 450, damping: 26 }}
+                    whileHover={perfMode ? undefined : { scale: 1.06, rotate: 90 }}
+                    whileTap={perfMode ? undefined : { scale: 0.9 }}
+                    transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 450, damping: 26 }}
                     onClick={() => {
                       triggerHaptic("light");
                       setIsOpen(false);
@@ -201,9 +209,9 @@ export function ProfileMenu() {
                 <div className="space-y-2 text-slate-900 dark:text-slate-100">
                   <motion.button
                     type="button"
-                    variants={itemVariants}
-                    whileHover={{ x: 3 }}
-                    whileTap={{ scale: 0.975 }}
+                    variants={perfMode ? undefined : itemVariants}
+                    whileHover={perfMode ? undefined : { x: 3 }}
+                    whileTap={perfMode ? undefined : { scale: 0.975 }}
                     onClick={() => {
                       triggerHaptic('light');
                       setIsOpen(false);
@@ -222,9 +230,9 @@ export function ProfileMenu() {
 
                   <motion.button
                     type="button"
-                    variants={itemVariants}
-                    whileHover={{ x: 3 }}
-                    whileTap={{ scale: 0.975 }}
+                    variants={perfMode ? undefined : itemVariants}
+                    whileHover={perfMode ? undefined : { x: 3 }}
+                    whileTap={perfMode ? undefined : { scale: 0.975 }}
                     onClick={() => {
                       triggerHaptic('medium');
                       if (isAdmin || isRealAdmin) {
@@ -246,9 +254,9 @@ export function ProfileMenu() {
 
                   <motion.button
                     type="button"
-                    variants={itemVariants}
-                    whileHover={{ x: 3 }}
-                    whileTap={{ scale: 0.975 }}
+                    variants={perfMode ? undefined : itemVariants}
+                    whileHover={perfMode ? undefined : { x: 3 }}
+                    whileTap={perfMode ? undefined : { scale: 0.975 }}
                     onClick={() => {
                       triggerHaptic('light');
                       setIsOpen(false);

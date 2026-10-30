@@ -9,7 +9,7 @@ import { Bill } from '../lib/firestoreHooks';
 import { useAuth } from '../lib/AuthContext';
 import { triggerHaptic } from '../lib/haptics';
 import { BillReceiptModal } from '../components/BillReceiptModal';
-import { formatPrice, useOptimizedTransition, useHardwareAcceleration } from '../lib/utils';
+import { formatPrice, useOptimizedTransition, useHardwareAcceleration, isPerformanceModeEnabled } from '../lib/utils';
 
 const formatDateToDMY = (timestamp: number | string | Date) => {
   const d = new Date(timestamp);
@@ -130,7 +130,12 @@ export function AllBills() {
         </div>
       </header>
 
-      <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.1 }} className="flex-1 flex flex-col">
+      <motion.div
+        initial={isPerformanceModeEnabled() ? false : { y: 20, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={isPerformanceModeEnabled() ? { duration: 0 } : { delay: 0.1 }}
+        className="flex-1 flex flex-col"
+      >
         <div className="relative mb-5">
             <input 
                 type="text" 
@@ -181,20 +186,26 @@ export function AllBills() {
                     animate={{ opacity: 1 }}
                     className="space-y-3"
                   >
-                    {group.items.map((bill, idx) => (
+                    {group.items.map((bill, idx) => {
+                      const perfMode = isPerformanceModeEnabled();
+                      return (
                       <motion.li 
-                        layout
-                        initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                        layout={!perfMode}
+                        initial={perfMode ? false : { opacity: 0, y: 10, scale: 0.97 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
-                        whileHover={{ y: -1.5, scale: 1.005 }}
-                        whileTap={{ scale: 0.975 }}
-                        transition={{
-                          type: "spring",
-                          stiffness: 480,
-                          damping: 32,
-                          mass: 0.65,
-                          delay: Math.min(idx * 0.025, 0.15),
-                        }}
+                        whileHover={perfMode ? undefined : { y: -1.5, scale: 1.005 }}
+                        whileTap={perfMode ? undefined : { scale: 0.975 }}
+                        transition={
+                          perfMode
+                            ? { duration: 0 }
+                            : {
+                                type: "spring",
+                                stiffness: 480,
+                                damping: 32,
+                                mass: 0.65,
+                                delay: Math.min(idx * 0.025, 0.15),
+                              }
+                        }
                         key={bill.id ? `${bill.id}_${idx}` : `bill_${group.key}_${idx}`} 
                         onClick={() => { triggerHaptic('heavy'); setSelectedBill(bill); }} 
                         className="glass-card p-4 flex items-center justify-between transition-colors cursor-pointer group transform-gpu"
@@ -223,7 +234,8 @@ export function AllBills() {
                         </div>
                         <span className="font-bold text-slate-900 dark:text-slate-100 font-mono text-lg shrink-0">₹{formatPrice(bill.total)}</span>
                       </motion.li>
-                    ))}
+                      );
+                    })}
                   </motion.ul>
                 </div>
               ))}

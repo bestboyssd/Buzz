@@ -146,6 +146,10 @@ function AppContent() {
     latestRelease,
     checkingVersion,
     isOutdated,
+    canPassUpdate,
+    graceDaysLeft,
+    passedThisSession,
+    passUpdateThisTime,
     refreshVersionCheck,
   } = useAppVersionCheck();
   const [performanceMode, setPerformanceMode] = useState<boolean>(() =>
@@ -1647,14 +1651,20 @@ function AppContent() {
         )}
       </AnimatePresence>
 
-      {/* Mandatory App Update Lock Screen & In-App Notification */}
+      {/* App Update In-App Notification & 3-Day Grace / Mandatory Lock Screen */}
       <AnimatePresence>
-        {isOutdated && latestRelease && (
+        {isOutdated && latestRelease && (!passedThisSession || !canPassUpdate) && (
           <div className="fixed inset-0 z-[10000] flex flex-col items-center justify-between p-4 sm:p-6 select-none overflow-y-auto">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
+              onClick={() => {
+                if (canPassUpdate) {
+                  triggerHaptic("light");
+                  passUpdateThisTime();
+                }
+              }}
               className="fixed inset-0 bg-slate-950/85 dark:bg-[#06080f]/92 backdrop-blur-xl pointer-events-auto"
             />
 
@@ -1663,23 +1673,45 @@ function AppContent() {
               initial={{ opacity: 0, y: -16, scale: 0.96 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -12, scale: 0.96 }}
-              className="relative z-10 w-full max-w-sm mt-2 sm:mt-4 bg-rose-500/15 dark:bg-rose-500/15 border border-rose-500/35 rounded-2xl px-4 py-3 flex items-center gap-3 shadow-lg"
+              className={`relative z-10 w-full max-w-sm mt-2 sm:mt-4 rounded-2xl px-4 py-3 flex items-center gap-3 shadow-lg border ${
+                canPassUpdate
+                  ? "bg-amber-500/15 dark:bg-amber-500/15 border-amber-500/35"
+                  : "bg-rose-500/15 dark:bg-rose-500/15 border-rose-500/35"
+              }`}
             >
               <span className="relative flex h-2.5 w-2.5 shrink-0">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-500" />
+                <span
+                  className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                    canPassUpdate ? "bg-amber-400" : "bg-rose-400"
+                  }`}
+                />
+                <span
+                  className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                    canPassUpdate ? "bg-amber-500" : "bg-rose-500"
+                  }`}
+                />
               </span>
               <div className="min-w-0 flex-1 text-left">
-                <p className="text-[11px] font-extrabold uppercase tracking-wider text-rose-600 dark:text-rose-300 leading-tight">
-                  App Outdated • Update Required
+                <p
+                  className={`text-[11px] font-extrabold uppercase tracking-wider leading-tight ${
+                    canPassUpdate
+                      ? "text-amber-600 dark:text-amber-300"
+                      : "text-rose-600 dark:text-rose-300"
+                  }`}
+                >
+                  {canPassUpdate
+                    ? `App Outdated • ${graceDaysLeft} ${graceDaysLeft === 1 ? "Day" : "Days"} Grace Left`
+                    : "App Outdated • Update Required"}
                 </p>
                 <p className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate mt-0.5">
-                  Buzz v{latestRelease.version} is required to continue
+                  {canPassUpdate
+                    ? `Update to v${latestRelease.version} within ${graceDaysLeft} ${graceDaysLeft === 1 ? "day" : "days"}`
+                    : `3-day grace ended — v${latestRelease.version} required to continue`}
                 </p>
               </div>
             </motion.div>
 
-            {/* Center Mandatory Update Card */}
+            {/* Center Update Card */}
             <motion.div
               initial={{ scale: 0.94, opacity: 0, y: 16 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
@@ -1691,16 +1723,26 @@ function AppContent() {
                 <Download size={30} strokeWidth={2.25} />
               </div>
 
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/25 text-[10px] font-extrabold uppercase tracking-widest mb-2.5">
-                Mandatory Update
+              <span
+                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border text-[10px] font-extrabold uppercase tracking-widest mb-2.5 ${
+                  canPassUpdate
+                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25"
+                    : "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/25"
+                }`}
+              >
+                {canPassUpdate
+                  ? `${graceDaysLeft} ${graceDaysLeft === 1 ? "Day" : "Days"} Left Before Lock`
+                  : "Mandatory Update"}
               </span>
 
               <h2 className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white mb-2">
-                Update Buzz POS
+                {canPassUpdate ? "New Update Available" : "Update Required"}
               </h2>
 
               <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed mb-5">
-                Your installed version of Buzz POS is outdated. To keep your store inventory and billing in sync, please download and install the latest version.
+                {canPassUpdate
+                  ? `A newer version of Buzz POS (v${latestRelease.version}) is available. You can pass this time and continue using the app for ${graceDaysLeft} more ${graceDaysLeft === 1 ? "day" : "days"}, after which updating is mandatory.`
+                  : "Your 3-day update grace period has expired. Please download and install the latest version to continue using Buzz POS."}
               </p>
 
               {/* Version Comparison Box */}
@@ -1754,18 +1796,33 @@ function AppContent() {
                   <span>Update Now (Download APK)</span>
                 </button>
 
-                <button
-                  type="button"
-                  disabled={checkingVersion}
-                  onClick={() => {
-                    triggerHaptic("light");
-                    refreshVersionCheck();
-                  }}
-                  className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 active:scale-[0.98] text-slate-600 dark:text-slate-300 font-bold rounded-xl text-xs border border-slate-200/80 dark:border-white/[0.06] transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-                >
-                  <RefreshCw size={13} className={checkingVersion ? "animate-spin" : ""} />
-                  <span>{checkingVersion ? "Checking version..." : "Already updated? Check again"}</span>
-                </button>
+                {canPassUpdate ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic("light");
+                      passUpdateThisTime();
+                    }}
+                    className="w-full py-3 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/90 dark:hover:bg-slate-800 active:scale-[0.98] text-slate-700 dark:text-slate-200 font-bold rounded-2xl text-xs border border-slate-200/80 dark:border-white/[0.07] transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <span>
+                      Pass This Time ({graceDaysLeft} {graceDaysLeft === 1 ? "day" : "days"} left)
+                    </span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={checkingVersion}
+                    onClick={() => {
+                      triggerHaptic("light");
+                      refreshVersionCheck();
+                    }}
+                    className="w-full py-2.5 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-800 active:scale-[0.98] text-slate-600 dark:text-slate-300 font-bold rounded-xl text-xs border border-slate-200/80 dark:border-white/[0.06] transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw size={13} className={checkingVersion ? "animate-spin" : ""} />
+                    <span>{checkingVersion ? "Checking version..." : "Already updated? Check again"}</span>
+                  </button>
+                )}
               </div>
             </motion.div>
 

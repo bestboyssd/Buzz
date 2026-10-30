@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { ArrowLeft, Plus, Trash2, Calendar, FileText, AlertCircle, TrendingDown, DollarSign, Users, PiggyBank, Check } from 'lucide-react';
 import { triggerHaptic } from '../lib/haptics';
-import { formatPrice, getAppBusinessIsoDate } from '../lib/utils';
+import { formatPrice, getAppBusinessIsoDate, isPerformanceModeEnabled } from '../lib/utils';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { collection, query, onSnapshot, setDoc, deleteDoc, doc, orderBy } from 'firebase/firestore';
 import { useAuth } from '../lib/AuthContext';
@@ -612,20 +612,26 @@ export function OtherCosts() {
                         const shortBillId = item.linkedBillId ? item.linkedBillId.slice(-5).toUpperCase() : '';
                         const subDetail = [item.customerPhone, item.udhaarNote].filter(Boolean).join(' · ');
 
+                        const perfMode = isPerformanceModeEnabled();
+
                         return (
                             <motion.div 
-                                layout
-                                initial={{ opacity: 0, y: 12, scale: 0.97 }}
+                                layout={!perfMode}
+                                initial={perfMode ? false : { opacity: 0, y: 12, scale: 0.97 }}
                                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                                exit={{ opacity: 0, scale: 0.94, y: -6, transition: { duration: 0.16 } }}
-                                whileHover={{ y: -1.5 }}
-                                transition={{
-                                    type: 'spring',
-                                    stiffness: 480,
-                                    damping: 32,
-                                    mass: 0.65,
-                                    delay: Math.min(idx * 0.03, 0.18),
-                                }}
+                                exit={perfMode ? undefined : { opacity: 0, scale: 0.94, y: -6, transition: { duration: 0.16 } }}
+                                whileHover={perfMode ? undefined : { y: -1.5 }}
+                                transition={
+                                    perfMode
+                                        ? { duration: 0 }
+                                        : {
+                                              type: 'spring',
+                                              stiffness: 480,
+                                              damping: 32,
+                                              mass: 0.65,
+                                              delay: Math.min(idx * 0.03, 0.18),
+                                          }
+                                }
                                 key={item.id || `cost_${idx}`}
                                 className="glass-card p-4 relative overflow-hidden group hover:border-slate-300 dark:hover:border-slate-800 transition-colors transform-gpu"
                             >

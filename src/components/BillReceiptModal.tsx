@@ -28,7 +28,7 @@ import {
 } from '../lib/firestoreHooks';
 import { useAuth } from '../lib/AuthContext';
 import { triggerHaptic } from '../lib/haptics';
-import { formatPrice } from '../lib/utils';
+import { formatPrice, isPerformanceModeEnabled } from '../lib/utils';
 import {
   PrinterState,
   getPrinterState,
@@ -550,34 +550,44 @@ export function BillReceiptModal({
     0
   );
 
+  const perfMode = isPerformanceModeEnabled();
+
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 receipt-print-portal">
       {/* Backdrop */}
       <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1, transition: { duration: 0.24, ease: [0.22, 1, 0.36, 1] } }}
-        exit={{ opacity: 0, transition: { duration: 0.18, ease: [0.4, 0, 1, 1] } }}
+        initial={perfMode ? false : { opacity: 0 }}
+        animate={perfMode ? { opacity: 1 } : { opacity: 1, transition: { duration: 0.24, ease: [0.22, 1, 0.36, 1] } }}
+        exit={perfMode ? undefined : { opacity: 0, transition: { duration: 0.18, ease: [0.4, 0, 1, 1] } }}
         onClick={onClose}
         className="absolute inset-0 bg-slate-950/60 dark:bg-slate-950/75 backdrop-blur-md no-print"
       />
 
       {/* Modal Container */}
       <motion.div
-        initial={{ scale: 0.9, opacity: 0, y: 24, filter: 'blur(6px)' }}
-        animate={{
-          scale: 1,
-          opacity: 1,
-          y: 0,
-          filter: 'blur(0px)',
-          transition: { type: 'spring', stiffness: 480, damping: 32, mass: 0.68 },
-        }}
-        exit={{
-          scale: 0.92,
-          opacity: 0,
-          y: 16,
-          filter: 'blur(4px)',
-          transition: { duration: 0.18, ease: [0.32, 0.72, 0, 1] },
-        }}
+        initial={perfMode ? false : { scale: 0.9, opacity: 0, y: 24, filter: 'blur(6px)' }}
+        animate={
+          perfMode
+            ? { scale: 1, opacity: 1, y: 0, filter: 'blur(0px)' }
+            : {
+                scale: 1,
+                opacity: 1,
+                y: 0,
+                filter: 'blur(0px)',
+                transition: { type: 'spring', stiffness: 480, damping: 32, mass: 0.68 },
+              }
+        }
+        exit={
+          perfMode
+            ? undefined
+            : {
+                scale: 0.92,
+                opacity: 0,
+                y: 16,
+                filter: 'blur(4px)',
+                transition: { duration: 0.18, ease: [0.32, 0.72, 0, 1] },
+              }
+        }
         style={{ transformOrigin: 'center center' }}
         className="w-full max-w-md bg-white dark:bg-[#151822] border border-slate-200/90 dark:border-white/[0.08] shadow-2xl relative z-10 max-h-[90vh] overflow-hidden flex flex-col rounded-[2rem] no-print transform-gpu"
       >
@@ -898,14 +908,18 @@ export function BillReceiptModal({
                     {(liveBill.items || []).map((item, idx) => (
                       <motion.div
                         key={idx}
-                        initial={{ opacity: 0, y: 6 }}
+                        initial={perfMode ? false : { opacity: 0, y: 6 }}
                         animate={{ opacity: 1, y: 0 }}
-                        transition={{
-                          type: 'spring',
-                          stiffness: 500,
-                          damping: 32,
-                          delay: Math.min(idx * 0.035, 0.2),
-                        }}
+                        transition={
+                          perfMode
+                            ? { duration: 0 }
+                            : {
+                                type: 'spring',
+                                stiffness: 500,
+                                damping: 32,
+                                delay: Math.min(idx * 0.035, 0.2),
+                              }
+                        }
                         className="flex justify-between items-start gap-3 text-xs py-1 border-b border-slate-200/50 dark:border-white/[0.04] last:border-b-0"
                       >
                         <div className="min-w-0">

@@ -3709,15 +3709,19 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               actionData
             );
 
+            const safeActionData = actionData
+              ? JSON.parse(JSON.stringify(actionData))
+              : null;
+
             serverSeenFinishedAt.set(docSnap.id, Date.now());
             await setDoc(
               doc(db!, "settings", docSnap.id),
               {
                 status: "completed",
                 reply: replyText,
-                action: actionData || null,
-                thought: richThought,
-                modelUsed: activeModel,
+                action: safeActionData,
+                thought: String(richThought || ""),
+                modelUsed: String(activeModel || PRIMARY_AI_MODEL),
                 completedAt: Date.now(),
               },
               { merge: true }
@@ -3760,7 +3764,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
 
     attachRpcListener();
 
-    // Backup poll every 2s so even if the Node.js WebChannel stream stalls, mobile RPC requests are answered immediately
+    // Backup poll every 800ms so even if the Node.js WebChannel stream stalls, mobile RPC requests are answered immediately
     setInterval(async () => {
       if (!db) return;
       try {
@@ -3771,7 +3775,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
           }
         });
       } catch {}
-    }, 2000);
+    }, 800);
   }
 
   process.on("SIGTERM", () => {

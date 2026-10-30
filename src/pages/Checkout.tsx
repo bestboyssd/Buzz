@@ -7,7 +7,7 @@ import { checkoutNewBill, logActivity, updateBill, revertBillFromHold, Product, 
 import { useAuth } from '../lib/AuthContext';
 import { useGlobalProducts } from '../lib/ProductsContext';
 import { triggerHaptic } from '../lib/haptics';
-import { formatPrice, MAX_BILL_AMOUNT, useOptimizedTransition, useHardwareAcceleration } from '../lib/utils';
+import { formatPrice, MAX_BILL_AMOUNT, useOptimizedTransition, useHardwareAcceleration, isPerformanceModeEnabled } from '../lib/utils';
 import { BadgeCheck, ShoppingCart, Minus, Plus, Trash2, ArrowLeft, PauseCircle, User, Phone, FileText, X } from 'lucide-react';
 import { ProfileMenu } from '../components/ProfileMenu';
 import { ProductImagePlaceholder } from '../components/ProductImagePlaceholder';
@@ -478,19 +478,25 @@ export function Checkout() {
                     const isEditingQty = Object.prototype.hasOwnProperty.call(editingQuantities, prodId);
                     const isEditingPrice = Object.prototype.hasOwnProperty.call(editingPrices, prodId);
 
+                    const perfMode = isPerformanceModeEnabled();
+
                     return (
                       <motion.div
-                        layout
-                        initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                        layout={!perfMode}
+                        initial={perfMode ? false : { opacity: 0, y: 10, scale: 0.97 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.94, y: -6, transition: { duration: 0.16 } }}
-                        transition={{
-                          type: 'spring',
-                          stiffness: 480,
-                          damping: 32,
-                          mass: 0.65,
-                          delay: Math.min(idx * 0.03, 0.15),
-                        }}
+                        exit={perfMode ? undefined : { opacity: 0, scale: 0.94, y: -6, transition: { duration: 0.16 } }}
+                        transition={
+                          perfMode
+                            ? { duration: 0 }
+                            : {
+                                type: 'spring',
+                                stiffness: 480,
+                                damping: 32,
+                                mass: 0.65,
+                                delay: Math.min(idx * 0.03, 0.15),
+                              }
+                        }
                         key={item.product.id ? `cart_${item.product.id}` : `cart_item_${idx}`}
                         className="flex justify-between items-center gap-2.5 sm:gap-3 bg-white/75 dark:bg-slate-850/80 p-2.5 sm:p-3 rounded-2xl text-slate-800 dark:text-slate-100 border border-slate-200/70 dark:border-slate-800 shadow-xs transform-gpu"
                       >

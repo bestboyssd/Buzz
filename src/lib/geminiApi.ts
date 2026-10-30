@@ -260,49 +260,49 @@ export const ROLE_MODIFICATION_REFUSAL_REPLY =
  * Strips binary/base64 image payloads and caps collection arrays so AI requests remain ultra-lean (<15KB).
  */
 export function compactStoreContext(ctx: StoreContext): StoreContext {
-  return {
+  const safeObj: StoreContext = {
     products: (ctx.products || []).slice(0, 80).map((p) => ({
-      id: p.id,
-      name: p.name,
-      price: Number(p.price) || 0,
-      stock: Number(p.stock) || 0,
-      category: normalizeProductCategory(p.category, p.name),
-      soldCount: Number(p.soldCount) || 0,
+      id: String(p?.id || ""),
+      name: String(p?.name || ""),
+      price: Number(p?.price) || 0,
+      stock: Number(p?.stock) || 0,
+      category: normalizeProductCategory(p?.category, p?.name),
+      soldCount: Number(p?.soldCount) || 0,
     })),
     recentBills: (ctx.recentBills || []).slice(0, 12).map((b) => ({
-      id: b.id,
-      total: Number(b.total) || 0,
-      date: b.date,
-      status: b.status || "completed",
-      items: (b.items || []).slice(0, 10).map((i: any) => ({
-        productId: i.productId,
-        name: i.name,
-        price: Number(i.price) || 0,
-        quantity: Number(i.quantity) || 1,
+      id: String(b?.id || ""),
+      total: Number(b?.total) || 0,
+      date: Number(b?.date) || Date.now(),
+      status: String(b?.status || "completed"),
+      items: (b?.items || []).slice(0, 10).map((i: any) => ({
+        productId: String(i?.productId || i?.id || ""),
+        name: String(i?.name || ""),
+        price: Number(i?.price) || 0,
+        quantity: Number(i?.quantity) || 1,
       })),
     })),
     otherCosts: (ctx.otherCosts || []).slice(0, 15).map((c) => ({
-      id: c.id,
-      title: c.title,
-      amount: Number(c.amount) || 0,
-      category: c.category || "expense",
-      date: c.date,
+      id: String(c?.id || ""),
+      title: String(c?.title || ""),
+      amount: Number(c?.amount) || 0,
+      category: String(c?.category || "expense"),
+      date: Number(c?.date) || Date.now(),
     })),
     accounts: (ctx.accounts || []).slice(0, 20).map((a) => ({
-      uid: a.uid,
-      displayName: a.displayName,
-      email: a.email,
-      role: a.role,
-      isAdmin: Boolean(a.isAdmin),
-      isSuperAdmin: Boolean(a.isSuperAdmin),
-      isOnline: Boolean(a.isOnline),
+      uid: String(a?.uid || ""),
+      displayName: String(a?.displayName || "User"),
+      email: String(a?.email || ""),
+      role: String(a?.role || (a?.isAdmin ? "Admin" : "Standard User")),
+      isAdmin: Boolean(a?.isAdmin),
+      isSuperAdmin: Boolean(a?.isSuperAdmin),
+      isOnline: Boolean(a?.isOnline),
     })),
     activityLogs: (ctx.activityLogs || []).slice(0, 15).map((l) => ({
-      id: l.id,
-      action: l.action,
-      details: String(l.details || "").slice(0, 160),
-      userName: l.userName,
-      timestamp: l.timestamp,
+      id: String(l?.id || ""),
+      action: String(l?.action || ""),
+      details: String(l?.details || "").slice(0, 160),
+      userName: String(l?.userName || "User"),
+      timestamp: Number(l?.timestamp) || Date.now(),
     })),
     totalRevenueToday: Number(ctx.totalRevenueToday) || 0,
     billsCountToday: Number(ctx.billsCountToday) || 0,
@@ -317,6 +317,7 @@ export function compactStoreContext(ctx: StoreContext): StoreContext {
         }
       : null,
   };
+  return JSON.parse(JSON.stringify(safeObj));
 }
 
 const CLIENT_PLACEHOLDER_TITLES = new Set([
@@ -733,7 +734,7 @@ async function askViaFirestoreBridge(
       }
     );
 
-    // Poll getDocFromServer every 650ms so Android WebViews with experimentalForceLongPolling
+    // Poll getDocFromServer every 400ms so Android WebViews with experimentalForceLongPolling
     // receive streaming/completed responses immediately without waiting on long-poll stream re-registration
     pollInterval = setInterval(async () => {
       if (settled) return;
@@ -743,16 +744,32 @@ async function askViaFirestoreBridge(
           handleDocData(snap.data());
         }
       } catch {}
-    }, 650);
+    }, 400);
 
-    setDoc(reqRef, {
-      type: "chat",
-      status: "pending",
-      prompt: prompt.trim().slice(0, 1200),
-      conversationHistory: compactedHistory,
-      storeContext: compactedContext,
-      createdAt: Date.now(),
-    }).catch((err) => {
+    // Non-blocking wake ping so Cloud Run allocates CPU immediately while processing the Firestore RPC
+    try {
+      for (const candidateUrl of getCandidateApiBaseUrls()) {
+        if (candidateUrl) {
+          fetch(`${candidateUrl}/api/health?t=${Date.now()}`, {
+            mode: "no-cors",
+            cache: "no-store",
+          }).catch(() => {});
+        }
+      }
+    } catch {}
+
+    const safePayload = JSON.parse(
+      JSON.stringify({
+        type: "chat",
+        status: "pending",
+        prompt: prompt.trim().slice(0, 1200),
+        conversationHistory: compactedHistory || [],
+        storeContext: compactedContext || {},
+        createdAt: Date.now(),
+      })
+    );
+
+    setDoc(reqRef, safePayload).catch((err) => {
       if (!settled) {
         settled = true;
         clearTimeout(timer);

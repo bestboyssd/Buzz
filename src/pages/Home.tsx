@@ -6,6 +6,7 @@ import {
   MAX_BILL_AMOUNT,
   useOptimizedTransition,
   useHardwareAcceleration,
+  isPerformanceModeEnabled,
 } from "../lib/utils";
 import { Search, ShoppingBag, X, Minus, Plus, ArrowRight, AlertTriangle } from "lucide-react";
 import { useGlobalBills } from "../lib/BillsContext";
@@ -386,20 +387,26 @@ export function Home() {
               pPrice > 0 && totalAmount + pPrice > MAX_BILL_AMOUNT;
             const disableAdd = isOutOfStock || isMaxAdded;
 
+            const perfMode = isPerformanceModeEnabled();
+
             return (
               <motion.div
                 key={product.id ? `pos_${product.id}` : `product_${idx}`}
-                initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                initial={perfMode ? false : { opacity: 0, y: 12, scale: 0.96 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                whileHover={!disableAdd ? { y: -2, scale: 1.01 } : undefined}
-                whileTap={!disableAdd ? { scale: 0.96 } : undefined}
-                transition={{
-                  type: "spring",
-                  stiffness: 480,
-                  damping: 30,
-                  mass: 0.65,
-                  delay: Math.min(idx * 0.03, 0.18),
-                }}
+                whileHover={!disableAdd && !perfMode ? { y: -2, scale: 1.01 } : undefined}
+                whileTap={!disableAdd && !perfMode ? { scale: 0.96 } : undefined}
+                transition={
+                  perfMode
+                    ? { duration: 0 }
+                    : {
+                        type: "spring",
+                        stiffness: 480,
+                        damping: 30,
+                        mass: 0.65,
+                        delay: Math.min(idx * 0.03, 0.18),
+                      }
+                }
                 onContextMenu={(e) => e.preventDefault()}
                 onPointerDown={(e) => startProductHold(e, product, disableAdd, wouldExceedMaxBill)}
                 onPointerMove={moveProductHold}
