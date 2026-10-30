@@ -207,9 +207,22 @@ export function Admin() {
     restoreProductsOptimistic,
   } = useGlobalProducts();
   const { bills: globalBills, clearBillsOptimistic, restoreBillsOptimistic } = useGlobalBills();
-  const [isAuthenticated, setIsAuthenticated] = useState(
-    () => isRealAdmin || sessionStorage.getItem("adminAuth") === "true"
+  const normCurrentEmail = String(user?.email || "").trim().toLowerCase();
+  const hasDirectAdminAccess = Boolean(
+    isRealAdmin ||
+      isAdmin ||
+      normCurrentEmail === "suman.das.199972@gmail.com" ||
+      (user?.uid &&
+        (localStorage.getItem(`is_real_admin_cached_${user.uid}`) === "true" ||
+          localStorage.getItem(`is_admin_cached_${user.uid}`) === "true")) ||
+      (normCurrentEmail &&
+        localStorage.getItem(`is_admin_email_${normCurrentEmail}`) === "true")
   );
+
+  const [isAuthenticated, setIsAuthenticated] = useState(
+    () => hasDirectAdminAccess || sessionStorage.getItem("adminAuth") === "true"
+  );
+  const effectiveIsAuthenticated = isAuthenticated || hasDirectAdminAccess;
   const [pin, setPin] = useState("");
   const pinRef = useRef("");
   const isUnlockingRef = useRef(false);
@@ -231,10 +244,10 @@ export function Admin() {
 
   // Automatically bypass PIN login screen if the current account is a real admin
   useEffect(() => {
-    if (isRealAdmin) {
+    if (hasDirectAdminAccess) {
       handleSetAuthenticated(true);
     }
-  }, [isRealAdmin]);
+  }, [hasDirectAdminAccess]);
 
   // Safety net: whenever all 4 dots turn green (success === true), guarantee transition to Admin Panel
   useEffect(() => {
@@ -575,7 +588,7 @@ export function Admin() {
   const fetchAccounts = async () => {
     setAccountsLoading(true);
     setAccountsPermissionError(false);
-    if (!isAuthenticated || !user) {
+    if (!effectiveIsAuthenticated || !user) {
       setAccountsPermissionError(true);
       setAccountsLoading(false);
       return;
@@ -606,7 +619,7 @@ export function Admin() {
   };
 
   useEffect(() => {
-    if (!isAuthenticated || !user) return;
+    if (!effectiveIsAuthenticated || !user) return;
 
     let isMounted = true;
     let retryTimer: any = null;
@@ -654,10 +667,10 @@ export function Admin() {
       if (retryTimer) clearTimeout(retryTimer);
       if (unsubscribeSnapshot) unsubscribeSnapshot();
     };
-  }, [isAuthenticated, user?.uid, isAdmin]);
+  }, [effectiveIsAuthenticated, user?.uid, isAdmin]);
 
   useEffect(() => {
-    if (isAuthenticated && user) {
+    if (effectiveIsAuthenticated && user) {
       setActivityLogsLoading(true);
       setActivityLogsPermissionError(false);
       const q = query(
@@ -686,11 +699,11 @@ export function Admin() {
       );
       return () => unsubscribe();
     }
-  }, [isAuthenticated, user, isAdmin, refreshLogsTrigger]);
+  }, [effectiveIsAuthenticated, user, isAdmin, refreshLogsTrigger]);
 
   // Real-time Sync Conflicts listener
   useEffect(() => {
-    if (isAuthenticated && user) {
+    if (effectiveIsAuthenticated && user) {
       setSyncConflictsLoading(true);
       const unsubscribe = onSnapshot(
         collection(db, "sync_conflicts"),
@@ -714,7 +727,7 @@ export function Admin() {
       );
       return () => unsubscribe();
     }
-  }, [isAuthenticated, user, isAdmin, refreshConflictsTrigger]);
+  }, [effectiveIsAuthenticated, user, isAdmin, refreshConflictsTrigger]);
 
   const handleResolveConflictVoid = async (conflict: SyncConflictRecord) => {
     if (!user || resolvingConflictId) return;
@@ -3320,12 +3333,13 @@ export function Admin() {
 
   const handleExitAdmin = () => {
     triggerHaptic("light");
-    sessionStorage.removeItem("adminAuth");
-    localStorage.removeItem("tempAdminAuth");
-    if (user) {
-      localStorage.removeItem(`tempAdminAuth_${user.uid}`);
+    if (!hasDirectAdminAccess) {
+      sessionStorage.removeItem("adminAuth");
+      localStorage.removeItem("tempAdminAuth");
+      if (user) {
+        localStorage.removeItem(`tempAdminAuth_${user.uid}`);
+      }
     }
-    setIsAuthenticated(false);
     navigate("/");
   };
 
@@ -3994,7 +4008,7 @@ export function Admin() {
       document.body
     );
 
-  if (isAuthenticated) {
+  if (effectiveIsAuthenticated) {
     if (isChangingPin) {
       return (
         <motion.div

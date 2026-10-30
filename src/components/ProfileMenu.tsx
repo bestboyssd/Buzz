@@ -70,7 +70,7 @@ const itemVariants = {
 };
 
 export function ProfileMenu() {
-  const { user, isAdmin } = useAuth();
+  const { user, isAdmin, isRealAdmin } = useAuth();
   const [isOpen, setIsOpen] = useState(false);
   const [imageError, setImageError] = useState(false);
   const navigate = useNavigate();
@@ -167,7 +167,7 @@ export function ProfileMenu() {
                       <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">
                         Quick Actions
                       </h2>
-                      {isAdmin ? (
+                      {isAdmin || isRealAdmin ? (
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800">
                           Admin
                         </span>
@@ -227,6 +227,9 @@ export function ProfileMenu() {
                     whileTap={{ scale: 0.975 }}
                     onClick={() => {
                       triggerHaptic('medium');
+                      if (isAdmin || isRealAdmin) {
+                        sessionStorage.setItem('adminAuth', 'true');
+                      }
                       setIsOpen(false);
                       navigate('/admin');
                     }}

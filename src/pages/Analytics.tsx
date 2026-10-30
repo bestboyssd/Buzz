@@ -2756,9 +2756,13 @@ export function Analytics() {
                   <div className="flex items-center gap-1.5">
                     <button
                       type="button"
-                      onClick={() => stepZReportDate(-1)}
-                      aria-label="Previous day"
-                      className="w-9 h-9 shrink-0 aspect-square rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-sm flex items-center justify-center active:scale-95 transition-all cursor-pointer"
+                      onClick={() => stepZReportDate(1)}
+                      disabled={
+                        zReportDatePreset === 'today' ||
+                        zReportData.targetIsoDate === getAppBusinessIsoDate()
+                      }
+                      aria-label="Newer day (towards Today)"
+                      className="w-9 h-9 shrink-0 aspect-square rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-35 disabled:pointer-events-none text-slate-700 dark:text-slate-200 font-bold text-sm flex items-center justify-center active:scale-95 transition-all cursor-pointer"
                     >
                       ‹
                     </button>
@@ -2849,10 +2853,9 @@ export function Analytics() {
 
                     <button
                       type="button"
-                      onClick={() => stepZReportDate(1)}
-                      disabled={zReportDatePreset === 'today'}
-                      aria-label="Next day"
-                      className="w-9 h-9 shrink-0 aspect-square rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-35 disabled:pointer-events-none text-slate-700 dark:text-slate-200 font-bold text-sm flex items-center justify-center active:scale-95 transition-all cursor-pointer"
+                      onClick={() => stepZReportDate(-1)}
+                      aria-label="Previous day (towards Yesterday)"
+                      className="w-9 h-9 shrink-0 aspect-square rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-sm flex items-center justify-center active:scale-95 transition-all cursor-pointer"
                     >
                       ›
                     </button>

@@ -78,6 +78,7 @@ const formatDateToDMY = (timestamp: number | string | Date) => {
 
 function AnimatedRoutes() {
   const location = useLocation();
+  const { isAdmin, isRealAdmin } = useAuth();
 
   useEffect(() => {
     // Reset main scroll container to top on route navigation
@@ -86,13 +87,17 @@ function AnimatedRoutes() {
       scrollContainer.scrollTo({ top: 0, left: 0, behavior: "instant" as ScrollBehavior });
     }
 
-    // Clear admin auth when visiting non-admin pages
-    const adminRoutes = ["/admin", "/all-bills", "/analytics", "/other-costs"];
-    if (!adminRoutes.includes(location.pathname)) {
-      sessionStorage.removeItem("adminAuth");
-      window.dispatchEvent(new Event("adminAuthChanged"));
+    // Keep adminAuth active for permanent admins; only clear temporary PIN unlock when leaving admin pages
+    if (isRealAdmin || isAdmin) {
+      sessionStorage.setItem("adminAuth", "true");
+    } else {
+      const adminRoutes = ["/admin", "/all-bills", "/analytics", "/other-costs"];
+      if (!adminRoutes.includes(location.pathname)) {
+        sessionStorage.removeItem("adminAuth");
+        window.dispatchEvent(new Event("adminAuthChanged"));
+      }
     }
-  }, [location.pathname]);
+  }, [location.pathname, isAdmin, isRealAdmin]);
 
   return (
     <AnimatePresence mode="wait">

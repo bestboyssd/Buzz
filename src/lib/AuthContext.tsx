@@ -115,10 +115,34 @@ const wipeLocalAccountCache = (uid: string) => {
 };
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<User | null>(() => auth.currentUser);
   const [loading, setLoading] = useState(true);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [isRealAdmin, setIsRealAdmin] = useState(false);
+  const [isAdmin, setIsAdmin] = useState<boolean>(() => {
+    const u = auth.currentUser;
+    if (!u) return false;
+    const email = (u.email || u.providerData?.find((p) => p.email)?.email || "")
+      .trim()
+      .toLowerCase();
+    return (
+      email === "suman.das.199972@gmail.com" ||
+      localStorage.getItem(`is_admin_cached_${u.uid}`) === "true" ||
+      localStorage.getItem(`is_real_admin_cached_${u.uid}`) === "true" ||
+      Boolean(email && localStorage.getItem(`is_admin_email_${email}`) === "true")
+    );
+  });
+  const [isRealAdmin, setIsRealAdmin] = useState<boolean>(() => {
+    const u = auth.currentUser;
+    if (!u) return false;
+    const email = (u.email || u.providerData?.find((p) => p.email)?.email || "")
+      .trim()
+      .toLowerCase();
+    return (
+      email === "suman.das.199972@gmail.com" ||
+      localStorage.getItem(`is_real_admin_cached_${u.uid}`) === "true" ||
+      localStorage.getItem(`is_admin_cached_${u.uid}`) === "true" ||
+      Boolean(email && localStorage.getItem(`is_admin_email_${email}`) === "true")
+    );
+  });
   const [failedAttempts, setFailedAttempts] = useState(0);
   const [lockedByAdmin, setLockedByAdmin] = useState(false);
   const skipProfileWriteRef = useRef(false);
@@ -274,12 +298,25 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         setLoading(false);
 
         // Load instantly from cache
+        const normInitialEmail = resolvedEmail.trim().toLowerCase();
         const cachedAdminRaw = localStorage.getItem(`is_admin_cached_${currentUser.uid}`);
         const cachedRealAdminRaw = localStorage.getItem(`is_real_admin_cached_${currentUser.uid}`);
+        const cachedEmailAdminRaw = normInitialEmail
+          ? localStorage.getItem(`is_admin_email_${normInitialEmail}`)
+          : null;
         const cachedAdmin =
-          cachedAdminRaw === "true" || (cachedAdminRaw === null && isOwner);
+          cachedAdminRaw === "true" ||
+          cachedRealAdminRaw === "true" ||
+          cachedEmailAdminRaw === "true" ||
+          (cachedAdminRaw === null && isOwner);
         const cachedRealAdmin =
-          cachedRealAdminRaw === "true" || (cachedRealAdminRaw === null && isOwner);
+          cachedRealAdminRaw === "true" ||
+          cachedAdminRaw === "true" ||
+          cachedEmailAdminRaw === "true" ||
+          (cachedRealAdminRaw === null && isOwner);
+        if (cachedRealAdmin) {
+          sessionStorage.setItem("adminAuth", "true");
+        }
         setIsAdmin(cachedAdmin);
         setIsRealAdmin(cachedRealAdmin);
 
@@ -415,6 +452,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               localStorage.removeItem(`tempAdminAuth_${currentUser.uid}`);
 
               // Update admin state and cache immediately
+              if (makeAdmin) {
+                sessionStorage.setItem("adminAuth", "true");
+              }
               setIsAdmin(makeAdmin);
               setIsRealAdmin(makeAdmin);
               localStorage.setItem(
@@ -425,6 +465,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 `is_real_admin_cached_${currentUser.uid}`,
                 makeAdmin ? "true" : "false"
               );
+              if (normEmail) {
+                localStorage.setItem(
+                  `is_admin_email_${normEmail}`,
+                  makeAdmin ? "true" : "false"
+                );
+              }
 
               if (customPhotoURL) {
                 localStorage.setItem(
@@ -479,6 +525,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               }).catch(() => {});
 
               makeAdmin = isOwner;
+              if (makeAdmin) {
+                sessionStorage.setItem("adminAuth", "true");
+              }
               setIsAdmin(makeAdmin);
               setIsRealAdmin(makeAdmin);
               localStorage.setItem(
@@ -489,6 +538,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 `is_real_admin_cached_${currentUser.uid}`,
                 makeAdmin ? "true" : "false"
               );
+              if (normEmail) {
+                localStorage.setItem(
+                  `is_admin_email_${normEmail}`,
+                  makeAdmin ? "true" : "false"
+                );
+              }
               theme = systemDefaultTheme;
               hapticsEnabled = true;
               notifications = true;
@@ -802,9 +857,15 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             "Your account was deleted by an administrator. You can sign in again to create a new account."
           );
           return;
+        } else if (!isOwner) {
+          // Document not yet present in local cache before initial server write/fetch completes — preserve current cached admin state
+          return;
         }
         localStorage.removeItem("tempAdminAuth");
         localStorage.removeItem(`tempAdminAuth_${user.uid}`);
+        if (userIsRealAdmin) {
+          sessionStorage.setItem("adminAuth", "true");
+        }
         setIsAdmin(userIsRealAdmin);
         setIsRealAdmin(userIsRealAdmin);
         localStorage.setItem(
@@ -815,6 +876,13 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           `is_real_admin_cached_${user.uid}`,
           userIsRealAdmin ? "true" : "false"
         );
+        const normSnapEmail = String(user.email || "").trim().toLowerCase();
+        if (normSnapEmail) {
+          localStorage.setItem(
+            `is_admin_email_${normSnapEmail}`,
+            userIsRealAdmin ? "true" : "false"
+          );
+        }
       },
       (err) => {
         console.warn("Profile listener error bypassed", err);
