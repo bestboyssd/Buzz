@@ -179,6 +179,23 @@ public class MainActivity extends BridgeActivity {
                 return false;
             }
         }
+
+        @JavascriptInterface
+        public boolean openExternalDownload(String url) {
+            try {
+                if (url == null || url.trim().isEmpty()) return false;
+                android.content.Intent intent = new android.content.Intent(
+                    android.content.Intent.ACTION_VIEW,
+                    Uri.parse(url.trim())
+                );
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+                return true;
+            } catch (Exception e) {
+                e.printStackTrace();
+                return false;
+            }
+        }
     }
 
     @Override
