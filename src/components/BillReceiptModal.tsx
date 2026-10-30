@@ -555,27 +555,43 @@ export function BillReceiptModal({
       {/* Backdrop */}
       <motion.div
         initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.2 }}
+        animate={{ opacity: 1, transition: { duration: 0.24, ease: [0.22, 1, 0.36, 1] } }}
+        exit={{ opacity: 0, transition: { duration: 0.18, ease: [0.4, 0, 1, 1] } }}
         onClick={onClose}
         className="absolute inset-0 bg-slate-950/60 dark:bg-slate-950/75 backdrop-blur-md no-print"
       />
 
       {/* Modal Container */}
       <motion.div
-        initial={{ scale: 0.92, opacity: 0, y: 16 }}
-        animate={{ scale: 1, opacity: 1, y: 0 }}
-        exit={{ scale: 0.92, opacity: 0, y: 12 }}
-        transition={{ type: 'spring', stiffness: 380, damping: 30, mass: 0.8 }}
-        className="w-full max-w-md bg-white dark:bg-[#151822] border border-slate-200/90 dark:border-white/[0.08] shadow-2xl relative z-10 max-h-[90vh] overflow-hidden flex flex-col rounded-[2rem] no-print"
+        initial={{ scale: 0.9, opacity: 0, y: 24, filter: 'blur(6px)' }}
+        animate={{
+          scale: 1,
+          opacity: 1,
+          y: 0,
+          filter: 'blur(0px)',
+          transition: { type: 'spring', stiffness: 480, damping: 32, mass: 0.68 },
+        }}
+        exit={{
+          scale: 0.92,
+          opacity: 0,
+          y: 16,
+          filter: 'blur(4px)',
+          transition: { duration: 0.18, ease: [0.32, 0.72, 0, 1] },
+        }}
+        style={{ transformOrigin: 'center center' }}
+        className="w-full max-w-md bg-white dark:bg-[#151822] border border-slate-200/90 dark:border-white/[0.08] shadow-2xl relative z-10 max-h-[90vh] overflow-hidden flex flex-col rounded-[2rem] no-print transform-gpu"
       >
         {/* Top Modal Bar */}
         <div className="px-5 pt-5 pb-3.5 flex justify-between items-center border-b border-slate-100 dark:border-white/[0.06] shrink-0">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 flex items-center justify-center text-indigo-600 dark:text-indigo-400">
+            <motion.div
+              initial={{ scale: 0.8, rotate: -8 }}
+              animate={{ scale: 1, rotate: 0 }}
+              transition={{ type: 'spring', stiffness: 500, damping: 24 }}
+              className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 flex items-center justify-center text-indigo-600 dark:text-indigo-400"
+            >
               <Receipt size={18} />
-            </div>
+            </motion.div>
             <div>
               <h2 className="text-base font-extrabold text-slate-900 dark:text-slate-100 leading-tight">
                 Receipt Details
@@ -585,8 +601,11 @@ export function BillReceiptModal({
               </p>
             </div>
           </div>
-          <button
+          <motion.button
             type="button"
+            whileHover={{ scale: 1.06, rotate: 90 }}
+            whileTap={{ scale: 0.9 }}
+            transition={{ type: 'spring', stiffness: 500, damping: 24 }}
             onClick={() => {
               triggerHaptic('light');
               onClose();
@@ -595,7 +614,7 @@ export function BillReceiptModal({
             className="w-9 h-9 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/80 dark:hover:bg-slate-700 rounded-full flex items-center justify-center text-slate-500 dark:text-slate-400 transition-colors cursor-pointer"
           >
             <X size={18} />
-          </button>
+          </motion.button>
         </div>
 
         {/* Body Content: Switches cleanly between Receipt View and Thermal Print Stage */}
@@ -877,8 +896,16 @@ export function BillReceiptModal({
                   {/* Line Items */}
                   <div className="space-y-2.5 max-h-44 overflow-y-auto pr-0.5">
                     {(liveBill.items || []).map((item, idx) => (
-                      <div
+                      <motion.div
                         key={idx}
+                        initial={{ opacity: 0, y: 6 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{
+                          type: 'spring',
+                          stiffness: 500,
+                          damping: 32,
+                          delay: Math.min(idx * 0.035, 0.2),
+                        }}
                         className="flex justify-between items-start gap-3 text-xs py-1 border-b border-slate-200/50 dark:border-white/[0.04] last:border-b-0"
                       >
                         <div className="min-w-0">
@@ -892,94 +919,119 @@ export function BillReceiptModal({
                         <span className="font-mono tabular-nums font-bold text-slate-900 dark:text-slate-100 shrink-0">
                           ₹{formatPrice((Number(item.quantity) || 0) * (Number(item.price) || 0))}
                         </span>
-                      </div>
+                      </motion.div>
                     ))}
                   </div>
                 </div>
 
                 {/* Put on Udhar Customer Details Panel */}
                 <div className="mb-3.5">
-                  {editingUdhaar ? (
-                    <div className="p-3.5 rounded-2xl bg-amber-50/70 dark:bg-amber-500/10 border border-amber-200/80 dark:border-amber-500/25 space-y-2.5">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-extrabold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
-                          <User size={14} />
-                          Customer Udhar Details
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setEditingUdhaar(false)}
-                          className="text-[11px] font-bold text-slate-500 hover:text-slate-700 dark:text-slate-400"
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <AnimatePresence mode="wait" initial={false}>
+                    {editingUdhaar ? (
+                      <motion.div
+                        key="editing-udhaar-form"
+                        initial={{ opacity: 0, y: 8, scale: 0.97 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, y: -6, scale: 0.97 }}
+                        transition={{ type: 'spring', stiffness: 500, damping: 30, mass: 0.65 }}
+                        className="p-3.5 rounded-2xl bg-amber-50/70 dark:bg-amber-500/10 border border-amber-200/80 dark:border-amber-500/25 space-y-2.5"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-extrabold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                            <User size={14} />
+                            Customer Udhar Details
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setEditingUdhaar(false)}
+                            className="text-[11px] font-bold text-slate-500 hover:text-slate-700 dark:text-slate-400 cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          <input
+                            type="text"
+                            required
+                            value={customerName}
+                            onChange={(e) => {
+                              setCustomerName(e.target.value);
+                              if (actionError) setActionError('');
+                            }}
+                            placeholder="Customer Name (Required)"
+                            className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white"
+                          />
+                          <input
+                            type="tel"
+                            value={customerPhone}
+                            onChange={(e) =>
+                              setCustomerPhone(e.target.value.replace(/[^0-9+\-\s]/g, ''))
+                            }
+                            placeholder="Phone Number"
+                            className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-mono font-bold text-slate-900 dark:text-white"
+                          />
+                        </div>
                         <input
                           type="text"
-                          required
-                          value={customerName}
-                          onChange={(e) => {
-                            setCustomerName(e.target.value);
-                            if (actionError) setActionError('');
-                          }}
-                          placeholder="Customer Name (Required)"
-                          className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white"
+                          value={udhaarNote}
+                          onChange={(e) => setUdhaarNote(e.target.value)}
+                          placeholder="Optional note (e.g. promised date)"
+                          className="w-full px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-900 dark:text-white"
                         />
-                        <input
-                          type="tel"
-                          value={customerPhone}
-                          onChange={(e) =>
-                            setCustomerPhone(e.target.value.replace(/[^0-9+\-\s]/g, ''))
-                          }
-                          placeholder="Phone Number"
-                          className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-mono font-bold text-slate-900 dark:text-white"
-                        />
-                      </div>
-                      <input
-                        type="text"
-                        value={udhaarNote}
-                        onChange={(e) => setUdhaarNote(e.target.value)}
-                        placeholder="Optional note (e.g. promised date)"
-                        className="w-full px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-900 dark:text-white"
-                      />
-                      <button
-                        type="button"
-                        disabled={savingUdhaar}
-                        onClick={handleSaveUdhaar}
-                        className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold transition-colors cursor-pointer"
-                      >
-                        {savingUdhaar ? 'Saving...' : 'Save Udhar'}
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          triggerHaptic('selection');
-                          setEditingUdhaar(true);
-                        }}
-                        className="flex-1 py-2 px-3 rounded-xl bg-amber-500/12 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/25 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                      >
-                        <User size={14} />
-                        <span>
-                          {liveBill.isUdhar ? 'Edit Udhar' : 'Put on Udhar'}
-                        </span>
-                      </button>
-                      {liveBill.isUdhar && (
-                        <button
+                        <motion.button
                           type="button"
+                          whileHover={{ scale: 1.01 }}
+                          whileTap={{ scale: 0.96 }}
+                          transition={{ type: 'spring', stiffness: 500, damping: 26 }}
                           disabled={savingUdhaar}
-                          onClick={handleSettleBill}
-                          className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                          onClick={handleSaveUdhaar}
+                          className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold transition-colors cursor-pointer"
                         >
-                          <Check size={14} />
-                          <span>Settle Udhar</span>
-                        </button>
-                      )}
-                    </div>
-                  )}
+                          {savingUdhaar ? 'Saving...' : 'Save Udhar'}
+                        </motion.button>
+                      </motion.div>
+                    ) : (
+                      <motion.div
+                        key="udhaar-buttons-row"
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -4 }}
+                        transition={{ duration: 0.16 }}
+                        className="flex items-center gap-2"
+                      >
+                        <motion.button
+                          type="button"
+                          whileHover={{ scale: 1.015, y: -1 }}
+                          whileTap={{ scale: 0.96 }}
+                          transition={{ type: 'spring', stiffness: 500, damping: 26 }}
+                          onClick={() => {
+                            triggerHaptic('selection');
+                            setEditingUdhaar(true);
+                          }}
+                          className="flex-1 py-2 px-3 rounded-xl bg-amber-500/12 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/25 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                        >
+                          <User size={14} />
+                          <span>
+                            {liveBill.isUdhar ? 'Edit Udhar' : 'Put on Udhar'}
+                          </span>
+                        </motion.button>
+                        {liveBill.isUdhar && (
+                          <motion.button
+                            type="button"
+                            whileHover={{ scale: 1.015, y: -1 }}
+                            whileTap={{ scale: 0.96 }}
+                            transition={{ type: 'spring', stiffness: 500, damping: 26 }}
+                            disabled={savingUdhaar}
+                            onClick={handleSettleBill}
+                            className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                          >
+                            <Check size={14} />
+                            <span>Settle Udhar</span>
+                          </motion.button>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
                 </div>
 
                 {/* Expandable Bluetooth/Thermal Printer Guide */}
@@ -1006,6 +1058,7 @@ export function BillReceiptModal({
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
+                        transition={{ type: 'spring', stiffness: 440, damping: 32 }}
                         className="overflow-hidden mt-1 text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed bg-slate-50 dark:bg-slate-900/90 p-3 rounded-xl border border-slate-200/60 dark:border-slate-800 space-y-1.5"
                       >
                         <p className="font-bold text-slate-700 dark:text-slate-300">
@@ -1033,59 +1086,88 @@ export function BillReceiptModal({
                 </div>
 
                 {/* Action Footer */}
-                {confirming ? (
-                  <div className="mt-auto pt-3 border-t border-red-500/20 text-center">
-                    <p className="mb-3 text-xs font-bold text-red-600 dark:text-red-400">
-                      Delete this bill and restore items to stock?
-                    </p>
-                    <div className="grid grid-cols-2 gap-2.5">
-                      <button
+                <AnimatePresence mode="wait" initial={false}>
+                  {confirming ? (
+                    <motion.div
+                      key="confirm-delete-footer"
+                      initial={{ opacity: 0, y: 8, scale: 0.98 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      exit={{ opacity: 0, y: 6, scale: 0.98 }}
+                      transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                      className="mt-auto pt-3 border-t border-red-500/20 text-center"
+                    >
+                      <p className="mb-3 text-xs font-bold text-red-600 dark:text-red-400">
+                        Delete this bill and restore items to stock?
+                      </p>
+                      <div className="grid grid-cols-2 gap-2.5">
+                        <motion.button
+                          type="button"
+                          whileHover={{ scale: 1.015 }}
+                          whileTap={{ scale: 0.96 }}
+                          onClick={() => setConfirming(false)}
+                          className="py-2.5 rounded-xl text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-bold transition-colors cursor-pointer"
+                        >
+                          Cancel
+                        </motion.button>
+                        <motion.button
+                          type="button"
+                          whileHover={{ scale: 1.015 }}
+                          whileTap={{ scale: 0.96 }}
+                          onClick={handleDelete}
+                          className="py-2.5 rounded-xl text-white bg-red-600 hover:bg-red-700 text-xs font-bold transition-colors shadow-sm shadow-red-600/20 cursor-pointer"
+                        >
+                          Confirm Delete
+                        </motion.button>
+                      </div>
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key="standard-action-footer"
+                      initial={{ opacity: 0, y: 6 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -6 }}
+                      transition={{ duration: 0.16 }}
+                      className="mt-auto grid grid-cols-3 gap-2.5 pt-2"
+                    >
+                      <motion.button
                         type="button"
-                        onClick={() => setConfirming(false)}
-                        className="py-2.5 rounded-xl text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-bold transition-colors cursor-pointer"
+                        whileHover={{ scale: 1.02, y: -1 }}
+                        whileTap={{ scale: 0.94 }}
+                        transition={{ type: 'spring', stiffness: 500, damping: 26 }}
+                        onClick={handleEdit}
+                        className="flex items-center justify-center gap-1.5 py-3 rounded-xl text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/15 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-bold transition-colors cursor-pointer"
                       >
-                        Cancel
-                      </button>
-                      <button
+                        <Edit2 size={15} />
+                        <span>Edit</span>
+                      </motion.button>
+                      <motion.button
                         type="button"
-                        onClick={handleDelete}
-                        className="py-2.5 rounded-xl text-white bg-red-600 hover:bg-red-700 text-xs font-bold transition-colors shadow-sm shadow-red-600/20 cursor-pointer"
+                        whileHover={{ scale: 1.02, y: -1 }}
+                        whileTap={{ scale: 0.94 }}
+                        transition={{ type: 'spring', stiffness: 500, damping: 26 }}
+                        onClick={handlePrint}
+                        className="flex items-center justify-center gap-1.5 py-3 rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 text-xs font-bold transition-colors shadow-sm shadow-indigo-600/25 cursor-pointer"
                       >
-                        Confirm Delete
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="mt-auto grid grid-cols-3 gap-2.5 pt-2">
-                    <button
-                      type="button"
-                      onClick={handleEdit}
-                      className="flex items-center justify-center gap-1.5 py-3 rounded-xl text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-500/15 hover:bg-indigo-100 dark:hover:bg-indigo-500/25 text-xs font-bold transition-colors cursor-pointer active:scale-95"
-                    >
-                      <Edit2 size={15} />
-                      <span>Edit</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handlePrint}
-                      className="flex items-center justify-center gap-1.5 py-3 rounded-xl text-white bg-indigo-600 hover:bg-indigo-700 text-xs font-bold transition-colors shadow-sm shadow-indigo-600/25 cursor-pointer active:scale-95"
-                    >
-                      <Printer size={15} />
-                      <span>Print</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        triggerHaptic('medium');
-                        setConfirming(true);
-                      }}
-                      className="flex items-center justify-center gap-1.5 py-3 rounded-xl text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/15 hover:bg-red-100 dark:hover:bg-red-500/25 text-xs font-bold transition-colors cursor-pointer active:scale-95"
-                    >
-                      <Trash2 size={15} />
-                      <span>Delete</span>
-                    </button>
-                  </div>
-                )}
+                        <Printer size={15} />
+                        <span>Print</span>
+                      </motion.button>
+                      <motion.button
+                        type="button"
+                        whileHover={{ scale: 1.02, y: -1 }}
+                        whileTap={{ scale: 0.94 }}
+                        transition={{ type: 'spring', stiffness: 500, damping: 26 }}
+                        onClick={() => {
+                          triggerHaptic('medium');
+                          setConfirming(true);
+                        }}
+                        className="flex items-center justify-center gap-1.5 py-3 rounded-xl text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/15 hover:bg-red-100 dark:hover:bg-red-500/25 text-xs font-bold transition-colors cursor-pointer"
+                      >
+                        <Trash2 size={15} />
+                        <span>Delete</span>
+                      </motion.button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </motion.div>
             )}
           </AnimatePresence>

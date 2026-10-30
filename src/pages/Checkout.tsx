@@ -461,6 +461,7 @@ export function Checkout() {
                 </div>
 
                 <div className="flex-1 min-h-0 overflow-y-auto mb-2 space-y-2.5 p-1 -mx-1 custom-scrollbar">
+                  <AnimatePresence initial={false}>
                   {cart.map((item, idx) => {
                     const prodId = item.product.id || `idx_${idx}`;
                     const imgUrl = item.product.image ? getImageUrl(item.product.image) : null;
@@ -478,9 +479,20 @@ export function Checkout() {
                     const isEditingPrice = Object.prototype.hasOwnProperty.call(editingPrices, prodId);
 
                     return (
-                      <div
+                      <motion.div
+                        layout
+                        initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.94, y: -6, transition: { duration: 0.16 } }}
+                        transition={{
+                          type: 'spring',
+                          stiffness: 480,
+                          damping: 32,
+                          mass: 0.65,
+                          delay: Math.min(idx * 0.03, 0.15),
+                        }}
                         key={item.product.id ? `cart_${item.product.id}` : `cart_item_${idx}`}
-                        className="flex justify-between items-center gap-2.5 sm:gap-3 bg-white/75 dark:bg-slate-850/80 p-2.5 sm:p-3 rounded-2xl text-slate-800 dark:text-slate-100 border border-slate-200/70 dark:border-slate-800 shadow-xs"
+                        className="flex justify-between items-center gap-2.5 sm:gap-3 bg-white/75 dark:bg-slate-850/80 p-2.5 sm:p-3 rounded-2xl text-slate-800 dark:text-slate-100 border border-slate-200/70 dark:border-slate-800 shadow-xs transform-gpu"
                       >
                         <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 overflow-hidden">
                           <div className="w-12 h-12 sm:w-14 sm:h-14 shrink-0 rounded-xl overflow-hidden relative border border-slate-200/60 dark:border-slate-700/60 bg-slate-50 dark:bg-slate-900/50">
@@ -731,9 +743,10 @@ export function Checkout() {
                             <Plus size={14} strokeWidth={2.5} />
                           </motion.button>
                         </div>
-                      </div>
+                      </motion.div>
                     );
                   })}
+                  </AnimatePresence>
                 </div>
 
                 <div className="shrink-0 pt-3 border-t border-slate-200/70 dark:border-slate-800 flex flex-col gap-2">
@@ -892,22 +905,40 @@ export function Checkout() {
             <motion.div
               key="udhaar-hold-modal"
               initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
+              animate={{ opacity: 1, transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] } }}
+              exit={{ opacity: 0, transition: { duration: 0.16, ease: [0.4, 0, 1, 1] } }}
+              onClick={() => setShowHoldModal(false)}
               className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/60 dark:bg-slate-950/80 backdrop-blur-md"
             >
               <motion.div
-                initial={{ scale: 0.94, opacity: 0, y: 12 }}
-                animate={{ scale: 1, opacity: 1, y: 0 }}
-                exit={{ scale: 0.94, opacity: 0, y: 10 }}
-                transition={{ type: 'spring', stiffness: 380, damping: 28 }}
-                className="w-full max-w-md bg-white dark:bg-[#151822] border border-slate-200/90 dark:border-white/[0.08] p-5 sm:p-6 rounded-[2rem] shadow-2xl relative z-10 max-h-[90vh] overflow-y-auto"
+                initial={{ scale: 0.9, opacity: 0, y: 22, filter: 'blur(6px)' }}
+                animate={{
+                  scale: 1,
+                  opacity: 1,
+                  y: 0,
+                  filter: 'blur(0px)',
+                  transition: { type: 'spring', stiffness: 480, damping: 32, mass: 0.68 },
+                }}
+                exit={{
+                  scale: 0.92,
+                  opacity: 0,
+                  y: 14,
+                  filter: 'blur(4px)',
+                  transition: { duration: 0.18, ease: [0.32, 0.72, 0, 1] },
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className="w-full max-w-md bg-white dark:bg-[#151822] border border-slate-200/90 dark:border-white/[0.08] p-5 sm:p-6 rounded-[2rem] shadow-2xl relative z-10 max-h-[90vh] overflow-y-auto transform-gpu"
               >
                 <div className="flex items-center justify-between pb-3.5 mb-4 border-b border-slate-100 dark:border-white/[0.06]">
                   <div className="flex items-center gap-2.5">
-                    <div className="w-9 h-9 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center">
+                    <motion.div
+                      initial={{ scale: 0.8, rotate: -10 }}
+                      animate={{ scale: 1, rotate: 0 }}
+                      transition={{ type: 'spring', stiffness: 500, damping: 24 }}
+                      className="w-9 h-9 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center"
+                    >
                       <User size={19} />
-                    </div>
+                    </motion.div>
                     <div>
                       <h3 className="text-base font-extrabold text-slate-900 dark:text-white leading-tight">
                         Put on Udhar
@@ -920,13 +951,16 @@ export function Checkout() {
                       </p>
                     </div>
                   </div>
-                  <button
+                  <motion.button
                     type="button"
+                    whileHover={{ scale: 1.06, rotate: 90 }}
+                    whileTap={{ scale: 0.9 }}
+                    transition={{ type: 'spring', stiffness: 500, damping: 24 }}
                     onClick={() => setShowHoldModal(false)}
                     className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors cursor-pointer"
                   >
                     <X size={16} />
-                  </button>
+                  </motion.button>
                 </div>
 
                 <div className="space-y-3">
@@ -1004,8 +1038,11 @@ export function Checkout() {
                 </div>
 
                 <div className="flex items-center gap-2.5 mt-5">
-                  <button
+                  <motion.button
                     type="button"
+                    whileHover={{ scale: 1.015 }}
+                    whileTap={{ scale: 0.96 }}
+                    transition={{ type: 'spring', stiffness: 500, damping: 26 }}
                     onClick={() => {
                       setUdhaarError("");
                       setShowHoldModal(false);
@@ -1013,9 +1050,12 @@ export function Checkout() {
                     className="flex-1 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold transition-colors cursor-pointer"
                   >
                     Cancel
-                  </button>
-                  <button
+                  </motion.button>
+                  <motion.button
                     type="button"
+                    whileHover={{ scale: 1.015, y: -1 }}
+                    whileTap={{ scale: 0.96 }}
+                    transition={{ type: 'spring', stiffness: 500, damping: 26 }}
                     onClick={() => {
                       const trimmedName = customerName.trim();
                       if (!trimmedName) {
@@ -1036,7 +1076,7 @@ export function Checkout() {
                     className="flex-[1.5] py-3 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold shadow-md shadow-amber-500/20 transition-colors cursor-pointer"
                   >
                     Confirm Udhar · ₹{formatPrice(totalAmount)}
-                  </button>
+                  </motion.button>
                 </div>
               </motion.div>
             </motion.div>
@@ -1054,10 +1094,15 @@ export function Checkout() {
                 className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
               />
               <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.9, opacity: 0 }}
-                className="glass-panel w-full max-w-sm p-6 relative z-10 text-center rounded-[2rem]"
+                initial={{ scale: 0.9, opacity: 0, y: 16 }}
+                animate={{
+                  scale: 1,
+                  opacity: 1,
+                  y: 0,
+                  transition: { type: 'spring', stiffness: 480, damping: 30, mass: 0.68 },
+                }}
+                exit={{ scale: 0.92, opacity: 0, y: 10 }}
+                className="glass-panel w-full max-w-sm p-6 relative z-10 text-center rounded-[2rem] transform-gpu"
               >
                 <div className="w-12 h-12 bg-red-50 dark:bg-red-500/10 text-red-500 rounded-full flex items-center justify-center mx-auto mb-3 font-bold text-xl">
                   !
@@ -1068,15 +1113,17 @@ export function Checkout() {
                 <p className="text-xs text-slate-500 dark:text-slate-400 mb-5 leading-relaxed">
                   {errorMessage}
                 </p>
-                <button
+                <motion.button
+                  whileHover={{ scale: 1.015 }}
+                  whileTap={{ scale: 0.96 }}
                   onClick={() => {
                     triggerHaptic('light');
                     setErrorMessage("");
                   }}
-                  className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs"
+                  className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs cursor-pointer"
                 >
                   Dismiss
-                </button>
+                </motion.button>
               </motion.div>
             </div>
           )}

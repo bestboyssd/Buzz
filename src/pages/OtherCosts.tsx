@@ -286,12 +286,15 @@ export function OtherCosts() {
         >
             <header className="mb-8 flex items-center justify-between pl-2">
                 <div className="flex items-center gap-4">
-                    <button 
+                    <motion.button 
+                        whileHover={{ scale: 1.06, x: -1 }}
+                        whileTap={{ scale: 0.9 }}
+                        transition={{ type: 'spring', stiffness: 500, damping: 24 }}
                         onClick={() => { triggerHaptic('heavy'); navigate('/admin'); }}
-                        className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200 dark:bg-slate-700 rounded-full shadow-sm hover:scale-105 active:scale-95 transition-all text-slate-700 dark:text-slate-200 border border-transparent outline-none pointer-events-auto"
+                        className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200 dark:bg-slate-700 rounded-full shadow-sm transition-colors text-slate-700 dark:text-slate-200 border border-transparent outline-none pointer-events-auto cursor-pointer"
                     >
                         <ArrowLeft size={20} />
-                    </button>
+                    </motion.button>
                     <div>
                         <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100">
                             Other <span className="text-indigo-600 dark:text-indigo-400">Costs</span>
@@ -303,7 +306,9 @@ export function OtherCosts() {
                 </div>
                 <motion.button 
                     type="button"
-                    whileTap={{ scale: 0.9 }}
+                    whileHover={{ scale: 1.06 }}
+                    whileTap={{ scale: 0.88 }}
+                    transition={{ type: 'spring', stiffness: 500, damping: 24 }}
                     onClick={() => { triggerHaptic('light'); setIsAdding((prev) => !prev); }}
                     aria-label={isAdding ? 'Close add cost form' : 'Open add cost form'}
                     className={`w-10 h-10 shrink-0 aspect-square rounded-full text-white flex items-center justify-center shadow-lg transition-colors duration-200 cursor-pointer outline-none ${
@@ -315,7 +320,7 @@ export function OtherCosts() {
                     <motion.span
                         initial={false}
                         animate={{ rotate: isAdding ? 45 : 0 }}
-                        transition={{ type: 'spring', stiffness: 420, damping: 28, mass: 0.6 }}
+                        transition={{ type: 'spring', stiffness: 480, damping: 26, mass: 0.6 }}
                         className="flex items-center justify-center origin-center transform-gpu"
                     >
                         <Plus size={22} strokeWidth={2.5} />
@@ -597,7 +602,8 @@ export function OtherCosts() {
                         <p className="text-xs text-slate-500 mt-1">Tap the plus button above to add expenses, borrow accounts, or dynamic dues.</p>
                     </div>
                 ) : (
-                    filteredCosts.map((item, idx) => {
+                    <AnimatePresence initial={false}>
+                    {filteredCosts.map((item, idx) => {
                         const style = getCategoryStyles(item.category);
                         const linkedBill = item.linkedBillId
                             ? bills.find((b) => b.id === item.linkedBillId)
@@ -607,9 +613,21 @@ export function OtherCosts() {
                         const subDetail = [item.customerPhone, item.udhaarNote].filter(Boolean).join(' · ');
 
                         return (
-                            <div 
+                            <motion.div 
+                                layout
+                                initial={{ opacity: 0, y: 12, scale: 0.97 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, scale: 0.94, y: -6, transition: { duration: 0.16 } }}
+                                whileHover={{ y: -1.5 }}
+                                transition={{
+                                    type: 'spring',
+                                    stiffness: 480,
+                                    damping: 32,
+                                    mass: 0.65,
+                                    delay: Math.min(idx * 0.03, 0.18),
+                                }}
                                 key={item.id || `cost_${idx}`}
-                                className="glass-card p-4 relative overflow-hidden group hover:border-slate-300 dark:hover:border-slate-800 transition-colors"
+                                className="glass-card p-4 relative overflow-hidden group hover:border-slate-300 dark:hover:border-slate-800 transition-colors transform-gpu"
                             >
                                 {/* Top Row: Icon + Title/Meta + Amount (+ Delete for standard costs) */}
                                 <div className="flex items-center justify-between gap-3">
@@ -638,8 +656,11 @@ export function OtherCosts() {
                                             -₹{formatPrice(item.amount)}
                                         </span>
                                         {!item.linkedBillId && (
-                                            <button 
+                                            <motion.button 
                                                 type="button"
+                                                whileHover={{ scale: 1.08 }}
+                                                whileTap={{ scale: 0.9 }}
+                                                transition={{ type: 'spring', stiffness: 500, damping: 24 }}
                                                 onClick={() => {
                                                     if (item.id) handleDeleteCost(item.id);
                                                 }}
@@ -647,7 +668,7 @@ export function OtherCosts() {
                                                 title="Delete entry"
                                             >
                                                 <Trash2 size={15} />
-                                            </button>
+                                            </motion.button>
                                         )}
                                     </div>
                                 </div>
@@ -666,8 +687,11 @@ export function OtherCosts() {
                                             )}
                                         </div>
                                         <div className="flex items-center gap-2 shrink-0">
-                                            <button
+                                            <motion.button
                                                 type="button"
+                                                whileHover={{ scale: 1.03, y: -1 }}
+                                                whileTap={{ scale: 0.94 }}
+                                                transition={{ type: 'spring', stiffness: 500, damping: 24 }}
                                                 onClick={() => {
                                                     if (item.id) {
                                                         handleDeleteCost(item.id);
@@ -676,18 +700,19 @@ export function OtherCosts() {
                                                         settleHoldBill(linkedBill).catch(() => {});
                                                     }
                                                 }}
-                                                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white rounded-xl text-[11px] font-bold flex items-center gap-1.5 shadow-2xs transition-all cursor-pointer"
+                                                className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-[11px] font-bold flex items-center gap-1.5 shadow-2xs transition-colors cursor-pointer"
                                                 title="Settle Udhar Bill"
                                             >
                                                 <Check size={13} strokeWidth={2.5} />
                                                 <span>Settle</span>
-                                            </button>
+                                            </motion.button>
                                         </div>
                                     </div>
                                 )}
-                            </div>
+                            </motion.div>
                         );
-                    })
+                    })}
+                    </AnimatePresence>
                 )}
             </div>
         </motion.div>

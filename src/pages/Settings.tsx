@@ -248,15 +248,18 @@ export function Settings() {
       className="pb-2 px-4 pt-12 max-w-lg mx-auto"
     >
       <header className="mb-8 pl-2 flex items-center gap-4">
-        <button
+        <motion.button
+          whileHover={{ scale: 1.06, x: -1 }}
+          whileTap={{ scale: 0.9 }}
+          transition={{ type: "spring", stiffness: 500, damping: 24 }}
           onClick={() => {
             triggerHaptic("heavy");
             navigate(-1);
           }}
-          className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200 dark:bg-slate-700 rounded-full shadow-sm hover:scale-105 active:scale-95 transition-all text-slate-700 dark:text-slate-200 border border-transparent outline-none pointer-events-auto"
+          className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200 dark:bg-slate-700 rounded-full shadow-sm transition-colors text-slate-700 dark:text-slate-200 border border-transparent outline-none pointer-events-auto cursor-pointer"
         >
           <ArrowLeft size={20} />
-        </button>
+        </motion.button>
         <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
           Settings
         </h1>
@@ -422,7 +425,9 @@ function SettingItem({
   onClick?: () => void;
 }) {
   return (
-    <div
+    <motion.div
+      whileTap={onClick ? { scale: 0.985 } : undefined}
+      transition={{ type: "spring", stiffness: 500, damping: 30 }}
       onClick={onClick}
       className={`p-3.5 sm:p-4 flex items-center justify-between gap-3 transition-colors ${
         onClick
@@ -449,7 +454,7 @@ function SettingItem({
         </div>
       </div>
       {action && <div className="shrink-0">{action}</div>}
-    </div>
+    </motion.div>
   );
 }
 

@@ -6751,20 +6751,37 @@ export function Admin() {
                 >
               <motion.div
                 initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
+                animate={{ opacity: 1, transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] } }}
+                exit={{ opacity: 0, transition: { duration: 0.16, ease: [0.4, 0, 1, 1] } }}
                 onClick={() => setLogoutConfirm(false)}
                 className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
               />
               <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.9, opacity: 0 }}
-                className="glass-panel w-full max-w-sm p-6 relative z-10 text-center rounded-[2.5rem]"
+                initial={{ scale: 0.9, opacity: 0, y: 20, filter: "blur(6px)" }}
+                animate={{
+                  scale: 1,
+                  opacity: 1,
+                  y: 0,
+                  filter: "blur(0px)",
+                  transition: { type: "spring", stiffness: 480, damping: 32, mass: 0.68 },
+                }}
+                exit={{
+                  scale: 0.92,
+                  opacity: 0,
+                  y: 12,
+                  filter: "blur(4px)",
+                  transition: { duration: 0.18, ease: [0.32, 0.72, 0, 1] },
+                }}
+                className="glass-panel w-full max-w-sm p-6 relative z-10 text-center rounded-[2.5rem] transform-gpu"
               >
-                <div className="w-16 h-16 bg-amber-50 dark:bg-amber-500/10 rounded-full flex items-center justify-center text-amber-500 mx-auto mb-4">
+                <motion.div
+                  initial={{ scale: 0.7, rotate: -10 }}
+                  animate={{ scale: 1, rotate: 0 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 22 }}
+                  className="w-16 h-16 bg-amber-50 dark:bg-amber-500/10 rounded-full flex items-center justify-center text-amber-500 mx-auto mb-4"
+                >
                   <LogOut size={32} />
-                </div>
+                </motion.div>
                 <h3 className="text-xl font-black text-slate-950 dark:text-white mb-2">
                   Log Out All Others?
                 </h3>
@@ -6775,43 +6792,66 @@ export function Admin() {
                   warning.
                 </p>
                 <div className="grid grid-cols-2 gap-3">
-                  <button
+                  <motion.button
+                    whileHover={{ scale: 1.02 }}
+                    whileTap={{ scale: 0.95 }}
                     onClick={() => setLogoutConfirm(false)}
-                    className="py-3 bg-slate-100 dark:bg-slate-850 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs"
+                    className="py-3 bg-slate-100 dark:bg-slate-850 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold rounded-xl text-xs cursor-pointer"
                   >
                     Cancel
-                  </button>
-                  <button
+                  </motion.button>
+                  <motion.button
+                    whileHover={{ scale: 1.02, y: -1 }}
+                    whileTap={{ scale: 0.95 }}
                     onClick={handleLogoutAllOtherSessions}
-                    className="py-3 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-xs shadow-md shadow-amber-600/30"
+                    className="py-3 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-xl text-xs shadow-md shadow-amber-600/30 cursor-pointer"
                   >
                     Confirm Logout
-                  </button>
+                  </motion.button>
                 </div>
               </motion.div>
             </div>
           )}
 
           {showBroadcastModal && (
-            <div
+            <motion.div
               key="admin-broadcast-modal"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1, transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] } }}
+              exit={{ opacity: 0, transition: { duration: 0.16, ease: [0.4, 0, 1, 1] } }}
               onClick={() => !sendingBroadcast && setShowBroadcastModal(false)}
               className="fixed inset-0 z-[100] flex items-center justify-center p-3.5 sm:p-6 bg-slate-950/75 backdrop-blur-md"
             >
               <motion.div
-                initial={{ opacity: 0, y: 16, scale: 0.96 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 16, scale: 0.96 }}
-                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                initial={{ opacity: 0, y: 24, scale: 0.9, filter: "blur(6px)" }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                  scale: 1,
+                  filter: "blur(0px)",
+                  transition: { type: "spring", stiffness: 480, damping: 32, mass: 0.68 },
+                }}
+                exit={{
+                  opacity: 0,
+                  y: 14,
+                  scale: 0.92,
+                  filter: "blur(4px)",
+                  transition: { duration: 0.18, ease: [0.32, 0.72, 0, 1] },
+                }}
                 onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-md bg-white dark:bg-[#0c1222] border border-slate-200/80 dark:border-slate-800/90 rounded-[28px] shadow-2xl flex flex-col overflow-hidden"
+                className="w-full max-w-md bg-white dark:bg-[#0c1222] border border-slate-200/80 dark:border-slate-800/90 rounded-[28px] shadow-2xl flex flex-col overflow-hidden transform-gpu"
               >
                 {/* Modal Header */}
                 <div className="px-4 py-3.5 border-b border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2.5 shrink-0 bg-white/95 dark:bg-[#0c1222]/95 backdrop-blur-xl">
                   <div className="flex items-center gap-2.5 min-w-0">
-                    <div className="w-9 h-9 bg-indigo-500/10 dark:bg-indigo-500/15 border border-indigo-500/25 rounded-xl flex items-center justify-center text-indigo-600 dark:text-indigo-400 shrink-0">
+                    <motion.div
+                      initial={{ scale: 0.8, rotate: -12 }}
+                      animate={{ scale: 1, rotate: 0 }}
+                      transition={{ type: "spring", stiffness: 500, damping: 22 }}
+                      className="w-9 h-9 bg-indigo-500/10 dark:bg-indigo-500/15 border border-indigo-500/25 rounded-xl flex items-center justify-center text-indigo-600 dark:text-indigo-400 shrink-0"
+                    >
                       <Bell size={17} />
-                    </div>
+                    </motion.div>
                     <div className="min-w-0">
                       <h3 className="text-[15px] font-extrabold text-slate-900 dark:text-white tracking-tight leading-tight">
                         Send Notification
@@ -6821,14 +6861,17 @@ export function Admin() {
                       </p>
                     </div>
                   </div>
-                  <button
+                  <motion.button
                     type="button"
+                    whileHover={{ scale: 1.06, rotate: 90 }}
+                    whileTap={{ scale: 0.9 }}
+                    transition={{ type: "spring", stiffness: 500, damping: 24 }}
                     onClick={() => setShowBroadcastModal(false)}
                     disabled={sendingBroadcast}
-                    className="w-8 h-8 rounded-xl bg-slate-100 dark:bg-slate-800/90 flex items-center justify-center text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white border border-transparent dark:border-slate-700/60 transition-all active:scale-95 shrink-0 cursor-pointer"
+                    className="w-8 h-8 rounded-xl bg-slate-100 dark:bg-slate-800/90 flex items-center justify-center text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white border border-transparent dark:border-slate-700/60 transition-colors shrink-0 cursor-pointer"
                   >
                     <X size={15} />
-                  </button>
+                  </motion.button>
                 </div>
 
                 <form
@@ -7028,29 +7071,48 @@ export function Admin() {
                   </div>
                 </form>
               </motion.div>
-            </div>
+            </motion.div>
           )}
 
           {showBackupModal && (
-            <div
+            <motion.div
               key="admin-backup-modal"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1, transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] } }}
+              exit={{ opacity: 0, transition: { duration: 0.16, ease: [0.4, 0, 1, 1] } }}
               onClick={() => setShowBackupModal(false)}
               className="fixed inset-0 z-[100] flex items-center justify-center p-3.5 sm:p-6 bg-slate-950/75 backdrop-blur-md"
             >
               <motion.div
-                initial={{ opacity: 0, y: 16, scale: 0.96 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 16, scale: 0.96 }}
-                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                initial={{ opacity: 0, y: 24, scale: 0.9, filter: "blur(6px)" }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                  scale: 1,
+                  filter: "blur(0px)",
+                  transition: { type: "spring", stiffness: 480, damping: 32, mass: 0.68 },
+                }}
+                exit={{
+                  opacity: 0,
+                  y: 14,
+                  scale: 0.92,
+                  filter: "blur(4px)",
+                  transition: { duration: 0.18, ease: [0.32, 0.72, 0, 1] },
+                }}
                 onClick={(e) => e.stopPropagation()}
-                className="w-full max-w-md bg-white dark:bg-[#0c1222] border border-slate-200/80 dark:border-slate-800/90 rounded-[28px] shadow-2xl flex flex-col max-h-[90dvh] overflow-hidden"
+                className="w-full max-w-md bg-white dark:bg-[#0c1222] border border-slate-200/80 dark:border-slate-800/90 rounded-[28px] shadow-2xl flex flex-col max-h-[90dvh] overflow-hidden transform-gpu"
               >
                 {/* Header */}
                 <div className="px-5 py-4 border-b border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-3 shrink-0 bg-white/95 dark:bg-[#0c1222]/95 backdrop-blur-xl">
                   <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-10 h-10 bg-indigo-500/10 dark:bg-indigo-500/15 border border-indigo-500/25 rounded-2xl flex items-center justify-center text-indigo-600 dark:text-indigo-400 shrink-0">
+                    <motion.div
+                      initial={{ scale: 0.8, rotate: -10 }}
+                      animate={{ scale: 1, rotate: 0 }}
+                      transition={{ type: "spring", stiffness: 500, damping: 22 }}
+                      className="w-10 h-10 bg-indigo-500/10 dark:bg-indigo-500/15 border border-indigo-500/25 rounded-2xl flex items-center justify-center text-indigo-600 dark:text-indigo-400 shrink-0"
+                    >
                       <Database size={18} />
-                    </div>
+                    </motion.div>
                     <div className="min-w-0">
                       <h3 className="text-base font-extrabold text-slate-900 dark:text-white tracking-tight leading-tight">
                         Data Management
@@ -7060,16 +7122,19 @@ export function Admin() {
                       </p>
                     </div>
                   </div>
-                  <button
+                  <motion.button
                     type="button"
+                    whileHover={{ scale: 1.06, rotate: 90 }}
+                    whileTap={{ scale: 0.9 }}
+                    transition={{ type: "spring", stiffness: 500, damping: 24 }}
                     onClick={() => {
                       triggerHaptic("light");
                       setShowBackupModal(false);
                     }}
-                    className="w-8 h-8 flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800/90 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white border border-transparent dark:border-slate-700/60 transition-all active:scale-95 shrink-0 cursor-pointer"
+                    className="w-8 h-8 flex items-center justify-center rounded-xl bg-slate-100 dark:bg-slate-800/90 text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white border border-transparent dark:border-slate-700/60 transition-colors shrink-0 cursor-pointer"
                   >
                     <X size={15} />
-                  </button>
+                  </motion.button>
                 </div>
 
                 {/* Scrollable Body */}
@@ -7225,7 +7290,7 @@ export function Admin() {
                   </div>
                 </div>
               </motion.div>
-            </div>
+            </motion.div>
           )}
 
           {deleteConfMode !== "none" && (
@@ -7235,20 +7300,37 @@ export function Admin() {
             >
               <motion.div
                 initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
+                animate={{ opacity: 1, transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] } }}
+                exit={{ opacity: 0, transition: { duration: 0.16, ease: [0.4, 0, 1, 1] } }}
                 onClick={() => setDeleteConfMode("none")}
                 className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
               />
               <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.9, opacity: 0 }}
-                className="glass-panel w-full max-w-md p-6 relative z-10 rounded-[2.5rem]"
+                initial={{ scale: 0.9, opacity: 0, y: 22, filter: "blur(6px)" }}
+                animate={{
+                  scale: 1,
+                  opacity: 1,
+                  y: 0,
+                  filter: "blur(0px)",
+                  transition: { type: "spring", stiffness: 480, damping: 32, mass: 0.68 },
+                }}
+                exit={{
+                  scale: 0.92,
+                  opacity: 0,
+                  y: 14,
+                  filter: "blur(4px)",
+                  transition: { duration: 0.18, ease: [0.32, 0.72, 0, 1] },
+                }}
+                className="glass-panel w-full max-w-md p-6 relative z-10 rounded-[2.5rem] transform-gpu"
               >
-                <div className="w-16 h-16 bg-red-100 dark:bg-red-500/10 rounded-full flex items-center justify-center text-red-500 mx-auto mb-4">
+                <motion.div
+                  initial={{ scale: 0.7, rotate: -10 }}
+                  animate={{ scale: 1, rotate: 0 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 22 }}
+                  className="w-16 h-16 bg-red-100 dark:bg-red-500/10 rounded-full flex items-center justify-center text-red-500 mx-auto mb-4"
+                >
                   <AlertTriangle size={32} />
-                </div>
+                </motion.div>
                 <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 text-center mb-1">
                   Purge{" "}
                   {deleteConfMode === "products"

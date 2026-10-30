@@ -113,12 +113,15 @@ export function AllBills() {
       className={`min-h-full flex flex-col pb-2 px-4 pt-12 w-full max-w-lg mx-auto ${gpuClass}`}
     >
       <header className="mb-6 pl-2 flex items-center gap-4">
-        <button 
+        <motion.button 
+          whileHover={{ scale: 1.06, x: -1 }}
+          whileTap={{ scale: 0.9 }}
+          transition={{ type: "spring", stiffness: 500, damping: 24 }}
           onClick={() => navigate('/admin')}
-          className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200 dark:bg-slate-700 rounded-full shadow-sm hover:scale-105 active:scale-95 transition-all text-slate-700 dark:text-slate-200 border border-transparent outline-none pointer-events-auto"
+          className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200 dark:bg-slate-700 rounded-full shadow-sm transition-colors text-slate-700 dark:text-slate-200 border border-transparent outline-none pointer-events-auto cursor-pointer"
         >
           <ArrowLeft size={20} />
-        </button>
+        </motion.button>
         <div>
            <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
              All <span className="text-indigo-600 dark:text-indigo-400">Bills</span>
@@ -180,14 +183,24 @@ export function AllBills() {
                   >
                     {group.items.map((bill, idx) => (
                       <motion.li 
-                        initial={{ opacity: 0, scale: 0.98 }}
-                        animate={{ opacity: 1, scale: 1 }}
+                        layout
+                        initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        whileHover={{ y: -1.5, scale: 1.005 }}
+                        whileTap={{ scale: 0.975 }}
+                        transition={{
+                          type: "spring",
+                          stiffness: 480,
+                          damping: 32,
+                          mass: 0.65,
+                          delay: Math.min(idx * 0.025, 0.15),
+                        }}
                         key={bill.id ? `${bill.id}_${idx}` : `bill_${group.key}_${idx}`} 
                         onClick={() => { triggerHaptic('heavy'); setSelectedBill(bill); }} 
-                        className="glass-card p-4 flex items-center justify-between transition-colors cursor-pointer group"
+                        className="glass-card p-4 flex items-center justify-between transition-colors cursor-pointer group transform-gpu"
                       >
                         <div className="flex gap-4 items-center min-w-0">
-                          <div className="w-12 h-12 shrink-0 rounded-2xl bg-indigo-50/80 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-400 transition-transform text-xs font-bold font-mono">
+                          <div className="w-12 h-12 shrink-0 rounded-2xl bg-indigo-50/80 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-400 group-hover:scale-105 transition-transform text-xs font-bold font-mono">
                               #{bill.id?.slice(-5) || '00000'}
                           </div>
                           <div className="min-w-0">

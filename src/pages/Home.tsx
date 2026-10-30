@@ -389,7 +389,17 @@ export function Home() {
             return (
               <motion.div
                 key={product.id ? `pos_${product.id}` : `product_${idx}`}
-                whileTap={!disableAdd ? { scale: 0.97 } : undefined}
+                initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                whileHover={!disableAdd ? { y: -2, scale: 1.01 } : undefined}
+                whileTap={!disableAdd ? { scale: 0.96 } : undefined}
+                transition={{
+                  type: "spring",
+                  stiffness: 480,
+                  damping: 30,
+                  mass: 0.65,
+                  delay: Math.min(idx * 0.03, 0.18),
+                }}
                 onContextMenu={(e) => e.preventDefault()}
                 onPointerDown={(e) => startProductHold(e, product, disableAdd, wouldExceedMaxBill)}
                 onPointerMove={moveProductHold}
@@ -429,7 +439,7 @@ export function Home() {
                     }
                   }
                 }}
-                className={`group/card flex flex-col justify-between relative overflow-hidden text-slate-800 dark:text-slate-200 transition-all duration-200 rounded-[1.75rem] border select-none ${
+                className={`group/card flex flex-col justify-between relative overflow-hidden text-slate-800 dark:text-slate-200 transition-colors duration-200 rounded-[1.75rem] border select-none transform-gpu ${
                   isOutOfStock
                     ? "cursor-not-allowed bg-white dark:bg-slate-900 border-slate-200/80 dark:border-slate-800/90"
                     : quantityInCart > 0
@@ -453,7 +463,7 @@ export function Home() {
                           decoding="sync"
                           draggable={false}
                           referrerPolicy="no-referrer"
-                          className={`w-full h-full object-cover pointer-events-none ${
+                          className={`w-full h-full object-cover pointer-events-none transition-transform duration-300 group-hover/card:scale-[1.03] ${
                             isOutOfStock ? "opacity-55 grayscale-[30%]" : ""
                           }`}
                         />
@@ -462,7 +472,7 @@ export function Home() {
                           name={product.name}
                           category={product.category}
                           size={72}
-                          className={`w-full h-full ${
+                          className={`w-full h-full transition-transform duration-300 group-hover/card:scale-[1.03] ${
                             isOutOfStock ? "opacity-55 grayscale-[30%]" : ""
                           }`}
                           rounded="rounded-[1.35rem]"
@@ -479,10 +489,10 @@ export function Home() {
                       {quantityInCart > 0 && (
                         <motion.div
                           key={`stepper_${product.id || idx}`}
-                          initial={{ scale: 0.8, opacity: 0 }}
-                          animate={{ scale: 1, opacity: 1 }}
-                          exit={{ scale: 0.8, opacity: 0 }}
-                          transition={{ duration: 0.15 }}
+                          initial={{ scale: 0.72, opacity: 0, y: -4 }}
+                          animate={{ scale: 1, opacity: 1, y: 0 }}
+                          exit={{ scale: 0.72, opacity: 0, y: -4 }}
+                          transition={{ type: "spring", stiffness: 520, damping: 26, mass: 0.6 }}
                           onPointerDown={(e) => e.stopPropagation()}
                           onClick={(e) => e.stopPropagation()}
                           className="absolute top-2 right-2 z-20 flex items-center gap-1 bg-slate-900/90 dark:bg-indigo-600/95 backdrop-blur-md text-white p-1 rounded-full shadow-lg border border-white/15"

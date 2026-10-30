@@ -189,15 +189,18 @@ export function Account() {
     >
       <div className="flex items-center justify-between mb-8">
         <div className="flex items-center gap-4">
-          <button
+          <motion.button
+            whileHover={{ scale: 1.06, x: -1 }}
+            whileTap={{ scale: 0.9 }}
+            transition={{ type: "spring", stiffness: 500, damping: 24 }}
             onClick={() => {
               triggerHaptic("light");
               navigate(-1);
             }}
-            className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200 dark:bg-slate-700 rounded-full shadow-sm hover:scale-105 active:scale-95 transition-all text-slate-700 dark:text-slate-200 border border-transparent outline-none pointer-events-auto"
+            className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200 dark:bg-slate-700 rounded-full shadow-sm transition-colors text-slate-700 dark:text-slate-200 border border-transparent outline-none pointer-events-auto cursor-pointer"
           >
             <ArrowLeft size={20} />
-          </button>
+          </motion.button>
           <div>
             <h1 className="text-2xl font-black text-slate-800 dark:text-slate-100 tracking-tight">
               Profile
@@ -207,15 +210,23 @@ export function Account() {
             </p>
           </div>
         </div>
-        <button
+        <motion.button
+          whileHover={{ scale: 1.06 }}
+          whileTap={{ scale: 0.9 }}
+          transition={{ type: "spring", stiffness: 500, damping: 24 }}
           onClick={handleSignOut}
-          className="w-12 h-12 flex items-center justify-center bg-red-50 dark:bg-red-500/10 hover:bg-red-100 dark:hover:bg-red-500/20 text-red-600 dark:text-red-400 rounded-2xl shadow-sm border border-red-100 dark:border-red-900/30 hover:scale-105 active:scale-95 transition-all"
+          className="w-12 h-12 flex items-center justify-center bg-red-50 dark:bg-red-500/10 hover:bg-red-100 dark:hover:bg-red-500/20 text-red-600 dark:text-red-400 rounded-2xl shadow-sm border border-red-100 dark:border-red-900/30 transition-colors cursor-pointer"
         >
           <LogOut size={22} className="ml-1" />
-        </button>
+        </motion.button>
       </div>
 
-      <div className="glass-panel p-6 sm:p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden">
+      <motion.div
+        initial={{ opacity: 0, y: 12, scale: 0.98 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ type: "spring", stiffness: 460, damping: 32, mass: 0.7 }}
+        className="glass-panel p-6 sm:p-8 rounded-[2.5rem] shadow-2xl relative overflow-hidden"
+      >
         <AnimatePresence mode="wait">
           {error && (
             <motion.div
@@ -244,11 +255,14 @@ export function Account() {
         </AnimatePresence>
 
         <form onSubmit={handleUpdate} className="flex flex-col items-center">
-          <div
+          <motion.div
+            whileHover={{ scale: 1.03 }}
+            whileTap={{ scale: 0.95 }}
+            transition={{ type: "spring", stiffness: 480, damping: 26 }}
             className="relative group cursor-pointer mb-6"
             onClick={handlePickImage}
           >
-            <div className="w-32 h-32 rounded-full bg-indigo-50 dark:bg-indigo-900/20 flex items-center justify-center overflow-hidden border-4 border-white dark:border-slate-800 shadow-xl shadow-indigo-200/50 dark:shadow-none relative z-10 mx-auto active:scale-95 transition-transform duration-150">
+            <div className="w-32 h-32 rounded-full bg-indigo-50 dark:bg-indigo-900/20 flex items-center justify-center overflow-hidden border-4 border-white dark:border-slate-800 shadow-xl shadow-indigo-200/50 dark:shadow-none relative z-10 mx-auto">
               {photoURL && !imageLoadError ? (
                 <img
                   src={photoURL}
@@ -299,7 +313,7 @@ export function Account() {
                 }
               }}
             />
-          </div>
+          </motion.div>
 
           <div className="w-full space-y-1 text-center mb-8">
             <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">
@@ -356,7 +370,7 @@ export function Account() {
             </motion.button>
           </div>
         </form>
-      </div>
+      </motion.div>
     </motion.div>
   );
 }

@@ -112,7 +112,7 @@ function shouldPreferFirestoreBridge(): boolean {
       return true;
     }
   }
-  if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 45000) {
+  if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 10000) {
     return true;
   }
   return false;
@@ -645,7 +645,7 @@ async function askViaFirestoreBridge(
         cleanup();
         reject(new Error("Firestore AI bridge timed out"));
       }
-    }, 5500);
+    }, 12000);
 
     const refreshStreamTimer = () => {
       clearTimeout(timer);
@@ -655,7 +655,7 @@ async function askViaFirestoreBridge(
           cleanup();
           reject(new Error("Firestore AI bridge stream timed out"));
         }
-      }, 4500);
+      }, 8000);
     };
 
     unsub = onSnapshot(
@@ -791,12 +791,17 @@ export async function askGeminiAssistant(
   }
   const compactedContext = compactStoreContext(storeContext);
   const compactedHistory = compactConversationHistory(conversationHistory);
+  const localActionCandidate = generateClientStoreResponse(
+    prompt,
+    compactedContext,
+    compactedHistory
+  ).action;
 
-  if (!shouldPreferFirestoreBridge()) {
+  const tryHttpChat = async (): Promise<AssistantResponse | null> => {
     const baseUrl = getApiBaseUrl();
     const endpoint = `${baseUrl}/api/gemini/chat`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3800);
+    const timer = setTimeout(() => controller.abort(), 10000);
 
     try {
       const response = await fetch(endpoint, {
@@ -820,7 +825,10 @@ export async function askGeminiAssistant(
         const replyStr = String(data?.reply || "").trim();
         if (replyStr) {
           data.reply = replyStr;
-          data.action = validateClientAction(data.action, prompt, data.reply, compactedContext);
+          data.action =
+            validateClientAction(data.action, prompt, data.reply, compactedContext) ||
+            localActionCandidate ||
+            null;
           return data;
         }
       } else {
@@ -830,12 +838,20 @@ export async function askGeminiAssistant(
       clearTimeout(timer);
       lastHttpFailureAt = Date.now();
     }
+    return null;
+  };
+
+  if (!shouldPreferFirestoreBridge()) {
+    const httpRes = await tryHttpChat();
+    if (httpRes) return httpRes;
   }
 
   try {
     return await askViaFirestoreBridge(prompt, compactedHistory, compactedContext);
-  } catch {
-    return generateClientStoreResponse(prompt, compactedContext, compactedHistory);
+  } catch (bridgeErr) {
+    const retryHttp = await tryHttpChat();
+    if (retryHttp) return retryHttp;
+    throw bridgeErr;
   }
 }
 
@@ -859,7 +875,11 @@ export async function askGeminiAssistantStream(
   }
   const compactedContext = compactStoreContext(storeContext);
   const compactedHistory = compactConversationHistory(conversationHistory);
-  const localFallback = generateClientStoreResponse(prompt, compactedContext, compactedHistory);
+  const localActionCandidate = generateClientStoreResponse(
+    prompt,
+    compactedContext,
+    compactedHistory
+  ).action;
 
   let completed = false;
   let userAborted = false;
@@ -883,26 +903,20 @@ export async function askGeminiAssistantStream(
 
   const safeComplete = (payload: AssistantResponse) => {
     if (completed || userAborted) return;
+    const cleanReply = String(payload.reply || "").trim();
+    if (!cleanReply) return;
     completed = true;
     clearTimeout(timeoutId);
-    const cleanReply = String(payload.reply || "").trim();
-    if (!cleanReply) {
-      onChunk(localFallback.reply);
-      onComplete(localFallback);
-      return;
-    }
     onComplete({
       ...payload,
       reply: cleanReply,
     });
   };
 
-  // Fast initial connection timeout (3.2s) so mobile/installed devices never stall for 15+ seconds;
-  // once streaming chunks begin arriving, extend stream timeout to 8s.
   let timeoutId = setTimeout(() => {
     if (completed || userAborted) return;
     controller.abort();
-  }, 3200);
+  }, 8500);
 
   if (!shouldPreferFirestoreBridge()) {
     try {
@@ -932,7 +946,7 @@ export async function askGeminiAssistantStream(
       timeoutId = setTimeout(() => {
         if (completed || userAborted) return;
         controller.abort();
-      }, 8000);
+      }, 15000);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -992,7 +1006,7 @@ export async function askGeminiAssistantStream(
                   prompt,
                   parsed.fullText,
                   compactedContext
-                ) || localFallback.action || null;
+                ) || localActionCandidate || null;
 
               finalPayload = {
                 reply: parsed.fullText,
@@ -1001,7 +1015,11 @@ export async function askGeminiAssistantStream(
                 rawText: accumulatedRaw,
               };
             }
-          } catch {}
+          } catch (parseErr: any) {
+            if (parseErr?.message && !parseErr.message.includes("JSON")) {
+              throw parseErr;
+            }
+          }
         }
       }
 
@@ -1029,7 +1047,7 @@ export async function askGeminiAssistantStream(
           reply: clean,
           action:
             validateClientAction(actionData, prompt, clean, compactedContext) ||
-            localFallback.action ||
+            localActionCandidate ||
             null,
           thought: generateDynamicThought(prompt, clean, storeContext),
           rawText: accumulatedRaw,
@@ -1039,7 +1057,7 @@ export async function askGeminiAssistantStream(
     } catch {
       lastHttpFailureAt = Date.now();
       clearTimeout(timeoutId);
-      // Proceed immediately to server-side Firestore RPC bridge fallback
+      // Proceed to server-side fallback channels
     }
   } else {
     clearTimeout(timeoutId);
@@ -1047,6 +1065,7 @@ export async function askGeminiAssistantStream(
 
   if (userAborted || externalSignal?.aborted) return;
 
+  // Fallback 1: Server-side Firestore RPC bridge (works on both web & native Android APK)
   try {
     const bridgeRes = await askViaFirestoreBridge(
       prompt,
@@ -1055,16 +1074,56 @@ export async function askGeminiAssistantStream(
       onChunk,
       externalSignal
     );
-    if (!userAborted && !externalSignal?.aborted) {
+    if (!userAborted && !externalSignal?.aborted && String(bridgeRes.reply || "").trim()) {
+      onChunk(bridgeRes.reply);
       safeComplete(bridgeRes);
       return;
     }
   } catch {
-    if (!userAborted && !externalSignal?.aborted) {
-      onChunk(localFallback.reply);
-      safeComplete(localFallback);
-    }
+    // Proceed to non-streaming HTTP fallback
   }
+
+  if (userAborted || externalSignal?.aborted) return;
+
+  // Fallback 2: Direct non-streaming /api/gemini/chat endpoint
+  const baseUrl = getApiBaseUrl();
+  const chatEndpoint = `${baseUrl}/api/gemini/chat`;
+  const chatController = new AbortController();
+  const chatTimer = setTimeout(() => chatController.abort(), 10000);
+  try {
+    const response = await fetch(chatEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: prompt.trim().slice(0, 1200),
+        conversationHistory: compactedHistory,
+        storeContext: compactedContext,
+      }),
+      signal: chatController.signal,
+    });
+    clearTimeout(chatTimer);
+    if (response.ok) {
+      const data = await response.json();
+      const replyStr = String(data?.reply || "").trim();
+      if (replyStr && !userAborted && !externalSignal?.aborted) {
+        const validatedAction =
+          validateClientAction(data.action, prompt, replyStr, compactedContext) ||
+          localActionCandidate ||
+          null;
+        onChunk(replyStr);
+        safeComplete({
+          reply: replyStr,
+          action: validatedAction,
+          thought: data.thought || generateDynamicThought(prompt, replyStr, storeContext),
+        });
+        return;
+      }
+    }
+  } catch {
+    clearTimeout(chatTimer);
+  }
+
+  throw new Error("Could not reach Buzz AI server. Please check your internet connection and try again.");
 }
 
 function normalizeClientPrompt(raw: string): string {

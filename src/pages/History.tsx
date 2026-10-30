@@ -106,7 +106,12 @@ export function History() {
       </header>
 
       <div className="grid grid-cols-2 gap-3.5 mb-7">
-        <motion.div initial={{ y: 12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.05 }}>
+        <motion.div
+          initial={{ y: 14, opacity: 0, scale: 0.96 }}
+          animate={{ y: 0, opacity: 1, scale: 1 }}
+          whileHover={{ y: -2, scale: 1.01 }}
+          transition={{ type: "spring", stiffness: 460, damping: 30, delay: 0.04 }}
+        >
           <StatCard
             icon={<DollarSign size={20} className="text-indigo-600 dark:text-indigo-400" />}
             label="Today's Flow"
@@ -114,7 +119,12 @@ export function History() {
             color="border-indigo-200/70 dark:border-indigo-500/20"
           />
         </motion.div>
-        <motion.div initial={{ y: 12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.1 }}>
+        <motion.div
+          initial={{ y: 14, opacity: 0, scale: 0.96 }}
+          animate={{ y: 0, opacity: 1, scale: 1 }}
+          whileHover={{ y: -2, scale: 1.01 }}
+          transition={{ type: "spring", stiffness: 460, damping: 30, delay: 0.08 }}
+        >
           <StatCard
             icon={<TrendingUp size={20} className="text-emerald-600 dark:text-emerald-400" />}
             label="Today's Receipts"
@@ -124,7 +134,7 @@ export function History() {
         </motion.div>
       </div>
 
-      <motion.div initial={{ y: 12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.15 }} className="flex-1 flex flex-col">
+      <motion.div initial={{ y: 12, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.12 }} className="flex-1 flex flex-col">
         <div className="flex items-center justify-between px-1 mb-3">
           <h2 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
             <Activity size={18} className="text-indigo-600 dark:text-indigo-400" />
@@ -178,27 +188,32 @@ export function History() {
               animate={{ opacity: 1 }}
               className="space-y-2.5"
             >
+              <AnimatePresence initial={false}>
               {filtered.map((bill, idx) => {
-                const itemSummary = (bill.items || [])
-                  .slice(0, 2)
-                  .map((i) => `${i.quantity}× ${i.name}`)
-                  .join(' · ');
-                const extraCount = Math.max(0, (bill.items || []).length - 2);
-
                 return (
                   <motion.li
-                    initial={{ opacity: 0, scale: 0.98 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    whileTap={{ scale: 0.98 }}
+                    layout
+                    initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    exit={{ opacity: 0, scale: 0.95, transition: { duration: 0.15 } }}
+                    whileHover={{ y: -1.5, scale: 1.005 }}
+                    whileTap={{ scale: 0.975 }}
+                    transition={{
+                      type: 'spring',
+                      stiffness: 480,
+                      damping: 32,
+                      mass: 0.65,
+                      delay: Math.min(idx * 0.03, 0.18),
+                    }}
                     key={bill.id ? `${bill.id}_${idx}` : `bill_${idx}`}
                     onClick={() => {
                       triggerHaptic('medium');
                       setSelectedBill(bill);
                     }}
-                    className="glass-card p-3.5 sm:p-4 flex items-center justify-between gap-3 transition-all cursor-pointer group"
+                    className="glass-card p-3.5 sm:p-4 flex items-center justify-between gap-3 transition-colors cursor-pointer group transform-gpu"
                   >
                     <div className="flex gap-3.5 items-center min-w-0">
-                      <div className="w-12 h-12 shrink-0 rounded-2xl bg-indigo-50/90 dark:bg-indigo-500/15 border border-indigo-100 dark:border-indigo-500/20 flex items-center justify-center text-indigo-600 dark:text-indigo-400 text-xs font-extrabold font-mono tabular-nums">
+                      <div className="w-12 h-12 shrink-0 rounded-2xl bg-indigo-50/90 dark:bg-indigo-500/15 border border-indigo-100 dark:border-indigo-500/20 flex items-center justify-center text-indigo-600 dark:text-indigo-400 text-xs font-extrabold font-mono tabular-nums group-hover:scale-105 transition-transform">
                         #{bill.id?.slice(-5) || '00000'}
                       </div>
                       <div className="min-w-0">
@@ -233,6 +248,7 @@ export function History() {
                   </motion.li>
                 );
               })}
+              </AnimatePresence>
             </motion.ul>
           )}
         </div>

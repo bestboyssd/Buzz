@@ -437,10 +437,24 @@ export function AdminAIAssistant({
   const [clearToastMessage, setClearToastMessage] = useState("");
 
   const sanitizeCachedMessages = (rawList: any[]): ChatMessage[] => {
-    return rawList.map((m) => ({
-      ...m,
-      action: m.action ? validateClientAction(m.action, "", m.content || "") : null,
-    }));
+    const filtered: ChatMessage[] = [];
+    for (let i = 0; i < rawList.length; i++) {
+      const m = rawList[i];
+      const text = String(m?.content || "").trim();
+      // Drop any legacy preset "Store Snapshot:" fallback messages from cached history
+      if (
+        m?.role === "assistant" &&
+        text.includes("Store Snapshot:") &&
+        text.includes("How can I help with your store?")
+      ) {
+        continue;
+      }
+      filtered.push({
+        ...m,
+        action: m.action ? validateClientAction(m.action, "", text) : null,
+      });
+    }
+    return filtered;
   };
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
@@ -1633,33 +1647,40 @@ export function AdminAIAssistant({
       activeStopwatchRef.current = null;
       activeWatchdogRef.current = null;
       activeAssistantMsgIdRef.current = null;
-      const fallback = generateClientStoreResponse(promptText, storeContext, newHistory);
       const duration = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
       setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === assistantMsgId
-            ? {
-                ...msg,
-                content: msg.content && msg.content.trim().length > 0 ? msg.content : fallback.reply,
-                action: msg.action || fallback.action || null,
-                isStreaming: false,
-                thought:
-                  fallback.thought ||
-                  generateDynamicThought(promptText, fallback.reply, storeContext),
-                thoughtDuration: duration,
-              }
-            : msg
-        )
+        prev
+          .map((msg) =>
+            msg.id === assistantMsgId
+              ? {
+                  ...msg,
+                  isStreaming: false,
+                  thoughtDuration: duration,
+                }
+              : msg
+          )
+          .filter((msg) => !(msg.id === assistantMsgId && !msg.content?.trim()))
       );
+      setErrorMessage("Request timed out. Please try sending your message again.");
       setLoading(false);
-      triggerHaptic("light");
+      triggerHaptic("error");
       scrollToBottom(false);
-    }, 9000);
+    }, 28000);
     activeWatchdogRef.current = watchdogTimer;
 
     try {
       const historyPayload = messages
-        .filter((m) => m.id !== "welcome-system-msg" && m.id !== "welcome" && m.content?.trim())
+        .filter(
+          (m) =>
+            m.id !== "welcome-system-msg" &&
+            m.id !== "welcome" &&
+            m.content?.trim() &&
+            !(
+              m.role === "assistant" &&
+              m.content.includes("Store Snapshot:") &&
+              m.content.includes("How can I help with your store?")
+            )
+        )
         .slice(-8)
         .map((m) => ({
           role: m.role,
@@ -1696,16 +1717,8 @@ export function AdminAIAssistant({
           activeWatchdogRef.current = null;
           activeAssistantMsgIdRef.current = null;
 
-          const fallbackIfBlank =
-            !finalPayload.reply || !String(finalPayload.reply).trim()
-              ? generateClientStoreResponse(promptText, storeContext, newHistory)
-              : null;
-
-          const effectiveReply = fallbackIfBlank
-            ? fallbackIfBlank.reply
-            : String(finalPayload.reply).trim();
-          const effectiveAction =
-            finalPayload.action || (fallbackIfBlank ? fallbackIfBlank.action : null) || null;
+          const effectiveReply = String(finalPayload.reply || "").trim();
+          const effectiveAction = finalPayload.action || null;
 
           const elapsedSec = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
           const authenticThought =
@@ -1717,7 +1730,7 @@ export function AdminAIAssistant({
               msg.id === assistantMsgId
                 ? {
                     ...msg,
-                    content: effectiveReply,
+                    content: effectiveReply || msg.content,
                     action: effectiveAction,
                     isStreaming: false,
                     thought: authenticThought,
@@ -1741,28 +1754,25 @@ export function AdminAIAssistant({
       activeWatchdogRef.current = null;
       activeAssistantMsgIdRef.current = null;
 
-      const fallback = generateClientStoreResponse(promptText, storeContext, newHistory);
       const elapsedSec = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
-      const authenticThought =
-        fallback.thought ||
-        generateDynamicThought(promptText, fallback.reply, storeContext);
-
       setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === assistantMsgId
-            ? {
-                ...msg,
-                content: fallback.reply,
-                action: fallback.action || null,
-                isStreaming: false,
-                thought: authenticThought,
-                thoughtDuration: Math.max(msg.thoughtDuration || 1, elapsedSec),
-              }
-            : msg
-        )
+        prev
+          .map((msg) =>
+            msg.id === assistantMsgId
+              ? {
+                  ...msg,
+                  isStreaming: false,
+                  thoughtDuration: Math.max(msg.thoughtDuration || 1, elapsedSec),
+                }
+              : msg
+          )
+          .filter((msg) => !(msg.id === assistantMsgId && !msg.content?.trim()))
+      );
+      setErrorMessage(
+        err?.message || "Could not connect to Buzz AI server. Please check your connection and try again."
       );
       setLoading(false);
-      triggerHaptic("light");
+      triggerHaptic("error");
       scrollToBottom(false);
     }
   };
@@ -2246,63 +2256,74 @@ export function AdminAIAssistant({
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 z-[120] flex flex-col bg-slate-50 dark:bg-[#070a13] text-slate-900 dark:text-slate-100 select-text overflow-hidden h-[100dvh] w-screen top-0 left-0 right-0 bottom-0 transition-colors duration-300">
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.18 }}
-        className="w-full h-full flex flex-col bg-slate-50 dark:bg-[#070a13] text-slate-900 dark:text-slate-100 relative overflow-hidden transition-colors duration-300"
-      >
-        {/* Ambient Lighting & Depth Texture */}
-        <div className="pointer-events-none absolute -top-32 left-1/2 -translate-x-1/2 w-[720px] h-[400px] bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.14)_0%,rgba(168,85,247,0.07)_45%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.12)_0%,rgba(168,85,247,0.06)_45%,transparent_70%)] blur-[90px]" />
-        <div className="pointer-events-none absolute bottom-24 right-1/4 w-[500px] h-[300px] bg-[radial-gradient(ellipse_at_center,rgba(79,70,229,0.09)_0%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(79,70,229,0.08)_0%,transparent_70%)] blur-[100px]" />
-        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(rgba(15,23,42,0.05)_1px,transparent_1px)] dark:bg-[radial-gradient(rgba(255,255,255,0.035)_1px,transparent_1px)] [background-size:26px_26px] opacity-50 dark:opacity-40" />
+    <AnimatePresence>
+      {isOpen && (
+        <div className="fixed inset-0 z-[120] flex flex-col bg-slate-50/40 dark:bg-[#070a13]/40 backdrop-blur-md text-slate-900 dark:text-slate-100 select-text overflow-hidden h-[100dvh] w-screen top-0 left-0 right-0 bottom-0">
+          <motion.div
+            initial={{ opacity: 0, y: 24, scale: 0.985 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.985 }}
+            transition={{ type: "spring", stiffness: 460, damping: 34, mass: 0.72 }}
+            className="w-full h-full flex flex-col bg-slate-50 dark:bg-[#070a13] text-slate-900 dark:text-slate-100 relative overflow-hidden transition-colors duration-300"
+          >
+            {/* Ambient Lighting & Depth Texture */}
+            <div className="pointer-events-none absolute -top-32 left-1/2 -translate-x-1/2 w-[720px] h-[400px] bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.14)_0%,rgba(168,85,247,0.07)_45%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.12)_0%,rgba(168,85,247,0.06)_45%,transparent_70%)] blur-[90px]" />
+            <div className="pointer-events-none absolute bottom-24 right-1/4 w-[500px] h-[300px] bg-[radial-gradient(ellipse_at_center,rgba(79,70,229,0.09)_0%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(79,70,229,0.08)_0%,transparent_70%)] blur-[100px]" />
+            <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(rgba(15,23,42,0.05)_1px,transparent_1px)] dark:bg-[radial-gradient(rgba(255,255,255,0.035)_1px,transparent_1px)] [background-size:26px_26px] opacity-50 dark:opacity-40" />
 
-        {/* Refined Top Bar — padded below mobile status bar (clock, Wi-Fi, battery) */}
-        <header className="px-4 sm:px-6 pt-[max(calc(env(safe-area-inset-top,0px)+0.75rem),2.75rem)] sm:pt-3.5 pb-3 border-b border-slate-200/80 dark:border-white/[0.07] flex items-center justify-between shrink-0 bg-white/85 dark:bg-[#090d18]/90 backdrop-blur-xl relative z-10">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="relative w-9 h-9 rounded-2xl bg-indigo-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/25 shrink-0 overflow-hidden">
-              <div className="absolute inset-0 bg-gradient-to-tr from-amber-400 via-indigo-500 to-purple-600" />
-              <Zap size={17} className="relative z-10 fill-white text-white" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="text-sm sm:text-base font-extrabold tracking-tight text-slate-900 dark:text-white leading-none">
-                  Buzz AI
-                </span>
+            {/* Refined Top Bar — padded below mobile status bar (clock, Wi-Fi, battery) */}
+            <header className="px-4 sm:px-6 pt-[max(calc(env(safe-area-inset-top,0px)+0.75rem),2.75rem)] sm:pt-3.5 pb-3 border-b border-slate-200/80 dark:border-white/[0.07] flex items-center justify-between shrink-0 bg-white/85 dark:bg-[#090d18]/90 backdrop-blur-xl relative z-10">
+              <div className="flex items-center gap-3 min-w-0">
+                <motion.div
+                  initial={{ scale: 0.85, rotate: -10 }}
+                  animate={{ scale: 1, rotate: 0 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 26 }}
+                  className="relative w-9 h-9 rounded-2xl bg-indigo-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/25 shrink-0 overflow-hidden"
+                >
+                  <div className="absolute inset-0 bg-gradient-to-tr from-amber-400 via-indigo-500 to-purple-600" />
+                  <Zap size={17} className="relative z-10 fill-white text-white" />
+                </motion.div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm sm:text-base font-extrabold tracking-tight text-slate-900 dark:text-white leading-none">
+                      Buzz AI
+                    </span>
+                  </div>
+                  <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 font-medium leading-tight mt-0.5 whitespace-nowrap">
+                    Store Operations & Inventory
+                  </p>
+                </div>
               </div>
-              <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 font-medium leading-tight mt-0.5 whitespace-nowrap">
-                Store Operations & Inventory
-              </p>
-            </div>
-          </div>
 
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              onClick={handleClearHistory}
-              title="Start a new chat"
-              className="h-9 px-3 rounded-xl flex items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:text-slate-950 dark:hover:text-white bg-slate-100/90 dark:bg-white/[0.05] hover:bg-slate-200/80 dark:hover:bg-white/[0.1] border border-slate-200/90 dark:border-white/[0.08] transition-all active:scale-95 cursor-pointer"
-            >
-              <RotateCcw size={13} className="text-indigo-600 dark:text-indigo-400" />
-              <span>New Chat</span>
-            </button>
-            <button
-              onClick={() => {
-                triggerHaptic("light");
-                stopAllSpeechPlayback();
-                onClose();
-              }}
-              title="Close"
-              className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100/90 dark:bg-white/[0.05] text-slate-600 dark:text-slate-300 hover:bg-slate-200/80 dark:hover:bg-white/[0.1] hover:text-slate-950 dark:hover:text-white transition-all border border-slate-200/90 dark:border-white/[0.08] active:scale-95 cursor-pointer"
-            >
-              <X size={16} />
-            </button>
-          </div>
-        </header>
+              <div className="flex items-center gap-2 shrink-0">
+                <motion.button
+                  whileHover={{ scale: 1.03 }}
+                  whileTap={{ scale: 0.94 }}
+                  transition={{ type: "spring", stiffness: 520, damping: 28 }}
+                  onClick={handleClearHistory}
+                  title="Start a new chat"
+                  className="h-9 px-3 rounded-xl flex items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:text-slate-950 dark:hover:text-white bg-slate-100/90 dark:bg-white/[0.05] hover:bg-slate-200/80 dark:hover:bg-white/[0.1] border border-slate-200/90 dark:border-white/[0.08] transition-colors cursor-pointer"
+                >
+                  <RotateCcw size={13} className="text-indigo-600 dark:text-indigo-400" />
+                  <span>New Chat</span>
+                </motion.button>
+                <motion.button
+                  whileHover={{ scale: 1.06, rotate: 90 }}
+                  whileTap={{ scale: 0.9 }}
+                  transition={{ type: "spring", stiffness: 520, damping: 28 }}
+                  onClick={() => {
+                    triggerHaptic("light");
+                    stopAllSpeechPlayback();
+                    onClose();
+                  }}
+                  title="Close"
+                  className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100/90 dark:bg-white/[0.05] text-slate-600 dark:text-slate-300 hover:bg-slate-200/80 dark:hover:bg-white/[0.1] hover:text-slate-950 dark:hover:text-white transition-colors border border-slate-200/90 dark:border-white/[0.08] cursor-pointer"
+                >
+                  <X size={16} />
+                </motion.button>
+              </div>
+            </header>
 
         {/* Floating Clear Confirmation Toast */}
         <AnimatePresence>
@@ -2346,7 +2367,13 @@ export function AdminAIAssistant({
 
               if (isUser) {
                 return (
-                  <div key={msg.id} className="flex justify-end">
+                  <motion.div
+                    key={msg.id}
+                    initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    transition={{ type: "spring", stiffness: 480, damping: 32, mass: 0.65 }}
+                    className="flex justify-end origin-bottom-right"
+                  >
                     <div className="w-fit max-w-[85%] sm:max-w-[72%] rounded-2xl rounded-br-xs px-4 py-2.5 sm:px-4.5 sm:py-2.5 bg-gradient-to-r from-indigo-600 via-indigo-600 to-indigo-700 text-white shadow-md shadow-indigo-500/20 dark:shadow-lg dark:shadow-indigo-950/25 border border-indigo-400/30 break-words [overflow-wrap:break-word] min-w-0">
                       <div className="text-xs sm:text-sm leading-relaxed whitespace-pre-wrap font-medium break-words [overflow-wrap:break-word]">
                         {msg.content}
@@ -2358,12 +2385,18 @@ export function AdminAIAssistant({
                         })}
                       </span>
                     </div>
-                  </div>
+                  </motion.div>
                 );
               }
 
               return (
-                <div key={msg.id} className="flex flex-col items-start gap-1.5 max-w-full min-w-0">
+                <motion.div
+                  key={msg.id}
+                  initial={{ opacity: 0, y: 14, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  transition={{ type: "spring", stiffness: 460, damping: 32, mass: 0.68 }}
+                  className="flex flex-col items-start gap-1.5 max-w-full min-w-0 origin-top-left"
+                >
                   <div className="flex items-center gap-2 mb-0.5 pl-1 text-[11px]">
                     <div className="relative w-5 h-5 rounded-lg bg-indigo-600 flex items-center justify-center text-white shadow-xs overflow-hidden">
                       <div className="absolute inset-0 bg-gradient-to-tr from-amber-400 via-indigo-500 to-purple-600" />
@@ -2427,7 +2460,12 @@ export function AdminAIAssistant({
 
                     {/* Interactive Action Confirmation Card (animates and fills in once words complete) */}
                     {!msg.isStreaming && msg.action && (
-                      <div className="mt-3 pt-3 border-t border-slate-200/80 dark:border-slate-800/80">
+                      <motion.div
+                        initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                        transition={{ type: "spring", stiffness: 460, damping: 30, mass: 0.7 }}
+                        className="mt-3 pt-3 border-t border-slate-200/80 dark:border-slate-800/80"
+                      >
                         {/* 1. UPDATE_STOCK */}
                         {msg.action.type === "UPDATE_STOCK" && (
                           <div className="p-3.5 rounded-2xl bg-indigo-50/70 dark:bg-gradient-to-b dark:from-indigo-950/70 dark:via-slate-900/80 dark:to-slate-950/90 border border-indigo-200 dark:border-indigo-500/30 shadow-sm dark:shadow-lg dark:shadow-indigo-950/30 space-y-3">
@@ -3208,7 +3246,7 @@ export function AdminAIAssistant({
                             </div>
                           );
                         })()}
-                      </div>
+                      </motion.div>
                     )}
 
                     {/* Toolbar under message (fills in once message is complete) */}
@@ -3272,7 +3310,7 @@ export function AdminAIAssistant({
                       </div>
                     )}
                   </div>
-                </div>
+                </motion.div>
               );
             })}
 
@@ -3471,32 +3509,40 @@ export function AdminAIAssistant({
                   />
 
                   {loading ? (
-                    <button
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.9 }}
+                      transition={{ type: "spring", stiffness: 520, damping: 28 }}
                       type="button"
                       onClick={handleStopGeneration}
                       title="Stop generating"
                       aria-label="Stop generating"
-                      className="w-9 h-9 rounded-xl bg-gradient-to-tr from-rose-600 to-red-500 hover:from-rose-500 hover:to-red-400 text-white flex items-center justify-center shadow-md shadow-rose-600/30 border border-rose-400/30 transition-all active:scale-90 shrink-0 cursor-pointer"
+                      className="w-9 h-9 rounded-xl bg-gradient-to-tr from-rose-600 to-red-500 hover:from-rose-500 hover:to-red-400 text-white flex items-center justify-center shadow-md shadow-rose-600/30 border border-rose-400/30 transition-colors shrink-0 cursor-pointer"
                     >
                       <Square size={13} className="fill-white text-white" />
-                    </button>
+                    </motion.button>
                   ) : (
-                    <button
+                    <motion.button
+                      whileHover={input.trim() ? { scale: 1.05 } : undefined}
+                      whileTap={input.trim() ? { scale: 0.92 } : undefined}
+                      transition={{ type: "spring", stiffness: 520, damping: 28 }}
                       type="submit"
                       disabled={!input.trim()}
                       title="Send message"
                       aria-label="Send message"
-                      className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-30 text-white flex items-center justify-center shadow-md shadow-indigo-600/25 transition-all active:scale-95 shrink-0 cursor-pointer disabled:cursor-not-allowed"
+                      className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-30 text-white flex items-center justify-center shadow-md shadow-indigo-600/25 transition-colors shrink-0 cursor-pointer disabled:cursor-not-allowed"
                     >
                       <Send size={15} />
-                    </button>
+                    </motion.button>
                   )}
                 </>
               )}
             </form>
           </div>
         </footer>
-      </motion.div>
-    </div>
+          </motion.div>
+        </div>
+      )}
+    </AnimatePresence>
   );
 }
