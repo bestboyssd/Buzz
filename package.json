@@ -1,7 +1,7 @@
 {
   "name": "buzz-pos-stock-management",
   "private": true,
-  "version": "1.2.6",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",

@@ -296,6 +296,23 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
 </body>
 </html>`;
 
+    const androidBridge = typeof window !== 'undefined' ? (window as any).AndroidExporter : null;
+    if (androidBridge && typeof androidBridge.printHtml === 'function') {
+      try {
+        if (iframe.parentNode) {
+          iframe.parentNode.removeChild(iframe);
+        }
+        return Boolean(
+          androidBridge.printHtml(
+            `Z_Report_${String(zReportData.dateLabel || 'Today').replace(/\s+/g, '_')}`,
+            html
+          )
+        );
+      } catch (e) {
+        console.warn('Android native print bridge fallback:', e);
+      }
+    }
+
     const docRef = iframe.contentWindow?.document || iframe.contentDocument;
     if (!docRef || !iframe.contentWindow) {
       window.print();

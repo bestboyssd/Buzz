@@ -12,8 +12,8 @@ import {
   signInWithPopup,
   signInWithCredential,
   GoogleAuthProvider,
+  updateProfile,
   User,
-  signInAnonymously,
 } from "firebase/auth";
 import { auth, db, USE_PRODUCTION_DB_IN_DEV } from "./firebase";
 import {
@@ -21,10 +21,14 @@ import {
   onSnapshot,
   setDoc,
   getDoc,
+  getDocFromServer,
+  deleteDoc,
   collection,
   query,
   orderBy,
   getDocs,
+  getDocsFromServer,
+  writeBatch,
 } from "firebase/firestore";
 import { Capacitor } from "@capacitor/core";
 import { FirebaseAuthentication } from "@capacitor-firebase/authentication";
@@ -71,7 +75,6 @@ interface AuthContextType {
   isRealAdmin: boolean;
   signOut: () => Promise<void>;
   signInWithGoogle: () => Promise<void>;
-  signInAnonymouslyAsAdmin: () => Promise<void>;
   failedAttempts: number;
   lockedByAdmin: boolean;
   incrementFailedAttempts: () => Promise<void>;
@@ -85,12 +88,31 @@ const AuthContext = createContext<AuthContextType>({
   isRealAdmin: false,
   signOut: async () => {},
   signInWithGoogle: async () => {},
-  signInAnonymouslyAsAdmin: async () => {},
   failedAttempts: 0,
   lockedByAdmin: false,
   incrementFailedAttempts: async () => {},
   resetFailedAttempts: async () => {},
 });
+
+const fetchFreshDoc = async (ref: ReturnType<typeof doc>) => {
+  try {
+    return await getDocFromServer(ref);
+  } catch {
+    return await getDoc(ref).catch(() => null);
+  }
+};
+
+const wipeLocalAccountCache = (uid: string) => {
+  localStorage.removeItem(`is_admin_cached_${uid}`);
+  localStorage.removeItem(`is_real_admin_cached_${uid}`);
+  localStorage.removeItem(`custom_user_photo_${uid}`);
+  localStorage.removeItem(`is_blocked_cached_${uid}`);
+  localStorage.removeItem(`theme_${uid}`);
+  localStorage.removeItem(`hapticsEnabled_${uid}`);
+  localStorage.removeItem(`notifications_${uid}`);
+  localStorage.removeItem(`keepScreenOn_${uid}`);
+  localStorage.removeItem(`tempAdminAuth_${uid}`);
+};
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
@@ -101,6 +123,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [lockedByAdmin, setLockedByAdmin] = useState(false);
   const skipProfileWriteRef = useRef(false);
   const profileConfirmedInDbRef = useRef(false);
+  const isExplicitGoogleSignInRef = useRef(false);
+  const recreatedAtRef = useRef(0);
 
   const notifyAndEnforceBlockedLogout = async (message: string) => {
     skipProfileWriteRef.current = true;
@@ -149,23 +173,29 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       localStorage.removeItem("local_dev_bypass_user");
 
       if (currentUser) {
+        if (currentUser.isAnonymous) {
+          firebaseSignOut(auth).catch(() => {});
+          setUser(null);
+          setIsAdmin(false);
+          setIsRealAdmin(false);
+          setLoading(false);
+          return;
+        }
         skipProfileWriteRef.current = false;
         profileConfirmedInDbRef.current = false;
         // Clear any dev bypass if a real user logged in
         localStorage.removeItem("local_dev_bypass_user");
         // Resolve email, name, and photo from both top-level and providers list (very common on mobile/Capacitor)
         const providerInfo = currentUser.providerData || [];
+        const googleProvider =
+          providerInfo.find((p) => p.providerId === "google.com") ||
+          providerInfo[0];
         let resolvedEmail =
           currentUser.email || providerInfo.find((p) => p.email)?.email || "";
         let resolvedName =
           currentUser.displayName ||
           providerInfo.find((p) => p.displayName)?.displayName ||
           "";
-
-        if (currentUser.isAnonymous) {
-          resolvedEmail = "suman.das.199972@gmail.com";
-          resolvedName = "Demo Admin (Bypass)";
-        }
         let originalPhotoURL = currentUser.photoURL;
 
         Object.defineProperty(currentUser, "photoURL", {
@@ -218,14 +248,26 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         const blockedListDoc = doc(db, "settings", "blocked_accounts");
         const deletedListDoc = doc(db, "settings", "deleted_accounts");
 
-        // Check if this user is locally cached as blocked for instant rejection
+        const explicitSignInTs = Number(
+          sessionStorage.getItem("explicit_google_signin_ts") || "0"
+        );
+        const isFreshExplicitSignIn =
+          isExplicitGoogleSignInRef.current ||
+          (explicitSignInTs > 0 && Date.now() - explicitSignInTs < 30000);
+
+        // Only reject from local cache during passive background startup (never during explicit Google sign-in,
+        // because an Admin may have deleted/unblocked the account since it was banned).
         if (
           !isOwner &&
+          !isFreshExplicitSignIn &&
           localStorage.getItem(`is_blocked_cached_${currentUser.uid}`) === "true"
         ) {
-          setLoading(false);
-          notifyAndEnforceBlockedLogout(BLOCKED_LOGIN_MESSAGE);
-          return;
+          // Still verify with Firestore below before locking out if online, or reject immediately if offline
+          if (typeof navigator !== "undefined" && !navigator.onLine) {
+            setLoading(false);
+            notifyAndEnforceBlockedLogout(BLOCKED_LOGIN_MESSAGE);
+            return;
+          }
         }
 
         setUser(currentUser);
@@ -241,36 +283,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         setIsAdmin(cachedAdmin);
         setIsRealAdmin(cachedRealAdmin);
 
-        // Check if profile exists (and whether the account is blocked or was deleted before this session) before merging custom settings
+        // Always query fresh server documents first when online so deleted/unblocked accounts are never stuck on stale IndexedDB cache
         Promise.all([
-          getDoc(profileDoc),
-          getDoc(blockedListDoc).catch(() => null),
-          getDoc(deletedListDoc).catch(() => null),
+          fetchFreshDoc(profileDoc),
+          fetchFreshDoc(blockedListDoc),
+          fetchFreshDoc(deletedListDoc),
         ])
-          .then(([docSnap, blockedSnap, deletedSnap]) => {
-            const blockedData = blockedSnap?.exists() ? blockedSnap.data() : null;
-            const blockedUids: string[] = Array.isArray(blockedData?.blockedUids)
-              ? blockedData.blockedUids
-              : [];
-            const blockedEmails: string[] = Array.isArray(blockedData?.blockedEmails)
-              ? blockedData.blockedEmails
-              : [];
+          .then(async ([docSnap, blockedSnap, deletedSnap]) => {
             const normEmail = resolvedEmail.trim().toLowerCase();
-            const isBlockedInRegistry =
-              !isOwner &&
-              (blockedUids.includes(currentUser.uid) ||
-                (Boolean(normEmail) && blockedEmails.includes(normEmail)));
-            const isBlockedInProfile =
-              !isOwner && docSnap.exists() && docSnap.data()?.isBlocked === true;
 
-            if (isBlockedInRegistry || isBlockedInProfile) {
-              localStorage.setItem(`is_blocked_cached_${currentUser.uid}`, "true");
-              notifyAndEnforceBlockedLogout(BLOCKED_LOGIN_MESSAGE);
-              return;
-            }
-            localStorage.removeItem(`is_blocked_cached_${currentUser.uid}`);
-
-            // Check if this account was deleted by an Admin and has NOT signed in fresh since deletion
+            // 1. Check deleted_accounts registry first so we know if this account was deleted after any prior ban
             const deletedData = deletedSnap?.exists() ? deletedSnap.data() : null;
             const deletedUidsMap: Record<string, number> =
               deletedData?.deletedUids && typeof deletedData.deletedUids === "object"
@@ -284,56 +306,77 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               Number(deletedUidsMap[currentUser.uid]) || 0,
               normEmail ? Number(deletedEmailsMap[normEmail]) || 0 : 0
             );
-            if (!isOwner && deletedAt > 0) {
-              const explicitSignInTs = Number(
-                sessionStorage.getItem("explicit_google_signin_ts") || "0"
-              );
-              const lastSignInMs = currentUser.metadata?.lastSignInTime
-                ? new Date(currentUser.metadata.lastSignInTime).getTime()
-                : 0;
-              const profileUpdatedAt = docSnap.exists()
-                ? Number(docSnap.data()?.updatedAt || 0)
-                : 0;
-              const signedInFreshAfterDelete =
-                explicitSignInTs > deletedAt ||
-                lastSignInMs > deletedAt + 2000 ||
-                profileUpdatedAt > deletedAt;
-
-              if (!signedInFreshAfterDelete) {
-                localStorage.removeItem(`is_admin_cached_${currentUser.uid}`);
-                localStorage.removeItem(`is_real_admin_cached_${currentUser.uid}`);
-                localStorage.removeItem(`custom_user_photo_${currentUser.uid}`);
-                notifyAndEnforceBlockedLogout(
-                  "Your account was deleted by an administrator. You can sign in again to create a new account."
-                );
-                return;
-              } else {
-                // User signed in again after deletion to create a fresh account — remove them from deleted_accounts
-                const nextDeletedUids = { ...deletedUidsMap };
-                const nextDeletedEmails = { ...deletedEmailsMap };
-                delete nextDeletedUids[currentUser.uid];
-                if (normEmail) delete nextDeletedEmails[normEmail];
-                setDoc(
-                  deletedListDoc,
-                  {
-                    deletedUids: nextDeletedUids,
-                    deletedEmails: nextDeletedEmails,
-                    updatedAt: Date.now(),
-                  },
-                  { merge: true }
-                ).catch(() => {});
-              }
+            const docRecreatedAt = docSnap?.exists()
+              ? Number(docSnap.data()?.recreatedAt || 0)
+              : 0;
+            if (docRecreatedAt > recreatedAtRef.current) {
+              recreatedAtRef.current = docRecreatedAt;
             }
+            const wasDeleted =
+              !isOwner && deletedAt > 0 && docRecreatedAt <= deletedAt;
+
+            // 2. Check blocked_accounts registry & profile isBlocked flag
+            // Note: If the account was deleted at or after the block registry update, deletion supersedes the old ban!
+            const blockedData = blockedSnap?.exists() ? blockedSnap.data() : null;
+            const blockedUpdatedAt = Number(blockedData?.updatedAt || 0);
+            const blockedUids: string[] = Array.isArray(blockedData?.blockedUids)
+              ? blockedData.blockedUids
+              : [];
+            const blockedEmails: string[] = Array.isArray(blockedData?.blockedEmails)
+              ? blockedData.blockedEmails
+              : [];
+            const isBlockedInRegistry =
+              !isOwner &&
+              !(wasDeleted && deletedAt >= blockedUpdatedAt) &&
+              (blockedUids.includes(currentUser.uid) ||
+                (Boolean(normEmail) && blockedEmails.includes(normEmail)));
+            const isBlockedInProfile =
+              !isOwner &&
+              !wasDeleted &&
+              Boolean(docSnap?.exists()) &&
+              docSnap!.data()?.isBlocked === true;
+
+            if (isBlockedInRegistry || isBlockedInProfile) {
+              localStorage.setItem(`is_blocked_cached_${currentUser.uid}`, "true");
+              notifyAndEnforceBlockedLogout(BLOCKED_LOGIN_MESSAGE);
+              return;
+            }
+            localStorage.removeItem(`is_blocked_cached_${currentUser.uid}`);
+
+            // 3. Handle account deletion enforcement vs. fresh account re-creation
+            const currentExplicitTs = Number(
+              sessionStorage.getItem("explicit_google_signin_ts") || "0"
+            );
+            const signedInExplicitlyNow =
+              isExplicitGoogleSignInRef.current ||
+              (currentExplicitTs > 0 && Date.now() - currentExplicitTs < 30000);
+
+            if (wasDeleted && !signedInExplicitlyNow) {
+              // Stale session on a device whose account was deleted by an Admin — force logout and delete any zombie doc
+              skipProfileWriteRef.current = true;
+              wipeLocalAccountCache(currentUser.uid);
+              deleteDoc(profileDoc).catch(() => {});
+              notifyAndEnforceBlockedLogout(
+                "Your account was deleted by an administrator. You can sign in again to create a new account."
+              );
+              return;
+            }
+
+            const hasValidProfileDoc =
+              Boolean(docSnap?.exists()) &&
+              Boolean(docSnap?.data()?.uid || docSnap?.data()?.email || docSnap?.data()?.displayName);
+            const isCreatingFreshAccount = wasDeleted || !hasValidProfileDoc;
+            const freshAccountTs = Math.max(Date.now(), deletedAt + 1000);
 
             let customPhotoURL = "";
             let savedName = resolvedName;
             let savedEmail = resolvedEmail;
-
-            // Preserve assigned admin status from database
             let makeAdmin = isOwner;
 
             const systemDefaultTheme = getSystemDefaultTheme();
-            const currentCachedUserTheme = localStorage.getItem(`theme_${currentUser.uid}`);
+            const currentCachedUserTheme = isCreatingFreshAccount
+              ? null
+              : localStorage.getItem(`theme_${currentUser.uid}`);
             const currentGlobalTheme = localStorage.getItem("theme");
             const fallbackTheme: "dark" | "light" =
               currentCachedUserTheme === "dark" || currentCachedUserTheme === "light"
@@ -350,7 +393,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             let keepScreenOn = false;
             let isPrinterConnected = false;
 
-            if (docSnap.exists()) {
+            if (!isCreatingFreshAccount && docSnap?.exists()) {
               const data = docSnap.data();
               customPhotoURL = data.customPhotoURL || "";
               savedName = data.displayName || resolvedName || "";
@@ -398,9 +441,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               } else {
                 theme = fallbackTheme;
               }
-              hapticsEnabled = data.hapticsEnabled !== undefined ? data.hapticsEnabled : (localStorage.getItem(`hapticsEnabled_${currentUser.uid}`) !== "false");
-              notifications = data.notifications !== undefined ? data.notifications : (localStorage.getItem(`notifications_${currentUser.uid}`) !== "false");
-              // Turn Keep Screen On OFF for all existing accounts unless they manually turned it on after keepScreenOnResetV2
+              hapticsEnabled =
+                data.hapticsEnabled !== undefined
+                  ? data.hapticsEnabled
+                  : localStorage.getItem(`hapticsEnabled_${currentUser.uid}`) !== "false";
+              notifications =
+                data.notifications !== undefined
+                  ? data.notifications
+                  : localStorage.getItem(`notifications_${currentUser.uid}`) !== "false";
               if (data.keepScreenOnResetV2 === true) {
                 keepScreenOn = data.keepScreenOn === true;
               } else {
@@ -408,7 +456,28 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               }
               isPrinterConnected = false;
             } else {
-              // Brand new account (or re-creating fresh account after deletion)
+              // Brand new account OR re-creating a fresh account after Admin deletion!
+              // Reset any old custom name/photo/role/cache so the account starts 100% clean from Google provider data
+              wipeLocalAccountCache(currentUser.uid);
+
+              const freshGoogleName =
+                googleProvider?.displayName ||
+                (resolvedEmail ? resolvedEmail.split("@")[0] : "") ||
+                resolvedName ||
+                "User";
+              const freshGooglePhoto = googleProvider?.photoURL || "";
+
+              savedName = freshGoogleName;
+              savedEmail = resolvedEmail;
+              customPhotoURL = freshGooglePhoto;
+              originalPhotoURL = freshGooglePhoto;
+
+              // Reset Firebase Auth's cached user profile if it still held an old custom displayName (e.g. from Account.tsx)
+              updateProfile(currentUser, {
+                displayName: freshGoogleName,
+                photoURL: freshGooglePhoto,
+              }).catch(() => {});
+
               makeAdmin = isOwner;
               setIsAdmin(makeAdmin);
               setIsRealAdmin(makeAdmin);
@@ -420,12 +489,68 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 `is_real_admin_cached_${currentUser.uid}`,
                 makeAdmin ? "true" : "false"
               );
-              localStorage.removeItem(`custom_user_photo_${currentUser.uid}`);
-              theme = fallbackTheme;
-              hapticsEnabled = localStorage.getItem("hapticsEnabled") !== "false";
-              notifications = localStorage.getItem("notifications") !== "false";
+              theme = systemDefaultTheme;
+              hapticsEnabled = true;
+              notifications = true;
               keepScreenOn = false;
               isPrinterConnected = false;
+
+              recreatedAtRef.current = freshAccountTs;
+
+              // Remove UID & email from deleted_accounts (WITHOUT merge:true so keys are truly deleted)
+              if (deletedAt > 0 || deletedUidsMap[currentUser.uid] || (normEmail && deletedEmailsMap[normEmail])) {
+                const nextDeletedUids = { ...deletedUidsMap };
+                const nextDeletedEmails = { ...deletedEmailsMap };
+                delete nextDeletedUids[currentUser.uid];
+                if (normEmail) delete nextDeletedEmails[normEmail];
+                setDoc(deletedListDoc, {
+                  deletedUids: nextDeletedUids,
+                  deletedEmails: nextDeletedEmails,
+                  updatedAt: freshAccountTs,
+                }).catch(() => {});
+              }
+
+              // Also ensure UID & email are removed from blocked_accounts if they were left over before deletion
+              if (
+                blockedUids.includes(currentUser.uid) ||
+                (Boolean(normEmail) && blockedEmails.includes(normEmail))
+              ) {
+                const nextBlockedUids = blockedUids.filter((id) => id !== currentUser.uid);
+                const nextBlockedEmails = blockedEmails.filter(
+                  (em) => String(em).trim().toLowerCase() !== normEmail
+                );
+                setDoc(blockedListDoc, {
+                  blockedUids: nextBlockedUids,
+                  blockedEmails: nextBlockedEmails,
+                  updatedAt: freshAccountTs,
+                }).catch(() => {});
+              }
+
+              // Reset PIN attempts for the fresh account
+              setDoc(doc(db, "settings", `attempts_${currentUser.uid}`), {
+                failedCount: 0,
+                lockedByAdmin: false,
+                reason: "reset",
+              }).catch(() => {});
+
+              // Purge any other stale profile_* or attempts_* docs in settings with the same email (e.g. old Web/Mobile duplicate UID)
+              if (normEmail) {
+                getDocsFromServer(collection(db, "settings"))
+                  .catch(() => getDocs(collection(db, "settings")))
+                  .then((settingsSnap) => {
+                    settingsSnap.docs.forEach((d) => {
+                      if (d.id.startsWith("profile_") && d.id !== `profile_${currentUser.uid}`) {
+                        const dEmail = String(d.data()?.email || "").trim().toLowerCase();
+                        if (dEmail === normEmail) {
+                          const oldUid = d.id.replace("profile_", "");
+                          deleteDoc(d.ref).catch(() => {});
+                          deleteDoc(doc(db, "settings", `attempts_${oldUid}`)).catch(() => {});
+                        }
+                      }
+                    });
+                  })
+                  .catch(() => {});
+              }
             }
 
             // Write back synchronized values to local storage for the current session
@@ -448,7 +573,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
             if (skipProfileWriteRef.current) return;
 
-            // Save/update profile doc in Firestore and mark profileConfirmedInDbRef once written
+            const writeNow = isCreatingFreshAccount
+              ? Math.max(Date.now(), freshAccountTs)
+              : Date.now();
+            if (isCreatingFreshAccount) {
+              recreatedAtRef.current = writeNow;
+            }
+
+            // Save/update profile doc in Firestore (overwrite completely when creating a fresh account so no stale fields survive)
             setDoc(
               profileDoc,
               {
@@ -459,6 +591,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 isAdmin: makeAdmin,
                 role: makeAdmin ? "admin" : "user",
                 isBlocked: false,
+                blockedAt: null,
                 tempAdminAuth: false,
                 theme,
                 hapticsEnabled,
@@ -466,11 +599,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 keepScreenOn,
                 keepScreenOnResetV2: true,
                 isPrinterConnected,
-                updatedAt: Date.now(),
+                ...(isCreatingFreshAccount
+                  ? { createdAt: writeNow, recreatedAt: writeNow }
+                  : {}),
+                updatedAt: writeNow,
                 isOnline: true,
-                lastActive: Date.now(),
+                lastActive: writeNow,
               },
-              { merge: true }
+              isCreatingFreshAccount ? undefined : { merge: true }
             )
               .then(() => {
                 profileConfirmedInDbRef.current = true;
@@ -593,13 +729,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         if (docSnap.exists()) {
           profileConfirmedInDbRef.current = true;
           const data = docSnap.data();
+          if (Number(data.recreatedAt || 0) > recreatedAtRef.current) {
+            recreatedAtRef.current = Number(data.recreatedAt || 0);
+          }
           const savedEmail = data.email || user.email || "";
           const isAcctOwner =
             isOwner ||
             String(savedEmail).trim().toLowerCase() === "suman.das.199972@gmail.com";
 
           // If admin blocked this account, immediately sign them out and show the blocked message
-          if (!isAcctOwner && data.isBlocked === true) {
+          if (!isAcctOwner && data.isBlocked === true && !isExplicitGoogleSignInRef.current) {
             localStorage.setItem(`is_blocked_cached_${user.uid}`, "true");
             notifyAndEnforceBlockedLogout(BLOCKED_LOGIN_MESSAGE);
             return;
@@ -651,13 +790,14 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             }
             userIsRealAdmin = profileIsAdmin;
           }
-        } else if (profileConfirmedInDbRef.current && !isOwner) {
+        } else if (
+          profileConfirmedInDbRef.current &&
+          !isOwner &&
+          !isExplicitGoogleSignInRef.current
+        ) {
           // Profile existed during this session and was just deleted from the database by an Admin
           skipProfileWriteRef.current = true;
-          localStorage.removeItem(`is_admin_cached_${user.uid}`);
-          localStorage.removeItem(`is_real_admin_cached_${user.uid}`);
-          localStorage.removeItem(`custom_user_photo_${user.uid}`);
-          localStorage.removeItem(`is_blocked_cached_${user.uid}`);
+          wipeLocalAccountCache(user.uid);
           notifyAndEnforceBlockedLogout(
             "Your account was deleted by an administrator. You can sign in again to create a new account."
           );
@@ -685,7 +825,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     const unsubscribeBlocked = onSnapshot(
       blockedDoc,
       (snap) => {
-        if (!snap.exists()) return;
+        if (!snap.exists() || isExplicitGoogleSignInRef.current) return;
         const isOwner =
           String(user.email || "").trim().toLowerCase() === "suman.das.199972@gmail.com";
         if (isOwner) return;
@@ -732,12 +872,13 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           const explicitSignInTs = Number(
             sessionStorage.getItem("explicit_google_signin_ts") || "0"
           );
-          if (deletedAt > explicitSignInTs) {
+          const isMidExplicitSignIn =
+            isExplicitGoogleSignInRef.current ||
+            (explicitSignInTs > 0 && Date.now() - explicitSignInTs < 15000);
+          if (!isMidExplicitSignIn && deletedAt > recreatedAtRef.current) {
             skipProfileWriteRef.current = true;
-            localStorage.removeItem(`is_admin_cached_${user.uid}`);
-            localStorage.removeItem(`is_real_admin_cached_${user.uid}`);
-            localStorage.removeItem(`custom_user_photo_${user.uid}`);
-            localStorage.removeItem(`is_blocked_cached_${user.uid}`);
+            wipeLocalAccountCache(user.uid);
+            deleteDoc(doc(db, "settings", `profile_${user.uid}`)).catch(() => {});
             notifyAndEnforceBlockedLogout(
               "Your account was deleted by an administrator. You can sign in again to create a new account."
             );
@@ -1090,6 +1231,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   };
 
   const signInWithGoogle = async () => {
+    isExplicitGoogleSignInRef.current = true;
     try {
       sessionStorage.setItem("explicit_google_signin_ts", String(Date.now()));
       if (Capacitor.isNativePlatform()) {
@@ -1138,11 +1280,31 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
         if (!isOwner) {
           const [profSnap, blockedSnap, deletedSnap] = await Promise.all([
-            getDoc(doc(db, "settings", `profile_${signedInUser.uid}`)).catch(() => null),
-            getDoc(doc(db, "settings", "blocked_accounts")).catch(() => null),
-            getDoc(doc(db, "settings", "deleted_accounts")).catch(() => null),
+            fetchFreshDoc(doc(db, "settings", `profile_${signedInUser.uid}`)),
+            fetchFreshDoc(doc(db, "settings", "blocked_accounts")),
+            fetchFreshDoc(doc(db, "settings", "deleted_accounts")),
           ]);
+
+          const deletedData = deletedSnap?.exists() ? deletedSnap.data() : null;
+          const deletedUidsMap: Record<string, number> =
+            deletedData?.deletedUids && typeof deletedData.deletedUids === "object"
+              ? deletedData.deletedUids
+              : {};
+          const deletedEmailsMap: Record<string, number> =
+            deletedData?.deletedEmails && typeof deletedData.deletedEmails === "object"
+              ? deletedData.deletedEmails
+              : {};
+          const deletedAt = Math.max(
+            Number(deletedUidsMap[signedInUser.uid]) || 0,
+            normEmail ? Number(deletedEmailsMap[normEmail]) || 0 : 0
+          );
+          const docRecreatedAt = profSnap?.exists()
+            ? Number(profSnap.data()?.recreatedAt || 0)
+            : 0;
+          const wasDeleted = deletedAt > 0 && docRecreatedAt <= deletedAt;
+
           const blockedData = blockedSnap?.exists() ? blockedSnap.data() : null;
+          const blockedUpdatedAt = Number(blockedData?.updatedAt || 0);
           const blockedUids: string[] = Array.isArray(blockedData?.blockedUids)
             ? blockedData.blockedUids
             : [];
@@ -1150,57 +1312,31 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             ? blockedData.blockedEmails
             : [];
           const isBlocked =
-            (profSnap?.exists() && profSnap.data()?.isBlocked === true) ||
-            blockedUids.includes(signedInUser.uid) ||
-            (Boolean(normEmail) && blockedEmails.includes(normEmail));
+            (!wasDeleted && profSnap?.exists() && profSnap.data()?.isBlocked === true) ||
+            (!(wasDeleted && deletedAt >= blockedUpdatedAt) &&
+              (blockedUids.includes(signedInUser.uid) ||
+                (Boolean(normEmail) && blockedEmails.includes(normEmail))));
 
           if (isBlocked) {
+            isExplicitGoogleSignInRef.current = false;
             sessionStorage.removeItem("explicit_google_signin_ts");
             localStorage.setItem(`is_blocked_cached_${signedInUser.uid}`, "true");
             await notifyAndEnforceBlockedLogout(BLOCKED_LOGIN_MESSAGE);
             throw new Error(BLOCKED_LOGIN_MESSAGE);
           }
 
-          // Clear any prior deleted_accounts marker so the user can create a fresh account
-          if (deletedSnap?.exists()) {
-            const delData = deletedSnap.data();
-            const nextDelUids =
-              delData?.deletedUids && typeof delData.deletedUids === "object"
-                ? { ...delData.deletedUids }
-                : {};
-            const nextDelEmails =
-              delData?.deletedEmails && typeof delData.deletedEmails === "object"
-                ? { ...delData.deletedEmails }
-                : {};
-            if (nextDelUids[signedInUser.uid] || (normEmail && nextDelEmails[normEmail])) {
-              delete nextDelUids[signedInUser.uid];
-              if (normEmail) delete nextDelEmails[normEmail];
-              await setDoc(
-                doc(db, "settings", "deleted_accounts"),
-                {
-                  deletedUids: nextDelUids,
-                  deletedEmails: nextDelEmails,
-                  updatedAt: Date.now(),
-                },
-                { merge: true }
-              ).catch(() => {});
-            }
-          }
+          localStorage.removeItem(`is_blocked_cached_${signedInUser.uid}`);
         }
       }
     } catch (error: any) {
+      isExplicitGoogleSignInRef.current = false;
       sessionStorage.removeItem("explicit_google_signin_ts");
       console.error("Google Sign-In Error:", error);
       throw error;
-    }
-  };
-
-  const signInAnonymouslyAsAdmin = async () => {
-    try {
-      await signInAnonymously(auth);
-    } catch (error: any) {
-      console.error("Anonymous Sign-In Error:", error);
-      throw error;
+    } finally {
+      setTimeout(() => {
+        isExplicitGoogleSignInRef.current = false;
+      }, 5000);
     }
   };
 
@@ -1213,7 +1349,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         isRealAdmin,
         signOut,
         signInWithGoogle,
-        signInAnonymouslyAsAdmin,
         failedAttempts,
         lockedByAdmin,
         incrementFailedAttempts,

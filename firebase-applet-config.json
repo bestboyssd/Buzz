@@ -7,5 +7,6 @@
   "storageBucket": "tidy-byte-g5xj8.firebasestorage.app",
   "messagingSenderId": "1080691680431",
   "measurementId": "",
-  "oAuthClientId": "1080691680431-aop4epc4mvhp4den0thrlv17pt3op6rt.apps.googleusercontent.com"
+  "oAuthClientId": "1080691680431-aop4epc4mvhp4den0thrlv17pt3op6rt.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
 }

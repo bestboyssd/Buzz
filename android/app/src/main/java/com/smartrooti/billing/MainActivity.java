@@ -12,11 +12,16 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.widget.Toast;
 import android.Manifest;
+import android.content.Context;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.print.PrintAttributes;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintManager;
 import android.provider.MediaStore;
+import android.webkit.WebViewClient;
 import com.getcapacitor.BridgeActivity;
 import com.getcapacitor.BridgeWebChromeClient;
 import androidx.work.Constraints;
@@ -43,6 +48,7 @@ public class MainActivity extends BridgeActivity {
     private ScheduledExecutorService bgPollExecutor = null;
     private TextToSpeech nativeTts = null;
     private boolean ttsReady = false;
+    private WebView printWebView = null;
 
     public class AndroidExporter {
         @JavascriptInterface
@@ -58,6 +64,46 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception e) {
                 return false;
             }
+        }
+
+        @JavascriptInterface
+        public boolean isNativePrintAvailable() {
+            return true;
+        }
+
+        @JavascriptInterface
+        public boolean printHtml(String jobName, String htmlContent) {
+            if (htmlContent == null || htmlContent.trim().isEmpty()) return false;
+            final String safeJobName = (jobName == null || jobName.trim().isEmpty())
+                ? "SmartPOS_Receipt_" + System.currentTimeMillis()
+                : jobName.trim();
+            runOnUiThread(() -> {
+                try {
+                    WebView webView = new WebView(MainActivity.this);
+                    printWebView = webView;
+                    webView.getSettings().setJavaScriptEnabled(false);
+                    webView.setWebViewClient(new WebViewClient() {
+                        @Override
+                        public void onPageFinished(WebView view, String url) {
+                            try {
+                                PrintManager printManager = (PrintManager) getSystemService(Context.PRINT_SERVICE);
+                                if (printManager != null) {
+                                    PrintDocumentAdapter adapter = view.createPrintDocumentAdapter(safeJobName);
+                                    PrintAttributes.Builder builder = new PrintAttributes.Builder();
+                                    builder.setMediaSize(PrintAttributes.MediaSize.ISO_A4);
+                                    printManager.print(safeJobName, adapter, builder.build());
+                                }
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                            }
+                        }
+                    });
+                    webView.loadDataWithBaseURL(null, htmlContent, "text/html", "UTF-8", null);
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            });
+            return true;
         }
 
         @JavascriptInterface

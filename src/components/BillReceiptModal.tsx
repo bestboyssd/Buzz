@@ -269,6 +269,18 @@ function triggerIsolatedThermalPrint(bill: Bill): boolean {
 </body>
 </html>`;
 
+    const androidBridge = typeof window !== 'undefined' ? (window as any).AndroidExporter : null;
+    if (androidBridge && typeof androidBridge.printHtml === 'function') {
+      try {
+        if (iframe.parentNode) {
+          iframe.parentNode.removeChild(iframe);
+        }
+        return Boolean(androidBridge.printHtml(`Receipt_${shortId}`, html));
+      } catch (e) {
+        console.warn('Android native print bridge fallback:', e);
+      }
+    }
+
     const doc = iframe.contentWindow?.document || iframe.contentDocument;
     if (!doc || !iframe.contentWindow) {
       window.print();

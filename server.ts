@@ -55,12 +55,12 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
 const PRIMARY_AI_PROVIDER = process.env.PRIMARY_AI_PROVIDER || "gemini";
 // Primary: Ultra-low-latency Gemini Flash model
-const PRIMARY_AI_MODEL = process.env.PRIMARY_AI_MODEL || "gemini-3-flash-preview";
+const PRIMARY_AI_MODEL = process.env.PRIMARY_AI_MODEL || "gemini-3.8-flash";
 
 // Backup: Reliable sub-second fallback models
 const BACKUP_AI_PROVIDER = process.env.BACKUP_AI_PROVIDER || "gemini";
-const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-3.1-flash-lite";
-const TERTIARY_AI_MODEL = "gemini-3.8-flash";
+const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-flash-latest";
+const TERTIARY_AI_MODEL = "gemini-3.1-flash-lite";
 
 // Store timezone offset: Asia/Kolkata (+5:30) for SmartRooti
 const STORE_TZ_OFFSET_MINUTES = 330;
@@ -2637,10 +2637,13 @@ export async function executeAiQuery(
           config: {
             systemInstruction,
             temperature: 0.2,
+            ...(model.startsWith("gemini-3") && !model.includes("lite")
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
           },
         }),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout on model ${model}`)), 12000)
+          setTimeout(() => reject(new Error(`Timeout on model ${model}`)), 3800)
         ),
       ]);
 
@@ -2868,8 +2871,10 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
     res.write(`data: ${JSON.stringify({ status })}\n\n`);
 
     let clientAborted = false;
-    req.on("close", () => {
-      clientAborted = true;
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        clientAborted = true;
+      }
     });
 
     // 1. Hydrate from Client Real-Time Context (0ms) or Fetch Database State
@@ -2914,33 +2919,36 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
       for (const model of candidates) {
         if (clientAborted) break;
         try {
-          const streamPromise = ai.models.generateContentStream({
-            model,
-            contents,
-            config: {
-              systemInstruction,
-              temperature: 0.2,
-            },
-          });
+          await Promise.race([
+            (async () => {
+              const stream = await ai.models.generateContentStream({
+                model,
+                contents,
+                config: {
+                  systemInstruction,
+                  temperature: 0.2,
+                  ...(model.startsWith("gemini-3") && !model.includes("lite")
+                    ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                    : {}),
+                },
+              });
 
-          const stream = await Promise.race([
-            streamPromise,
+              for await (const chunk of stream) {
+                if (clientAborted || res.writableEnded) break;
+                const chunkText = chunk.text || "";
+                if (chunkText) {
+                  fullOutput += chunkText;
+                  // Do not stream raw action JSON once ```action begins
+                  if (!fullOutput.includes("```action")) {
+                    res.write(`data: ${JSON.stringify({ chunk: chunkText })}\n\n`);
+                  }
+                }
+              }
+            })(),
             new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error(`Stream timeout on ${model}`)), 12000)
+              setTimeout(() => reject(new Error(`Stream timeout on ${model}`)), 4200)
             ),
           ]);
-
-          for await (const chunk of stream) {
-            if (clientAborted || res.writableEnded) break;
-            const chunkText = chunk.text || "";
-            if (chunkText) {
-              fullOutput += chunkText;
-              // Do not stream raw action JSON once ```action begins
-              if (!fullOutput.includes("```action")) {
-                res.write(`data: ${JSON.stringify({ chunk: chunkText })}\n\n`);
-              }
-            }
-          }
 
           if (clientAborted || res.writableEnded) {
             return;
@@ -3200,7 +3208,12 @@ app.post("/api/gemini/transcribe", async (req, res) => {
       return;
     }
 
-    const transcribeModels = ["gemini-3.5-transcribe", "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-3.8-flash"];
+    const transcribeModels = [
+      "gemini-3.8-flash",
+      "gemini-flash-latest",
+      "gemini-3.1-flash-lite",
+      "gemini-3.5-transcribe",
+    ];
     let transcript = "";
     let succeeded = false;
 
@@ -3227,7 +3240,7 @@ app.post("/api/gemini/transcribe", async (req, res) => {
             ],
           }),
           new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Transcription timeout")), 6000)
+            setTimeout(() => reject(new Error("Transcription timeout")), 4500)
           ),
         ]);
 
@@ -3368,18 +3381,9 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
     console.log(`Buzz AI Server listening on 0.0.0.0:${PORT} [mode: ${isProduction ? "production" : "development"}]`);
   });
 
-  // Sync AI runtime bridge config & start real-time Firestore AI RPC listener for mobile APK clients
+  // Start real-time server-side Firestore AI RPC listener (never expose GEMINI_API_KEY to Firestore or clients)
   if (db) {
-    if (GEMINI_API_KEY) {
-      setDoc(
-        doc(db, "settings", "ai_bridge_config"),
-        {
-          k: Buffer.from(GEMINI_API_KEY, "utf-8").toString("base64"),
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      ).catch(() => {});
-    }
+    deleteDoc(doc(db, "settings", "ai_bridge_config")).catch(() => {});
 
     const processedRpcIds = new Set<string>();
     onSnapshot(
@@ -3391,6 +3395,13 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
           const data = docSnap.data();
           if (data?.status !== "pending" || processedRpcIds.has(docSnap.id)) return;
 
+          // Clean up stale RPC documents older than 30 seconds so old requests never clog the queue
+          if (data?.createdAt && Date.now() - Number(data.createdAt) > 30000) {
+            processedRpcIds.add(docSnap.id);
+            deleteDoc(doc(db!, "settings", docSnap.id)).catch(() => {});
+            return;
+          }
+
           processedRpcIds.add(docSnap.id);
           if (processedRpcIds.size > 200) {
             const first = processedRpcIds.values().next().value;
@@ -3398,6 +3409,153 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
           }
 
           try {
+            const reqType = String(data.type || "chat");
+
+            if (reqType === "transcribe") {
+              if (!GEMINI_API_KEY) {
+                throw new Error("Voice transcription service is not configured.");
+              }
+              const audioBase64 = String(data.audioBase64 || "");
+              const mimeType = String(data.mimeType || "audio/webm");
+              if (!audioBase64) {
+                throw new Error("Missing audioBase64 payload.");
+              }
+              const transcribeModels = [
+                "gemini-3.8-flash",
+                "gemini-flash-latest",
+                "gemini-3.1-flash-lite",
+                "gemini-3.5-transcribe",
+              ];
+              let transcript = "";
+              let succeeded = false;
+              for (const transcribeModel of transcribeModels) {
+                try {
+                  const response = await Promise.race([
+                    ai.models.generateContent({
+                      model: transcribeModel,
+                      contents: [
+                        {
+                          role: "user",
+                          parts: [
+                            {
+                              inlineData: {
+                                mimeType,
+                                data: audioBase64,
+                              },
+                            },
+                            {
+                              text: "Transcribe the following spoken store command accurately in English. Output only the transcription text.",
+                            },
+                          ],
+                        },
+                      ],
+                    }),
+                    new Promise<never>((_, reject) =>
+                      setTimeout(() => reject(new Error("Transcription timeout")), 4500)
+                    ),
+                  ]);
+                  if (response && typeof response.text === "string" && response.text.trim()) {
+                    transcript = response.text.trim();
+                    succeeded = true;
+                    break;
+                  }
+                } catch {}
+              }
+              if (!succeeded) {
+                throw new Error("Could not transcribe audio clip.");
+              }
+              await setDoc(
+                doc(db!, "settings", docSnap.id),
+                {
+                  status: "completed",
+                  transcript,
+                  completedAt: Date.now(),
+                },
+                { merge: true }
+              );
+              return;
+            }
+
+            if (reqType === "tts") {
+              if (!GEMINI_API_KEY) {
+                throw new Error("Voice synthesis service is not configured.");
+              }
+              const cleanSpeech = formatSpeechText(String(data.text || "")).slice(0, 400);
+              if (!cleanSpeech) {
+                throw new Error("Empty speech text.");
+              }
+              const cached = ttsMemoryCache.get(cleanSpeech);
+              if (cached) {
+                await setDoc(
+                  doc(db!, "settings", docSnap.id),
+                  {
+                    status: "completed",
+                    audioBase64: cached.audioBase64,
+                    mimeType: cached.mimeType,
+                    completedAt: Date.now(),
+                  },
+                  { merge: true }
+                );
+                return;
+              }
+              const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
+              let audioPart: any = null;
+              for (const ttsModel of ttsModels) {
+                try {
+                  const ttsResponse = await Promise.race([
+                    ai.models.generateContent({
+                      model: ttsModel,
+                      contents: [
+                        {
+                          role: "user",
+                          parts: [{ text: cleanSpeech }],
+                        },
+                      ],
+                      config: {
+                        responseModalities: ["AUDIO"],
+                        speechConfig: {
+                          voiceConfig: {
+                            prebuiltVoiceConfig: {
+                              voiceName: "Kore",
+                            },
+                          },
+                        },
+                      },
+                    }),
+                    new Promise<never>((_, reject) =>
+                      setTimeout(() => reject(new Error("TTS timeout")), 4500)
+                    ),
+                  ]);
+                  const candidate = ttsResponse.candidates?.[0];
+                  audioPart = candidate?.content?.parts?.find((p: any) => p.inlineData);
+                  if (audioPart?.inlineData?.data) {
+                    break;
+                  }
+                } catch {}
+              }
+              if (!audioPart?.inlineData?.data) {
+                throw new Error("Voice synthesis temporarily unavailable.");
+              }
+              const wavBase64 = pcmToWavBase64(audioPart.inlineData.data, 24000);
+              const payload = { audioBase64: wavBase64, mimeType: "audio/wav" };
+              if (ttsMemoryCache.size > 60) {
+                const oldest = ttsMemoryCache.keys().next().value;
+                if (oldest) ttsMemoryCache.delete(oldest);
+              }
+              ttsMemoryCache.set(cleanSpeech, payload);
+              await setDoc(
+                doc(db!, "settings", docSnap.id),
+                {
+                  status: "completed",
+                  audioBase64: wavBase64,
+                  mimeType: "audio/wav",
+                  completedAt: Date.now(),
+                },
+                { merge: true }
+              );
+              return;
+            }
+
             const cleanPrompt = String(data.prompt || "").trim();
             const conversationHistory = Array.isArray(data.conversationHistory)
               ? data.conversationHistory
@@ -3410,9 +3568,89 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
             let activeModel = "buzz-store-engine";
 
             try {
-              const aiRes = await executeAiQuery(cleanPrompt, snapshot, conversationHistory);
-              replyText = aiRes.text;
-              activeModel = aiRes.modelUsed;
+              const systemInstruction = buildStoreSystemPrompt(snapshot);
+              const contents = buildValidServerGeminiContents(conversationHistory, cleanPrompt);
+              const candidates = [PRIMARY_AI_MODEL, BACKUP_AI_MODEL, TERTIARY_AI_MODEL].filter(
+                (m) => !isModelInCooldown(m)
+              );
+
+              let streamOk = false;
+              if (GEMINI_API_KEY) {
+                for (const model of candidates) {
+                  try {
+                    let streamedText = "";
+                    let lastPartialFlush = 0;
+                    await Promise.race([
+                      (async () => {
+                        const stream = await ai.models.generateContentStream({
+                          model,
+                          contents,
+                          config: {
+                            systemInstruction,
+                            temperature: 0.2,
+                            ...(model.startsWith("gemini-3") && !model.includes("lite")
+                              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                              : {}),
+                          },
+                        });
+                        for await (const chunk of stream) {
+                          const chunkText = chunk.text || "";
+                          if (chunkText) {
+                            streamedText += chunkText;
+                            const now = Date.now();
+                            if (
+                              !streamedText.includes("```action") &&
+                              now - lastPartialFlush >= 220
+                            ) {
+                              lastPartialFlush = now;
+                              const cleanPartial = streamedText
+                                .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+                                .replace(/<thought>[\s\S]*$/g, "")
+                                .trim();
+                              if (cleanPartial) {
+                                setDoc(
+                                  doc(db!, "settings", docSnap.id),
+                                  {
+                                    status: "streaming",
+                                    partialReply: cleanPartial,
+                                    updatedAt: now,
+                                  },
+                                  { merge: true }
+                                ).catch(() => {});
+                              }
+                            }
+                          }
+                        }
+                      })(),
+                      new Promise<never>((_, reject) =>
+                        setTimeout(() => reject(new Error(`RPC stream timeout on ${model}`)), 4200)
+                      ),
+                    ]);
+
+                    if (streamedText.trim()) {
+                      replyText = streamedText;
+                      activeModel = model;
+                      streamOk = true;
+                      markModelSuccess(model);
+                      break;
+                    }
+                  } catch (streamErr: any) {
+                    const errMsg = String(streamErr?.message || streamErr);
+                    const isQuota =
+                      errMsg.includes("429") ||
+                      errMsg.includes("RESOURCE_EXHAUSTED") ||
+                      errMsg.includes("quota");
+                    markModelFailure(model, isQuota);
+                  }
+                }
+              }
+
+              if (!streamOk) {
+                const aiRes = await executeAiQuery(cleanPrompt, snapshot, conversationHistory);
+                replyText = aiRes.text;
+                activeModel = aiRes.modelUsed;
+              }
+
               let rawAction: any = null;
               const actionMatch = replyText.match(/```action\s*([\s\S]*?)\s*```/);
               if (actionMatch && actionMatch[1]) {
@@ -3420,7 +3658,10 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                   rawAction = JSON.parse(actionMatch[1]);
                 } catch {}
               }
-              replyText = replyText.replace(/```action[\s\S]*?```/g, "").trim();
+              replyText = replyText
+                .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+                .replace(/```action[\s\S]*?```/g, "")
+                .trim();
               actionData = validateAndNormalizeAction(rawAction, cleanPrompt, replyText, snapshot);
               if (rawAction && !actionData) {
                 replyText = cleanReplyWhenActionSuppressed(replyText);

@@ -198,6 +198,24 @@ export async function connectRealPrinter(): Promise<boolean> {
     }
   }
 
+  // 3. Native Android APK Print Spooler fallback (Android System WebView uses OS PrintManager instead of Web Bluetooth)
+  const isNativeAndroid =
+    typeof window !== 'undefined' &&
+    Boolean(
+      (window as any).AndroidExporter ||
+      (window as any).Capacitor?.isNativePlatform?.()
+    );
+
+  if (isNativeAndroid) {
+    emitState({
+      connected: true,
+      connecting: false,
+      deviceName: 'Android Print Service',
+      error: null,
+    });
+    return true;
+  }
+
   // Hardware Bluetooth/USB unavailable in this browser/iframe environment
   emitState({
     connected: false,

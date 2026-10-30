@@ -1,42 +1,7 @@
 import { Capacitor } from "@capacitor/core";
-import { GoogleGenAI } from "@google/genai";
 import { db } from "./firebase";
-import { doc, getDoc, setDoc, onSnapshot, deleteDoc } from "firebase/firestore";
+import { doc, setDoc, onSnapshot, deleteDoc } from "firebase/firestore";
 import { MAX_PRODUCT_STOCK, MAX_BILL_AMOUNT } from "./utils";
-
-let cachedDirectAiClient: GoogleGenAI | null = null;
-let cachedBridgeKey = "";
-
-async function getDirectGenAIClient(): Promise<GoogleGenAI | null> {
-  if (cachedDirectAiClient && cachedBridgeKey) {
-    return cachedDirectAiClient;
-  }
-  const envKey = String(
-    (typeof process !== "undefined" && (process as any).env?.GEMINI_API_KEY) ||
-      (import.meta as any).env?.VITE_GEMINI_API_KEY ||
-      ""
-  ).trim();
-  if (envKey) {
-    cachedBridgeKey = envKey;
-    cachedDirectAiClient = new GoogleGenAI({ apiKey: envKey });
-    return cachedDirectAiClient;
-  }
-  try {
-    const snap = await getDoc(doc(db, "settings", "ai_bridge_config"));
-    if (snap.exists()) {
-      const encoded = snap.data()?.k;
-      if (typeof encoded === "string" && encoded.trim()) {
-        const decoded = atob(encoded.trim()).trim();
-        if (decoded) {
-          cachedBridgeKey = decoded;
-          cachedDirectAiClient = new GoogleGenAI({ apiKey: decoded });
-          return cachedDirectAiClient;
-        }
-      }
-    }
-  } catch {}
-  return null;
-}
 
 export interface BatchProductItem {
   name: string;
@@ -135,12 +100,30 @@ export interface AssistantResponse {
   thoughtDuration?: number;
 }
 
+// Tracks whether direct HTTP /api/gemini/* is reachable from the current origin/device
+let lastHttpFailureAt = 0;
+
+function shouldPreferFirestoreBridge(): boolean {
+  if (Capacitor.isNativePlatform()) {
+    const customHost = localStorage.getItem("buzz_api_server_url");
+    if (!customHost) {
+      // Native Android WebView (https://localhost) cannot pass AI Studio Cloud Run proxy auth cookies;
+      // route directly through the real-time server-side Firestore RPC bridge for 1-second responses.
+      return true;
+    }
+  }
+  if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 45000) {
+    return true;
+  }
+  return false;
+}
+
 // Determines the best API URL depending on web vs native Android Capacitor
 export function getApiBaseUrl(): string {
   if (Capacitor.isNativePlatform()) {
     const customHost = localStorage.getItem("buzz_api_server_url");
     if (customHost) return customHost.replace(/\/$/, "");
-    return "https://ais-pre-zhoi7xxec7lusunjr5mfey-549311647835.asia-southeast1.run.app";
+    return "https://ais-pre-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app";
   }
   return "";
 }
@@ -616,7 +599,8 @@ async function askViaFirestoreBridge(
   prompt: string,
   compactedHistory: { role: "user" | "assistant"; content: string }[],
   compactedContext: StoreContext,
-  onChunk?: (cleanText: string) => void
+  onChunk?: (cleanText: string) => void,
+  externalSignal?: AbortSignal
 ): Promise<AssistantResponse> {
   const reqId = `ai_rpc_req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const reqRef = doc(db, "settings", reqId);
@@ -635,20 +619,54 @@ async function askViaFirestoreBridge(
       deleteDoc(reqRef).catch(() => {});
     };
 
-    const timer = setTimeout(() => {
+    if (externalSignal) {
+      if (externalSignal.aborted) {
+        cleanup();
+        reject(new Error("Aborted"));
+        return;
+      }
+      externalSignal.addEventListener(
+        "abort",
+        () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            cleanup();
+            reject(new Error("Aborted"));
+          }
+        },
+        { once: true }
+      );
+    }
+
+    let timer = setTimeout(() => {
       if (!settled) {
         settled = true;
         cleanup();
         reject(new Error("Firestore AI bridge timed out"));
       }
-    }, 6500);
+    }, 5500);
+
+    const refreshStreamTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error("Firestore AI bridge stream timed out"));
+        }
+      }, 4500);
+    };
 
     unsub = onSnapshot(
       reqRef,
       (snap) => {
         if (settled || !snap.exists()) return;
         const data = snap.data();
-        if (data?.status === "completed" && data?.reply) {
+        if (data?.status === "streaming" && typeof data.partialReply === "string" && onChunk) {
+          refreshStreamTimer();
+          onChunk(data.partialReply);
+        } else if (data?.status === "completed" && data?.reply) {
           settled = true;
           clearTimeout(timer);
           const validatedAction = validateClientAction(
@@ -686,6 +704,7 @@ async function askViaFirestoreBridge(
     );
 
     setDoc(reqRef, {
+      type: "chat",
       status: "pending",
       prompt: prompt.trim().slice(0, 1200),
       conversationHistory: compactedHistory,
@@ -712,7 +731,6 @@ export function buildValidGeminiContents(
   for (const msg of compactedHistory || []) {
     const text = String(msg?.content || "").trim();
     if (!text) continue;
-    // Skip welcome briefing message if present in history
     if (text.includes("I am **Buzz AI**, your intelligent retail store manager")) continue;
     rawTurns.push({
       role: msg.role === "assistant" ? "model" : "user",
@@ -720,7 +738,6 @@ export function buildValidGeminiContents(
     });
   }
 
-  // Remove trailing user message if it duplicates the current prompt
   while (
     rawTurns.length > 0 &&
     rawTurns[rawTurns.length - 1].role === "user" &&
@@ -729,12 +746,10 @@ export function buildValidGeminiContents(
     rawTurns.pop();
   }
 
-  // Gemini API requires the first turn in contents to have role === "user"
   while (rawTurns.length > 0 && rawTurns[0].role === "model") {
     rawTurns.shift();
   }
 
-  // Merge any consecutive turns with the same role so Gemini never rejects with 400 INVALID_ARGUMENT
   const contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [];
   for (const turn of rawTurns) {
     const prev = contents[contents.length - 1];
@@ -761,103 +776,6 @@ export function buildValidGeminiContents(
   return contents;
 }
 
-async function streamViaDirectGenAI(
-  prompt: string,
-  compactedHistory: { role: "user" | "assistant"; content: string }[],
-  compactedContext: StoreContext,
-  onChunk: (cleanText: string) => void,
-  externalSignal?: AbortSignal
-): Promise<AssistantResponse> {
-  const aiClient = await getDirectGenAIClient();
-  if (!aiClient) {
-    throw new Error("Direct AI client unavailable");
-  }
-
-  const systemInstruction = buildClientSystemPrompt(compactedContext);
-  const contents = buildValidGeminiContents(compactedHistory, prompt);
-
-  const models = [
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite",
-    "gemini-flash-latest",
-    "gemini-3.8-flash",
-  ];
-  for (const model of models) {
-    if (externalSignal?.aborted) {
-      throw new Error("Aborted");
-    }
-    try {
-      const streamPromise = aiClient.models.generateContentStream({
-        model,
-        contents,
-        config: {
-          systemInstruction,
-          temperature: 0.25,
-        },
-      });
-
-      const stream = await Promise.race([
-        streamPromise,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout on ${model}`)), 8000)
-        ),
-      ]);
-
-      let accumulatedRaw = "";
-      for await (const chunk of stream) {
-        if (externalSignal?.aborted) {
-          throw new Error("Aborted");
-        }
-        const chunkText = chunk.text || "";
-        if (chunkText) {
-          accumulatedRaw += chunkText;
-          const cleanDisplay = accumulatedRaw
-            .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-            .replace(/<thought>[\s\S]*$/g, "")
-            .replace(/```action[\s\S]*?```/g, "")
-            .replace(/```action[\s\S]*$/g, "")
-            .trim();
-          if (cleanDisplay) {
-            onChunk(cleanDisplay);
-          }
-        }
-      }
-
-      if (accumulatedRaw.trim()) {
-        let rawAction: any = null;
-        const actionMatch = accumulatedRaw.match(/```action\s*([\s\S]*?)\s*```/);
-        if (actionMatch && actionMatch[1]) {
-          try {
-            rawAction = JSON.parse(actionMatch[1]);
-          } catch {}
-        }
-        const cleanReply = accumulatedRaw
-          .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-          .replace(/```action[\s\S]*?```/g, "")
-          .trim();
-
-        const validatedAction = validateClientAction(
-          rawAction,
-          prompt,
-          cleanReply,
-          compactedContext
-        );
-
-        return {
-          reply: cleanReply,
-          action: validatedAction,
-          thought: generateDynamicThought(prompt, cleanReply, compactedContext),
-          rawText: accumulatedRaw,
-        };
-      }
-    } catch (err: any) {
-      if (externalSignal?.aborted) throw err;
-    }
-  }
-
-  throw new Error("Direct Gemini models unavailable");
-}
-
 export async function askGeminiAssistant(
   prompt: string,
   conversationHistory: { role: "user" | "assistant"; content: string }[],
@@ -874,11 +792,11 @@ export async function askGeminiAssistant(
   const compactedContext = compactStoreContext(storeContext);
   const compactedHistory = compactConversationHistory(conversationHistory);
 
-  if (!Capacitor.isNativePlatform()) {
+  if (!shouldPreferFirestoreBridge()) {
     const baseUrl = getApiBaseUrl();
     const endpoint = `${baseUrl}/api/gemini/chat`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 7000);
+    const timer = setTimeout(() => controller.abort(), 3800);
 
     try {
       const response = await fetch(endpoint, {
@@ -897,6 +815,7 @@ export async function askGeminiAssistant(
 
       const contentType = response.headers.get("content-type") || "";
       if (response.ok && contentType.includes("application/json")) {
+        lastHttpFailureAt = 0;
         const data = await response.json();
         const replyStr = String(data?.reply || "").trim();
         if (replyStr) {
@@ -904,20 +823,19 @@ export async function askGeminiAssistant(
           data.action = validateClientAction(data.action, prompt, data.reply, compactedContext);
           return data;
         }
+      } else {
+        lastHttpFailureAt = Date.now();
       }
     } catch {
       clearTimeout(timer);
+      lastHttpFailureAt = Date.now();
     }
   }
 
   try {
-    return await streamViaDirectGenAI(prompt, compactedHistory, compactedContext, () => {});
+    return await askViaFirestoreBridge(prompt, compactedHistory, compactedContext);
   } catch {
-    try {
-      return await askViaFirestoreBridge(prompt, compactedHistory, compactedContext);
-    } catch {
-      return generateClientStoreResponse(prompt, compactedContext, compactedHistory);
-    }
+    return generateClientStoreResponse(prompt, compactedContext, compactedHistory);
   }
 }
 
@@ -979,14 +897,14 @@ export async function askGeminiAssistantStream(
     });
   };
 
-  const timeoutId = setTimeout(() => {
+  // Fast initial connection timeout (3.2s) so mobile/installed devices never stall for 15+ seconds;
+  // once streaming chunks begin arriving, extend stream timeout to 8s.
+  let timeoutId = setTimeout(() => {
     if (completed || userAborted) return;
     controller.abort();
-  }, 15000);
+  }, 3200);
 
-  // On native Android APK, relative /api/gemini/chat-stream is not served locally and Cloud Run preview URLs require browser auth cookies;
-  // stream directly via @google/genai client (backed by live Firestore bridge config) first for sub-second real-time responses!
-  if (!Capacitor.isNativePlatform()) {
+  if (!shouldPreferFirestoreBridge()) {
     try {
       const baseUrl = getApiBaseUrl();
       const endpoint = `${baseUrl}/api/gemini/chat-stream`;
@@ -1005,8 +923,16 @@ export async function askGeminiAssistantStream(
 
       const contentType = response.headers.get("content-type") || "";
       if (!response.ok || !response.body || !contentType.includes("text/event-stream")) {
+        lastHttpFailureAt = Date.now();
         throw new Error(`Stream endpoint returned ${response.status}`);
       }
+
+      lastHttpFailureAt = 0;
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        if (completed || userAborted) return;
+        controller.abort();
+      }, 8000);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -1111,14 +1037,18 @@ export async function askGeminiAssistantStream(
         return;
       }
     } catch {
-      // Proceed to direct GenAI streaming / Firestore bridge fallback
+      lastHttpFailureAt = Date.now();
+      clearTimeout(timeoutId);
+      // Proceed immediately to server-side Firestore RPC bridge fallback
     }
+  } else {
+    clearTimeout(timeoutId);
   }
 
   if (userAborted || externalSignal?.aborted) return;
 
   try {
-    const directRes = await streamViaDirectGenAI(
+    const bridgeRes = await askViaFirestoreBridge(
       prompt,
       compactedHistory,
       compactedContext,
@@ -1126,27 +1056,13 @@ export async function askGeminiAssistantStream(
       externalSignal
     );
     if (!userAborted && !externalSignal?.aborted) {
-      safeComplete(directRes);
+      safeComplete(bridgeRes);
       return;
     }
   } catch {
-    if (userAborted || externalSignal?.aborted) return;
-    try {
-      const bridgeRes = await askViaFirestoreBridge(
-        prompt,
-        compactedHistory,
-        compactedContext,
-        onChunk
-      );
-      if (!userAborted && !externalSignal?.aborted) {
-        safeComplete(bridgeRes);
-        return;
-      }
-    } catch {
-      if (!userAborted && !externalSignal?.aborted) {
-        onChunk(localFallback.reply);
-        safeComplete(localFallback);
-      }
+    if (!userAborted && !externalSignal?.aborted) {
+      onChunk(localFallback.reply);
+      safeComplete(localFallback);
     }
   }
 }
@@ -2385,6 +2301,79 @@ function clientPcmToWavBase64(pcmBase64: string, sampleRate: number = 24000): st
   }
 }
 
+async function transcribeViaFirestoreBridge(
+  audioBase64: string,
+  mimeType: string
+): Promise<string> {
+  const reqId = `ai_rpc_req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const reqRef = doc(db, "settings", reqId);
+
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    let unsub: (() => void) | null = null;
+
+    const cleanup = () => {
+      if (unsub) {
+        try {
+          unsub();
+        } catch {}
+        unsub = null;
+      }
+      deleteDoc(reqRef).catch(() => {});
+    };
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        reject(new Error("Server transcription timed out"));
+      }
+    }, 8000);
+
+    unsub = onSnapshot(
+      reqRef,
+      (snap) => {
+        if (settled || !snap.exists()) return;
+        const data = snap.data();
+        if (data?.status === "completed" && typeof data.transcript === "string") {
+          settled = true;
+          clearTimeout(timer);
+          cleanup();
+          resolve(data.transcript.trim());
+        } else if (data?.status === "error") {
+          settled = true;
+          clearTimeout(timer);
+          cleanup();
+          reject(new Error(data.error || "Transcription error"));
+        }
+      },
+      (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          cleanup();
+          reject(err);
+        }
+      }
+    );
+
+    setDoc(reqRef, {
+      type: "transcribe",
+      status: "pending",
+      audioBase64,
+      mimeType,
+      createdAt: Date.now(),
+    }).catch((err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        reject(err);
+      }
+    });
+  });
+}
+
 export async function transcribeAudio(audioBlob: Blob): Promise<string> {
   // Convert Blob to base64 string safely in chunks
   const arrayBuffer = await audioBlob.arrayBuffer();
@@ -2401,10 +2390,12 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
   const rawType = (audioBlob.type || "audio/webm").split(";")[0].trim();
   const mimeType = rawType || "audio/webm";
 
-  // 1. Try server endpoint first on Web
-  if (!Capacitor.isNativePlatform()) {
+  // 1. Call server endpoint /api/gemini/transcribe when direct HTTP is available
+  if (!shouldPreferFirestoreBridge()) {
     const baseUrl = getApiBaseUrl();
     const endpoint = `${baseUrl}/api/gemini/transcribe`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3800);
 
     try {
       const response = await fetch(endpoint, {
@@ -2416,54 +2407,31 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
           audioBase64,
           mimeType,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timer);
 
       const contentType = response.headers.get("content-type") || "";
       if (response.ok && contentType.includes("application/json")) {
+        lastHttpFailureAt = 0;
         const data = await response.json();
         if (data && typeof data.transcript === "string" && data.transcript.trim()) {
           return data.transcript.trim();
         }
+      } else {
+        lastHttpFailureAt = Date.now();
       }
-    } catch {}
-  }
-
-  // 2. Direct @google/genai audio transcription (works on Android APK and Web fallback)
-  const aiClient = await getDirectGenAIClient();
-  if (aiClient) {
-    const transcribeModels = [
-      "gemini-3.5-transcribe",
-      "gemini-3-flash-preview",
-      "gemini-3.1-flash-lite",
-      "gemini-3.8-flash",
-    ];
-    for (const model of transcribeModels) {
-      try {
-        const res = await aiClient.models.generateContent({
-          model,
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  inlineData: {
-                    mimeType,
-                    data: audioBase64,
-                  },
-                },
-                {
-                  text: "Transcribe the spoken store command accurately in English. Output only the spoken words without commentary.",
-                },
-              ],
-            },
-          ],
-        });
-        if (res && typeof res.text === "string" && res.text.trim()) {
-          return res.text.trim();
-        }
-      } catch {}
+    } catch {
+      clearTimeout(timer);
+      lastHttpFailureAt = Date.now();
     }
   }
+
+  // 2. Server-side Firestore RPC bridge fallback (processed on server.ts)
+  try {
+    const transcript = await transcribeViaFirestoreBridge(audioBase64, mimeType);
+    if (transcript) return transcript;
+  } catch {}
 
   throw new Error("Could not transcribe voice clip. Please speak clearly or type your command.");
 }
@@ -2489,6 +2457,78 @@ export function formatTextForSpeech(raw: string, maxChars: number = 520): string
     .slice(0, maxChars);
 }
 
+async function ttsViaFirestoreBridge(
+  text: string,
+  timeoutMs: number
+): Promise<string> {
+  const reqId = `ai_rpc_req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const reqRef = doc(db, "settings", reqId);
+
+  return new Promise<string>((resolve, reject) => {
+    let settled = false;
+    let unsub: (() => void) | null = null;
+
+    const cleanup = () => {
+      if (unsub) {
+        try {
+          unsub();
+        } catch {}
+        unsub = null;
+      }
+      deleteDoc(reqRef).catch(() => {});
+    };
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        cleanup();
+        reject(new Error("Server TTS timed out"));
+      }
+    }, timeoutMs);
+
+    unsub = onSnapshot(
+      reqRef,
+      (snap) => {
+        if (settled || !snap.exists()) return;
+        const data = snap.data();
+        if (data?.status === "completed" && typeof data.audioBase64 === "string" && data.audioBase64) {
+          settled = true;
+          clearTimeout(timer);
+          cleanup();
+          resolve(data.audioBase64);
+        } else if (data?.status === "error") {
+          settled = true;
+          clearTimeout(timer);
+          cleanup();
+          reject(new Error(data.error || "TTS error"));
+        }
+      },
+      (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          cleanup();
+          reject(err);
+        }
+      }
+    );
+
+    setDoc(reqRef, {
+      type: "tts",
+      status: "pending",
+      text,
+      createdAt: Date.now(),
+    }).catch((err) => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        reject(err);
+      }
+    });
+  });
+}
+
 export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 5000): Promise<string> {
   const cleanKey = formatTextForSpeech(text, 400);
   if (!cleanKey) {
@@ -2498,12 +2538,12 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
     return clientTtsCache.get(cleanKey)!;
   }
 
-  // 1. Try server endpoint on Web
-  if (!Capacitor.isNativePlatform()) {
+  // 1. Call server endpoint /api/gemini/tts when direct HTTP is available
+  if (!shouldPreferFirestoreBridge()) {
     const baseUrl = getApiBaseUrl();
     const endpoint = `${baseUrl}/api/gemini/tts`;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 3500));
 
     try {
       const response = await fetch(endpoint, {
@@ -2518,6 +2558,7 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
       clearTimeout(timer);
       const contentType = response.headers.get("content-type") || "";
       if (response.ok && contentType.includes("application/json")) {
+        lastHttpFailureAt = 0;
         const data = await response.json();
         if (data?.audioBase64) {
           const wavB64 = clientPcmToWavBase64(data.audioBase64, 24000);
@@ -2529,52 +2570,29 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
           clientTtsCache.set(cleanKey, dataUri);
           return dataUri;
         }
+      } else {
+        lastHttpFailureAt = Date.now();
       }
     } catch {
       clearTimeout(timer);
+      lastHttpFailureAt = Date.now();
     }
   }
 
-  // 2. Direct @google/genai Neural TTS (works on Android APK and Web fallback)
-  const aiClient = await getDirectGenAIClient();
-  if (aiClient) {
-    const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
-    for (const ttsModel of ttsModels) {
-      try {
-        const ttsResponse = await aiClient.models.generateContent({
-          model: ttsModel,
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: cleanKey }],
-            },
-          ],
-          config: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: "Kore",
-                },
-              },
-            },
-          },
-        });
-        const candidate = ttsResponse.candidates?.[0];
-        const audioPart: any = candidate?.content?.parts?.find((p: any) => p.inlineData);
-        if (audioPart?.inlineData?.data) {
-          const wavB64 = clientPcmToWavBase64(audioPart.inlineData.data, 24000);
-          const dataUri = `data:audio/wav;base64,${wavB64}`;
-          if (clientTtsCache.size > 40) {
-            const oldestKey = clientTtsCache.keys().next().value;
-            if (oldestKey) clientTtsCache.delete(oldestKey);
-          }
-          clientTtsCache.set(cleanKey, dataUri);
-          return dataUri;
-        }
-      } catch {}
+  // 2. Server-side Firestore RPC bridge fallback (processed on server.ts)
+  try {
+    const audioBase64 = await ttsViaFirestoreBridge(cleanKey, Math.min(timeoutMs, 4500));
+    if (audioBase64) {
+      const wavB64 = clientPcmToWavBase64(audioBase64, 24000);
+      const dataUri = `data:audio/wav;base64,${wavB64}`;
+      if (clientTtsCache.size > 40) {
+        const oldestKey = clientTtsCache.keys().next().value;
+        if (oldestKey) clientTtsCache.delete(oldestKey);
+      }
+      clientTtsCache.set(cleanKey, dataUri);
+      return dataUri;
     }
-  }
+  } catch {}
 
   throw new Error("Voice synthesis unavailable");
 }

@@ -5,7 +5,7 @@ import { useAuth } from '../lib/AuthContext';
 import { triggerHaptic } from '../lib/haptics';
 
 export function Login() {
-  const { signInWithGoogle, signInAnonymouslyAsAdmin } = useAuth();
+  const { signInWithGoogle } = useAuth();
   const [error, setError] = useState(() => {
     const forcedMsg = localStorage.getItem('adminLogoutMessage');
     if (forcedMsg) {
@@ -64,17 +64,6 @@ export function Login() {
         setError('Your account has been blocked by the administrator. You cannot log in to this app.');
         triggerHaptic('error');
         return;
-      }
-      
-      if (stringError.includes('unauthorized-domain') || stringError.includes('unauthorized_domain') || stringError.includes('auth/unauthorized-domain')) {
-        // Fallback silently and seamlessly to anonymous sign-in so developers/remix users can access the app immediately!
-        try {
-          await signInAnonymouslyAsAdmin();
-          triggerHaptic('success');
-          return;
-        } catch (anonErr) {
-          console.error("Anonymous fallback failed:", anonErr);
-        }
       }
       
       let friendlyError = '';

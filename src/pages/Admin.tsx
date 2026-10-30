@@ -94,9 +94,11 @@ import {
   doc,
   setDoc,
   getDoc,
+  getDocFromServer,
   addDoc,
   collection,
   getDocs,
+  getDocsFromServer,
   deleteDoc,
   onSnapshot,
   query,
@@ -383,14 +385,20 @@ export function Admin() {
       const data = typeof docSnap.data === "function" ? docSnap.data() : docSnap;
       if (id.startsWith("profile_")) {
         const uid = id.replace("profile_", "");
+        if (uid.startsWith("local_dev_bypass")) {
+          deleteDoc(doc(db, "settings", id)).catch(() => {});
+          return;
+        }
         const emailLower = String(data?.email || "").trim().toLowerCase();
         const deletedAt = Math.max(
           deletedAccountTimestampsRef.current.get(uid) || 0,
           deletedUidsMap[uid] || 0,
           emailLower ? deletedEmailsMap[emailLower] || 0 : 0
         );
-        const docUpdatedAt = Number(data?.updatedAt) || 0;
-        if (deletedAt > 0 && docUpdatedAt <= deletedAt) {
+        const docRecreatedAt = Number(data?.recreatedAt) || 0;
+        // If this account is in deleted_accounts and was NOT explicitly recreated after deletion,
+        // purge any lingering or resurrected profile doc immediately!
+        if (deletedAt > 0 && docRecreatedAt <= deletedAt) {
           deleteDoc(doc(db, "settings", id)).catch(() => {});
           return;
         }
@@ -411,6 +419,10 @@ export function Admin() {
         }
       } else if (id.startsWith("attempts_")) {
         const uid = id.replace("attempts_", "");
+        if (uid.startsWith("local_dev_bypass")) {
+          deleteDoc(doc(db, "settings", id)).catch(() => {});
+          return;
+        }
         if (
           (deletedAccountTimestampsRef.current.has(uid) || Boolean(deletedUidsMap[uid])) &&
           !profilesMap[uid]
@@ -441,7 +453,8 @@ export function Admin() {
           return null;
         }
         const emailStr = String(profile.email || "").trim();
-        const isOwner = emailStr.toLowerCase() === "suman.das.199972@gmail.com";
+        const emailLower = emailStr.toLowerCase();
+        const isOwner = emailLower === "suman.das.199972@gmail.com";
 
         let isActuallyAdmin = false;
         if (profile.tempAdminAuth === true && !isOwner) {
@@ -459,7 +472,7 @@ export function Admin() {
           !isActuallyAdmin &&
           (profile.isBlocked === true ||
             blockedUidsSet.has(uid) ||
-            (Boolean(emailStr) && blockedEmailsSet.has(emailStr.toLowerCase())));
+            (Boolean(emailLower) && blockedEmailsSet.has(emailLower)));
 
         const actualRole = isActuallyAdmin ? "admin" : "user";
         const isActuallyOnline =
@@ -477,6 +490,7 @@ export function Admin() {
           failedCount: isActuallyAdmin ? 0 : attemptInfo.failedCount,
           lockedByAdmin: isActuallyAdmin ? false : attemptInfo.lockedByAdmin,
           isBlocked,
+          recreatedAt: Number(profile.recreatedAt) || 0,
           updatedAt: profile.updatedAt || 0,
           isAdmin: isActuallyAdmin,
           role: actualRole,
@@ -497,6 +511,28 @@ export function Admin() {
       if (!existing) {
         byKey.set(normEmail, { ...acc, allUids: [acc.uid] });
       } else {
+        // If one profile was freshly recreated after an account deletion and the other is an older stale profile doc,
+        // delete the stale profile doc so old custom names ("meow") or roles never merge back in!
+        const accRecreated = Number(acc.recreatedAt) || 0;
+        const existingRecreated = Number(existing.recreatedAt) || 0;
+        if (accRecreated > existingRecreated && accRecreated > (existing.updatedAt || 0)) {
+          existing.allUids.forEach((staleUid: string) => {
+            if (staleUid !== acc.uid) {
+              deleteDoc(doc(db, "settings", `profile_${staleUid}`)).catch(() => {});
+              deleteDoc(doc(db, "settings", `attempts_${staleUid}`)).catch(() => {});
+            }
+          });
+          byKey.set(normEmail, { ...acc, allUids: [acc.uid] });
+          return;
+        }
+        if (existingRecreated > accRecreated && existingRecreated > (acc.updatedAt || 0)) {
+          if (acc.uid !== existing.uid) {
+            deleteDoc(doc(db, "settings", `profile_${acc.uid}`)).catch(() => {});
+            deleteDoc(doc(db, "settings", `attempts_${acc.uid}`)).catch(() => {});
+          }
+          return;
+        }
+
         const mergedUids = Array.from(new Set([...existing.allUids, acc.uid]));
         const preferCurrent = acc.uid === user?.uid || (acc.updatedAt || 0) >= (existing.updatedAt || 0);
         const mergedAdmin = Boolean((preferCurrent ? acc : existing).isAdmin);
@@ -521,6 +557,7 @@ export function Admin() {
           isBlocked: mergedBlocked,
           isOnline: mergedBlocked ? false : existing.isOnline || acc.isOnline,
           lastActive: Math.max(existing.lastActive || 0, acc.lastActive || 0),
+          recreatedAt: Math.max(existingRecreated, accRecreated),
           updatedAt: Math.max(existing.updatedAt || 0, acc.updatedAt || 0),
         });
       }
@@ -544,12 +581,12 @@ export function Admin() {
       return;
     }
     try {
-      const snap = await getDocs(collection(db, "settings"));
+      const snap = await getDocsFromServer(collection(db, "settings")).catch(() =>
+        getDocs(collection(db, "settings"))
+      );
       const list = buildUnifiedAccountsList(snap.docs);
       setAccounts(list);
-      if (list.length > 0) {
-        localStorage.setItem("admin_cached_accounts", JSON.stringify(list));
-      }
+      localStorage.setItem("admin_cached_accounts", JSON.stringify(list));
     } catch (err: any) {
       console.debug("Accounts fetch fallback used:", err);
       const cached = localStorage.getItem("admin_cached_accounts");
@@ -587,9 +624,7 @@ export function Admin() {
           const list = buildUnifiedAccountsList(snap.docs);
           setAccounts(list);
           setAccountsPermissionError(false);
-          if (list.length > 0) {
-            localStorage.setItem("admin_cached_accounts", JSON.stringify(list));
-          }
+          localStorage.setItem("admin_cached_accounts", JSON.stringify(list));
           setAccountsLoading(false);
         },
         (err) => {
@@ -3025,7 +3060,9 @@ export function Admin() {
       );
 
       const blockedDocRef = doc(db, "settings", "blocked_accounts");
-      const blockedSnap = await getDoc(blockedDocRef).catch(() => null);
+      const blockedSnap = await getDocFromServer(blockedDocRef)
+        .catch(() => getDoc(blockedDocRef))
+        .catch(() => null);
       const existingData = blockedSnap?.exists() ? blockedSnap.data() : {};
       const currentUids = new Set<string>(
         Array.isArray(existingData?.blockedUids) ? existingData.blockedUids : []
@@ -3038,20 +3075,19 @@ export function Admin() {
         targetUids.forEach((id) => currentUids.add(id));
         if (normEmail) currentEmails.add(normEmail);
       } else {
-        targetUids.forEach((id) => currentUids.delete(id));
+        targetUids.forEach((id) => {
+          currentUids.delete(id);
+          localStorage.removeItem(`is_blocked_cached_${id}`);
+        });
         if (normEmail) currentEmails.delete(normEmail);
       }
 
       await Promise.all([
-        setDoc(
-          blockedDocRef,
-          {
-            blockedUids: Array.from(currentUids),
-            blockedEmails: Array.from(currentEmails),
-            updatedAt: Date.now(),
-          },
-          { merge: true }
-        ),
+        setDoc(blockedDocRef, {
+          blockedUids: Array.from(currentUids),
+          blockedEmails: Array.from(currentEmails),
+          updatedAt: Date.now(),
+        }),
         ...targetUids.map((tUid) =>
           setDoc(
             doc(db, "settings", `profile_${tUid}`),
@@ -3138,7 +3174,11 @@ export function Admin() {
           ? String(targetAccount.email).trim().toLowerCase()
           : "";
 
-      const now = Date.now();
+      const maxExistingTs = Math.max(
+        Number(targetAccount.recreatedAt) || 0,
+        Number(targetAccount.updatedAt) || 0
+      );
+      const now = Math.max(Date.now(), maxExistingTs + 1000);
       targetUids.forEach((id) => {
         deletedAccountTimestampsRef.current.set(id, now);
       });
@@ -3158,8 +3198,11 @@ export function Admin() {
       });
       setAccountToDelete(null);
 
-      // Scan settings collection for any matching profile_* or attempts_* docs by UID or email, and also remove from blocked_accounts so they can register fresh
-      const snap = await getDocs(collection(db, "settings"));
+      // Scan fresh server settings collection for any matching profile_* or attempts_* docs by UID or email,
+      // and also remove from blocked_accounts so they can register a brand-new account cleanly
+      const snap = await getDocsFromServer(collection(db, "settings")).catch(() =>
+        getDocs(collection(db, "settings"))
+      );
       const batch = writeBatch(db);
       const matchedUids = new Set<string>(targetUids);
 
@@ -3187,34 +3230,32 @@ export function Admin() {
         }
       });
 
-      // Ensure direct refs for all targetUids are deleted even if not in snapshot
+      // Ensure direct refs for all matchedUids are deleted and local cache keys are cleared
       matchedUids.forEach((id) => {
         batch.delete(doc(db, "settings", `profile_${id}`));
         batch.delete(doc(db, "settings", `attempts_${id}`));
+        localStorage.removeItem(`is_blocked_cached_${id}`);
+        localStorage.removeItem(`custom_user_photo_${id}`);
+        localStorage.removeItem(`is_admin_cached_${id}`);
+        localStorage.removeItem(`is_real_admin_cached_${id}`);
       });
 
-      // Also clear from blocked_accounts so the user can create a brand-new account if they sign in again later
+      // Unconditionally update blocked_accounts (WITHOUT merge:true) so any prior ban for these UIDs or email is removed
       const blockedDocSnap = snap.docs.find((d) => d.id === "blocked_accounts");
-      if (blockedDocSnap) {
-        const bData = blockedDocSnap.data();
-        const nextBlockedUids = (
-          Array.isArray(bData?.blockedUids) ? bData.blockedUids : []
-        ).filter((id: string) => !matchedUids.has(id));
-        const nextBlockedEmails = (
-          Array.isArray(bData?.blockedEmails) ? bData.blockedEmails : []
-        ).filter((em: string) => String(em).trim().toLowerCase() !== normEmail);
-        batch.set(
-          doc(db, "settings", "blocked_accounts"),
-          {
-            blockedUids: nextBlockedUids,
-            blockedEmails: nextBlockedEmails,
-            updatedAt: now,
-          },
-          { merge: true }
-        );
-      }
+      const bData = blockedDocSnap ? blockedDocSnap.data() : {};
+      const nextBlockedUids = (
+        Array.isArray(bData?.blockedUids) ? bData.blockedUids : []
+      ).filter((id: string) => !matchedUids.has(id));
+      const nextBlockedEmails = (
+        Array.isArray(bData?.blockedEmails) ? bData.blockedEmails : []
+      ).filter((em: string) => !normEmail || String(em).trim().toLowerCase() !== normEmail);
+      batch.set(doc(db, "settings", "blocked_accounts"), {
+        blockedUids: nextBlockedUids,
+        blockedEmails: nextBlockedEmails,
+        updatedAt: now,
+      });
 
-      // Record deletion timestamp in settings/deleted_accounts so stale cached sessions on other devices cannot resurrect this account
+      // Record deletion timestamp in settings/deleted_accounts (WITHOUT merge:true so map keys are authoritative)
       const deletedDocSnap = snap.docs.find((d) => d.id === "deleted_accounts");
       const existingDelData = deletedDocSnap ? deletedDocSnap.data() : {};
       const nextDeletedUids: Record<string, number> =
@@ -3231,15 +3272,11 @@ export function Admin() {
       if (normEmail) {
         nextDeletedEmails[normEmail] = now;
       }
-      batch.set(
-        doc(db, "settings", "deleted_accounts"),
-        {
-          deletedUids: nextDeletedUids,
-          deletedEmails: nextDeletedEmails,
-          updatedAt: now,
-        },
-        { merge: true }
-      );
+      batch.set(doc(db, "settings", "deleted_accounts"), {
+        deletedUids: nextDeletedUids,
+        deletedEmails: nextDeletedEmails,
+        updatedAt: now,
+      });
 
       await batch.commit();
 

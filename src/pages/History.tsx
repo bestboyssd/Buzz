@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { Activity, DollarSign, Receipt, Search, X, TrendingUp } from 'lucide-react';
@@ -8,7 +8,7 @@ import { Bill } from '../lib/firestoreHooks';
 import { triggerHaptic } from '../lib/haptics';
 import { ProfileMenu } from '../components/ProfileMenu';
 import { BillReceiptModal } from '../components/BillReceiptModal';
-import { formatPrice, useOptimizedTransition, useHardwareAcceleration } from '../lib/utils';
+import { formatPrice, useOptimizedTransition, useHardwareAcceleration, getBillCalendarIsoDate } from '../lib/utils';
 
 const formatDateToDMY = (timestamp: number | string | Date) => {
   const d = new Date(timestamp);
@@ -22,22 +22,31 @@ const formatDateToDMY = (timestamp: number | string | Date) => {
 export function History() {
   const { products } = useGlobalProducts();
   const { bills } = useGlobalBills();
+  const [todayIso, setTodayIso] = useState(() => getBillCalendarIsoDate());
+
+  useEffect(() => {
+    const syncToday = () => {
+      const current = getBillCalendarIsoDate();
+      setTodayIso((prev) => (prev === current ? prev : current));
+    };
+    const interval = window.setInterval(syncToday, 15000);
+    window.addEventListener('focus', syncToday);
+    document.addEventListener('visibilitychange', syncToday);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', syncToday);
+      document.removeEventListener('visibilitychange', syncToday);
+    };
+  }, []);
 
   const todayBills = useMemo(() => {
-    const today = new Date();
-    const tDay = today.getDate();
-    const tMonth = today.getMonth();
-    const tYear = today.getFullYear();
-
     return bills.filter((bill) => {
-      const billDate = new Date(bill.date);
-      return (
-        billDate.getDate() === tDay &&
-        billDate.getMonth() === tMonth &&
-        billDate.getFullYear() === tYear
-      );
+      if (bill.date === undefined || bill.date === null) return false;
+      const d = new Date(bill.date);
+      if (isNaN(d.getTime())) return false;
+      return getBillCalendarIsoDate(d) === todayIso;
     });
-  }, [bills]);
+  }, [bills, todayIso]);
 
   const todayRevenue = useMemo(
     () => todayBills.reduce((sum, bill) => sum + (Number(bill.total) || 0), 0),
@@ -48,12 +57,9 @@ export function History() {
   const [search, setSearch] = useState('');
   const [selectedBill, setSelectedBill] = useState<Bill | null>(null);
 
-  const isShowingRecentFallback = todayBills.length === 0 && bills.length > 0;
-
   const filtered = useMemo(() => {
     const searchLower = search.trim().toLowerCase();
-    const sourceBills = searchLower || isShowingRecentFallback ? bills : todayBills;
-    return sourceBills.filter((b) => {
+    return todayBills.filter((b) => {
       if (!searchLower) return true;
 
       const d = formatDateToDMY(b.date).toLowerCase();
@@ -74,7 +80,7 @@ export function History() {
         matchesItems
       );
     });
-  }, [todayBills, bills, search, isShowingRecentFallback]);
+  }, [todayBills, search]);
 
   const pageTransition = useOptimizedTransition({ duration: 0.35, ease: [0.16, 1, 0.3, 1] });
   const gpuClass = useHardwareAcceleration();
@@ -122,7 +128,7 @@ export function History() {
         <div className="flex items-center justify-between px-1 mb-3">
           <h2 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
             <Activity size={18} className="text-indigo-600 dark:text-indigo-400" />
-            <span>{search.trim() ? 'Matching Bills' : isShowingRecentFallback ? 'Recent Bills' : "Today's Bills"}</span>
+            <span>{search.trim() ? 'Matching Bills' : "Today's Bills"}</span>
           </h2>
           <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
             {filtered.length} {filtered.length === 1 ? 'receipt' : 'receipts'}

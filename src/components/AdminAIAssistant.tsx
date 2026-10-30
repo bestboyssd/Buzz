@@ -1058,9 +1058,30 @@ export function AdminAIAssistant({
       }
     }
 
-    // Clean baseline draw if Web Audio stream is unavailable
-    barLevelsRef.current.fill(0);
-    drawWaveformFrame(barLevelsRef.current);
+    // When SpeechRecognition is active on mobile (where getUserMedia cannot be opened concurrently
+    // without locking the Android hardware mic), animate a responsive voice-activity waveform.
+    const levels = barLevelsRef.current;
+    const barCount = levels.length;
+    const centerIdx = (barCount - 1) / 2;
+    let tick = 0;
+
+    const syntheticLoop = () => {
+      tick += 0.14;
+      const speakingPulse = latestSpokenTextRef.current ? 0.55 : 0.28;
+      for (let i = 0; i < barCount; i++) {
+        const distFromCenter = Math.abs(i - centerIdx) / centerIdx;
+        const spatialWindow = Math.cos(distFromCenter * Math.PI * 0.44);
+        const wave =
+          (Math.sin(tick * 2.1 + i * 0.55) * 0.5 + 0.5) * 0.6 +
+          (Math.cos(tick * 3.4 - i * 0.35) * 0.5 + 0.5) * 0.4;
+        const target = Math.min(1, wave * speakingPulse * spatialWindow);
+        levels[i] = levels[i] + (target - levels[i]) * 0.35;
+      }
+      drawWaveformFrame(levels);
+      rafWaveformRef.current = requestAnimationFrame(syntheticLoop);
+    };
+
+    rafWaveformRef.current = requestAnimationFrame(syntheticLoop);
   };
 
   // Stop recording helper (handles both Web Speech API and MediaRecorder)
@@ -1123,6 +1144,11 @@ export function AdminAIAssistant({
       typeof window !== "undefined" &&
       Boolean((window as any).Capacitor?.isNativePlatform?.());
 
+    const isMobileDevice =
+      isNativeMobile ||
+      (typeof navigator !== "undefined" &&
+        /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || ""));
+
     const SpeechRecognition =
       !isNativeMobile &&
       ((window as any).SpeechRecognition ||
@@ -1130,9 +1156,11 @@ export function AdminAIAssistant({
 
     if (SpeechRecognition) {
       try {
-        // Acquire live microphone stream first so Web Audio API waveform is 100% accurate
+        // On desktop browsers, acquire live microphone stream so Web Audio API waveform is 100% accurate.
+        // CRITICAL: On Android mobile phones, opening getUserMedia concurrently with SpeechRecognition
+        // locks the hardware microphone and causes SpeechRecognition to immediately fail!
         let micStream: MediaStream | undefined;
-        if (navigator.mediaDevices?.getUserMedia) {
+        if (!isMobileDevice && navigator.mediaDevices?.getUserMedia) {
           try {
             micStream = await navigator.mediaDevices.getUserMedia({
               audio: {
@@ -1626,7 +1654,7 @@ export function AdminAIAssistant({
       setLoading(false);
       triggerHaptic("light");
       scrollToBottom(false);
-    }, 22000);
+    }, 9000);
     activeWatchdogRef.current = watchdogTimer;
 
     try {
