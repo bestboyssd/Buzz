@@ -35,7 +35,12 @@ import { logActivity, deleteBillAndRestoreStock, deleteProduct } from "../lib/fi
 import { useGlobalProducts, purgeStockAlertsForDeletedProducts } from "../lib/ProductsContext";
 import { useGlobalBills } from "../lib/BillsContext";
 import { db } from "../lib/firebase";
-import { sqliteSaveBill, sqliteDeleteBill, sqliteClearProducts } from "../lib/sqliteAdapter";
+import {
+  sqliteSaveBill,
+  sqliteDeleteBill,
+  sqliteClearProducts,
+  sqliteClearBills,
+} from "../lib/sqliteAdapter";
 import {
   collection,
   doc,
@@ -424,7 +429,7 @@ export function AdminAIAssistant({
     removeProductOptimistic,
     clearProductsOptimistic,
   } = useGlobalProducts();
-  const { bills } = useGlobalBills();
+  const { bills, removeBillOptimistic, clearBillsOptimistic } = useGlobalBills();
   const [otherCosts, setOtherCosts] = useState<any[]>([]);
   const [internalAccounts, setInternalAccounts] = useState<any[]>([]);
   const [internalLogs, setInternalLogs] = useState<any[]>([]);
@@ -1996,7 +2001,11 @@ export function AdminAIAssistant({
         try {
           const existingBill = bills.find((b) => b.id === targetBillId);
           if (existingBill) {
-            sqliteSaveBill({ ...existingBill, total: newTotalVal }).catch(() => {});
+            const updatedBill = { ...existingBill, total: newTotalVal, updatedAt: Date.now() };
+            sqliteSaveBill(updatedBill).catch(() => {});
+            window.dispatchEvent(
+              new CustomEvent("offlineBillQueued", { detail: updatedBill })
+            );
           }
         } catch (sqliteErr) {}
 
@@ -2026,11 +2035,8 @@ export function AdminAIAssistant({
         const existingBill = bills.find((b) => b.id === targetBillId);
         const itemsToRestore = action.items || existingBill?.items || [];
 
-        if (itemsToRestore.length > 0) {
-          await settleWriteFast(deleteBillAndRestoreStock(targetBillId, itemsToRestore));
-        } else {
-          await settleWriteFast(deleteDoc(doc(db, "bills", targetBillId)));
-        }
+        removeBillOptimistic(targetBillId);
+        await settleWriteFast(deleteBillAndRestoreStock(targetBillId, itemsToRestore));
 
         try {
           sqliteDeleteBill(targetBillId).catch(() => {});
@@ -2107,15 +2113,34 @@ export function AdminAIAssistant({
 
         const normalizedCategory = normalizeClientExpenseCategory(action.category);
         const expRef = doc(collection(db, "other_costs"));
+        const newCostRecord = {
+          id: expRef.id,
+          title: cleanTitle,
+          amount: costAmount,
+          category: normalizedCategory,
+          date: Date.now(),
+          ownerId: user?.uid || "system",
+        };
         await settleWriteFast(
           setDoc(expRef, {
-            title: cleanTitle,
-            amount: costAmount,
-            category: normalizedCategory,
-            date: Date.now(),
-            ownerId: user?.uid || "system",
+            title: newCostRecord.title,
+            amount: newCostRecord.amount,
+            category: newCostRecord.category,
+            date: newCostRecord.date,
+            ownerId: newCostRecord.ownerId,
           })
         );
+
+        try {
+          const raw = localStorage.getItem("local_other_costs_fallback");
+          const current = raw ? JSON.parse(raw) : [];
+          const next = [
+            newCostRecord,
+            ...(Array.isArray(current) ? current.filter((c: any) => c.id !== expRef.id) : []),
+          ];
+          localStorage.setItem("local_other_costs_fallback", JSON.stringify(next));
+          window.dispatchEvent(new CustomEvent("otherCostsUpdated", { detail: next }));
+        } catch {}
 
         if (user) {
           logActivity(
@@ -2140,6 +2165,16 @@ export function AdminAIAssistant({
         }
 
         await settleWriteFast(deleteDoc(doc(db, "other_costs", action.expenseId)));
+
+        try {
+          const raw = localStorage.getItem("local_other_costs_fallback");
+          const current = raw ? JSON.parse(raw) : [];
+          if (Array.isArray(current)) {
+            const next = current.filter((c: any) => c.id !== action.expenseId);
+            localStorage.setItem("local_other_costs_fallback", JSON.stringify(next));
+            window.dispatchEvent(new CustomEvent("otherCostsUpdated", { detail: next }));
+          }
+        } catch {}
 
         if (user) {
           logActivity(
@@ -2192,13 +2227,29 @@ export function AdminAIAssistant({
         }
 
         if (targetScope === "bills" || targetScope === "both") {
+          const knownBillIds = new Set<string>();
           for (const b of bills) {
             if (b.id) {
+              knownBillIds.add(b.id);
+              removeBillOptimistic(b.id);
               deleteDoc(doc(db, "bills", b.id)).catch(() => {});
+              deleteDoc(doc(db, "other_costs", `udhaar_bill_${b.id}`)).catch(() => {});
               sqliteDeleteBill(b.id).catch(() => {});
               deletedBillsCount++;
             }
           }
+          clearBillsOptimistic();
+          sqliteClearBills().catch(() => {});
+          getDocs(collection(db, "bills"))
+            .then((snap) => {
+              snap.forEach((docSnap) => {
+                if (!knownBillIds.has(docSnap.id)) {
+                  deleteDoc(doc(db, "bills", docSnap.id)).catch(() => {});
+                  deleteDoc(doc(db, "other_costs", `udhaar_bill_${docSnap.id}`)).catch(() => {});
+                }
+              });
+            })
+            .catch(() => {});
         }
 
         if (user) {
@@ -2395,7 +2446,7 @@ export function AdminAIAssistant({
                   initial={{ opacity: 0, y: 14, scale: 0.97 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
                   transition={{ type: "spring", stiffness: 460, damping: 32, mass: 0.68 }}
-                  className="flex flex-col items-start gap-1.5 max-w-full min-w-0 origin-top-left"
+                  className="flex flex-col items-start gap-1.5 w-full max-w-full min-w-0 origin-top-left"
                 >
                   <div className="flex items-center gap-2 mb-0.5 pl-1 text-[11px]">
                     <div className="relative w-5 h-5 rounded-lg bg-indigo-600 flex items-center justify-center text-white shadow-xs overflow-hidden">
@@ -2413,7 +2464,7 @@ export function AdminAIAssistant({
                     </span>
                   </div>
 
-                  <div className="w-fit max-w-[96%] sm:max-w-[88%] rounded-2xl rounded-tl-xs p-4 sm:p-5 bg-white/95 dark:bg-gradient-to-b dark:from-slate-900/95 dark:via-slate-900/90 dark:to-slate-950/95 border border-slate-200/90 dark:border-slate-700/70 text-slate-800 dark:text-slate-100 shadow-lg shadow-slate-900/[0.04] dark:shadow-xl dark:shadow-black/40 relative backdrop-blur-xl overflow-hidden break-words [overflow-wrap:break-word] min-w-0">
+                  <div className={`${msg.action ? "w-full sm:max-w-[430px]" : "w-fit max-w-[96%] sm:max-w-[88%]"} rounded-2xl rounded-tl-xs p-3.5 sm:p-4 bg-white/95 dark:bg-gradient-to-b dark:from-slate-900/95 dark:via-slate-900/90 dark:to-slate-950/95 border border-slate-200/90 dark:border-slate-700/70 text-slate-800 dark:text-slate-100 shadow-lg shadow-slate-900/[0.04] dark:shadow-xl dark:shadow-black/40 relative backdrop-blur-xl overflow-hidden break-words [overflow-wrap:break-word] min-w-0`}>
                     {/* While Streaming: Compact Thinking Indicator with Live Stopwatch */}
                     {msg.isStreaming && !msg.content && (
                       <div className="flex items-center gap-2.5 py-0.5 px-0.5">
@@ -2464,143 +2515,230 @@ export function AdminAIAssistant({
                         initial={{ opacity: 0, y: 10, scale: 0.98 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         transition={{ type: "spring", stiffness: 460, damping: 30, mass: 0.7 }}
-                        className="mt-3 pt-3 border-t border-slate-200/80 dark:border-slate-800/80"
+                        className="mt-3.5 pt-3 border-t border-slate-200/80 dark:border-slate-800/80 w-full"
                       >
                         {/* 1. UPDATE_STOCK */}
-                        {msg.action.type === "UPDATE_STOCK" && (
-                          <div className="p-3.5 rounded-2xl bg-indigo-50/70 dark:bg-gradient-to-b dark:from-indigo-950/70 dark:via-slate-900/80 dark:to-slate-950/90 border border-indigo-200 dark:border-indigo-500/30 shadow-sm dark:shadow-lg dark:shadow-indigo-950/30 space-y-3">
-                            <div className="flex items-center justify-between gap-2 border-b border-indigo-200/70 dark:border-indigo-500/15 pb-2.5">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="w-6 h-6 rounded-lg bg-indigo-500/15 dark:bg-indigo-500/20 flex items-center justify-center text-indigo-600 dark:text-indigo-400 shrink-0">
-                                  <Zap size={13} />
+                        {msg.action.type === "UPDATE_STOCK" && (() => {
+                          const qtyDelta =
+                            msg.action.quantityChange !== undefined
+                              ? Number(msg.action.quantityChange)
+                              : msg.action.currentStock !== undefined && msg.action.newStock !== undefined
+                              ? Number(msg.action.newStock) - Number(msg.action.currentStock)
+                              : undefined;
+                          return (
+                            <div className="rounded-2xl bg-gradient-to-b from-indigo-50/90 via-white to-indigo-50/40 dark:from-indigo-950/60 dark:via-slate-900/95 dark:to-slate-950 border border-indigo-200/90 dark:border-indigo-500/30 shadow-md shadow-indigo-950/5 dark:shadow-indigo-950/40 overflow-hidden">
+                              {/* Header */}
+                              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-indigo-500/[0.06] dark:bg-indigo-500/[0.08] border-b border-indigo-200/70 dark:border-indigo-500/20">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-7 h-7 rounded-xl bg-indigo-500/15 dark:bg-indigo-500/25 flex items-center justify-center text-indigo-600 dark:text-indigo-300 shrink-0 border border-indigo-400/30 shadow-2xs">
+                                    <Package size={14} />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                      Stock Adjustment
+                                    </span>
+                                    <span className="text-[10px] font-medium text-indigo-600/80 dark:text-indigo-300/70 block leading-tight mt-0.5">
+                                      Inventory Ledger
+                                    </span>
+                                  </div>
                                 </div>
-                                <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-800 dark:text-indigo-200 truncate">
-                                  Inventory Stock Adjustment
-                                </span>
-                              </div>
-                              {msg.actionApplied && (
-                                <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/15 px-2.5 py-0.5 rounded-full border border-emerald-500/30 shrink-0 whitespace-nowrap">
-                                  <CheckCircle2 size={11} />
-                                  Updated
-                                </span>
-                              )}
-                            </div>
-
-                            <div className="flex items-center justify-between gap-3 pt-0.5">
-                              <div className="min-w-0">
-                                <span className="text-[10.5px] text-slate-500 dark:text-slate-400 font-medium block">Catalog Item</span>
-                                <span className="text-sm font-bold text-slate-900 dark:text-white truncate block">
-                                  {msg.action.productName || "Product"}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-1.5 shrink-0 font-mono text-xs">
-                                <span className="text-slate-600 dark:text-slate-400 px-2 py-1 rounded-lg bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-700/60 font-medium">
-                                  {msg.action.currentStock ?? "—"}
-                                </span>
-                                <span className="text-indigo-600 dark:text-indigo-400 font-black">➔</span>
-                                <span className="text-indigo-800 dark:text-indigo-200 font-black px-2.5 py-1 rounded-lg bg-indigo-500/15 dark:bg-indigo-500/20 border border-indigo-400/40 dark:border-indigo-500/35">
-                                  {msg.action.newStock} units
-                                </span>
-                                {msg.action.quantityChange !== undefined && (
-                                  <span className="text-[10px] text-emerald-700 dark:text-emerald-300 font-bold bg-emerald-500/15 dark:bg-emerald-500/20 px-1.5 py-1 rounded-md border border-emerald-500/30">
-                                    {msg.action.quantityChange > 0 ? "+" : ""}
-                                    {msg.action.quantityChange}
+                                {msg.actionApplied ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-md border border-emerald-500/30 shrink-0">
+                                    <CheckCircle2 size={10} />
+                                    Applied
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-indigo-700 dark:text-indigo-300 bg-indigo-500/15 px-2 py-0.5 rounded-md border border-indigo-500/30 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 dark:bg-indigo-400 animate-pulse" />
+                                    Ready
                                   </span>
                                 )}
                               </div>
-                            </div>
 
-                            {!msg.actionApplied ? (
-                              <button
-                                disabled={executingActionId === msg.id}
-                                onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                className="w-full py-2.5 px-4 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/25 transition-all cursor-pointer"
-                              >
-                                {executingActionId === msg.id ? (
-                                  <>
-                                    <RefreshCw size={13} className="animate-spin" />
-                                    Applying Stock Update...
-                                  </>
+                              {/* Structured Data Rows */}
+                              <div className="p-3 space-y-2.5">
+                                <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                      Catalog Item
+                                    </span>
+                                    <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white text-right break-words min-w-0">
+                                      {msg.action.productName || "Product"}
+                                    </span>
+                                  </div>
+
+                                  <div className="flex items-center justify-between gap-2 px-3 py-2.5 bg-slate-50/60 dark:bg-slate-900/50">
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                        New Stock
+                                      </span>
+                                      {qtyDelta !== undefined && !Number.isNaN(qtyDelta) && (
+                                        <span
+                                          className={`text-[10px] font-mono font-extrabold px-1.5 py-0.5 rounded ${
+                                            qtyDelta >= 0
+                                              ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25"
+                                              : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25"
+                                          }`}
+                                        >
+                                          {qtyDelta > 0 ? `+${qtyDelta}` : qtyDelta}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5 font-mono tabular-nums flex-wrap justify-end">
+                                      <span className="text-xs font-semibold text-slate-400 dark:text-slate-500 px-1.5 py-0.5 rounded bg-slate-200/60 dark:bg-slate-800/70">
+                                        {msg.action.currentStock ?? "—"}
+                                      </span>
+                                      <span className="text-indigo-500 dark:text-indigo-400 text-xs font-black">
+                                        →
+                                      </span>
+                                      <span className="text-xs sm:text-sm font-black text-indigo-700 dark:text-indigo-300 bg-indigo-500/10 dark:bg-indigo-500/20 border border-indigo-500/25 px-2 py-0.5 rounded-md">
+                                        {msg.action.newStock}{" "}
+                                        <span className="text-[10px] font-sans font-semibold opacity-80">
+                                          units
+                                        </span>
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {!msg.actionApplied ? (
+                                  <button
+                                    disabled={executingActionId === msg.id}
+                                    onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                    className="w-full py-2.5 px-3.5 bg-gradient-to-r from-indigo-600 via-indigo-500 to-violet-600 hover:from-indigo-500 hover:to-violet-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-indigo-600/25 transition-all cursor-pointer border border-indigo-400/25"
+                                  >
+                                    {executingActionId === msg.id ? (
+                                      <>
+                                        <RefreshCw size={13} className="animate-spin shrink-0" />
+                                        <span>Applying Stock Update...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <CheckCircle2 size={14} className="shrink-0" />
+                                        <span>Confirm Stock Update</span>
+                                      </>
+                                    )}
+                                  </button>
                                 ) : (
-                                  <>
-                                    <CheckCircle2 size={14} />
-                                    Confirm & Apply Stock Update
-                                  </>
+                                  <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
+                                    <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                    <span>Stock updated in live catalog</span>
+                                  </div>
                                 )}
-                              </button>
-                            ) : (
-                              <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
-                                <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
-                                <span>Stock updated in live catalog</span>
                               </div>
-                            )}
-                          </div>
-                        )}
+                            </div>
+                          );
+                        })()}
 
                         {/* 2. UPDATE_PRICE */}
-                        {msg.action.type === "UPDATE_PRICE" && (
-                          <div className="p-3.5 rounded-2xl bg-blue-50/70 dark:bg-gradient-to-b dark:from-blue-950/70 dark:via-slate-900/80 dark:to-slate-950/90 border border-blue-200 dark:border-blue-500/30 shadow-sm dark:shadow-lg dark:shadow-blue-950/30 space-y-3">
-                            <div className="flex items-center justify-between gap-2 border-b border-blue-200/70 dark:border-blue-500/15 pb-2.5">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="w-6 h-6 rounded-lg bg-blue-500/15 dark:bg-blue-500/20 flex items-center justify-center text-blue-600 dark:text-blue-400 shrink-0">
-                                  <Tag size={13} />
+                        {msg.action.type === "UPDATE_PRICE" && (() => {
+                          const priceDelta =
+                            msg.action.currentPrice !== undefined && msg.action.newPrice !== undefined
+                              ? Number(msg.action.newPrice) - Number(msg.action.currentPrice)
+                              : undefined;
+                          return (
+                            <div className="rounded-2xl bg-gradient-to-b from-blue-50/90 via-white to-blue-50/40 dark:from-blue-950/60 dark:via-slate-900/95 dark:to-slate-950 border border-blue-200/90 dark:border-blue-500/30 shadow-md shadow-blue-950/5 dark:shadow-blue-950/40 overflow-hidden">
+                              {/* Header */}
+                              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-blue-500/[0.06] dark:bg-blue-500/[0.08] border-b border-blue-200/70 dark:border-blue-500/20">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-7 h-7 rounded-xl bg-blue-500/15 dark:bg-blue-500/25 flex items-center justify-center text-blue-600 dark:text-blue-300 shrink-0 border border-blue-400/30 shadow-2xs">
+                                    <Tag size={14} />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                      Price Update
+                                    </span>
+                                    <span className="text-[10px] font-medium text-blue-600/80 dark:text-blue-300/70 block leading-tight mt-0.5">
+                                      Catalog Pricing
+                                    </span>
+                                  </div>
                                 </div>
-                                <span className="text-[11px] font-bold uppercase tracking-wider text-blue-800 dark:text-blue-200 truncate">
-                                  Price Modification
-                                </span>
-                              </div>
-                              {msg.actionApplied && (
-                                <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/15 px-2.5 py-0.5 rounded-full border border-emerald-500/30 shrink-0 whitespace-nowrap">
-                                  <CheckCircle2 size={11} />
-                                  Price Updated
-                                </span>
-                              )}
-                            </div>
-
-                            <div className="flex items-center justify-between gap-3 pt-0.5">
-                              <div className="min-w-0">
-                                <span className="text-[10.5px] text-slate-500 dark:text-slate-400 font-medium block">Item</span>
-                                <span className="text-sm font-bold text-slate-900 dark:text-white truncate block">
-                                  {msg.action.productName || "Product"}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-2 shrink-0 font-mono text-xs">
-                                <span className="text-slate-600 dark:text-slate-400 px-2 py-1 rounded-lg bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-700/60 font-medium">
-                                  ₹{msg.action.currentPrice ?? "—"}
-                                </span>
-                                <span className="text-blue-600 dark:text-blue-400 font-black">➔</span>
-                                <span className="text-blue-800 dark:text-blue-200 font-black px-2.5 py-1 rounded-lg bg-blue-500/15 dark:bg-blue-500/20 border border-blue-400/40 dark:border-blue-500/35 text-sm">
-                                  ₹{msg.action.newPrice}
-                                </span>
-                              </div>
-                            </div>
-
-                            {!msg.actionApplied ? (
-                              <button
-                                disabled={executingActionId === msg.id}
-                                onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                className="w-full py-2.5 px-4 bg-gradient-to-r from-blue-600 to-blue-500 hover:from-blue-500 hover:to-blue-400 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-blue-600/25 transition-all cursor-pointer"
-                              >
-                                {executingActionId === msg.id ? (
-                                  <>
-                                    <RefreshCw size={13} className="animate-spin" />
-                                    Updating Price...
-                                  </>
+                                {msg.actionApplied ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-md border border-emerald-500/30 shrink-0">
+                                    <CheckCircle2 size={10} />
+                                    Applied
+                                  </span>
                                 ) : (
-                                  <>
-                                    <CheckCircle2 size={14} />
-                                    Confirm Price Change
-                                  </>
+                                  <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-blue-700 dark:text-blue-300 bg-blue-500/15 px-2 py-0.5 rounded-md border border-blue-500/30 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-blue-500 dark:bg-blue-400 animate-pulse" />
+                                    Ready
+                                  </span>
                                 )}
-                              </button>
-                            ) : (
-                              <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
-                                <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
-                                <span>Price saved to store catalog</span>
                               </div>
-                            )}
-                          </div>
-                        )}
+
+                              {/* Structured Data Rows */}
+                              <div className="p-3 space-y-2.5">
+                                <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                      Catalog Item
+                                    </span>
+                                    <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white text-right break-words min-w-0">
+                                      {msg.action.productName || "Product"}
+                                    </span>
+                                  </div>
+
+                                  <div className="flex items-center justify-between gap-2 px-3 py-2.5 bg-slate-50/60 dark:bg-slate-900/50">
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                        Unit Price
+                                      </span>
+                                      {priceDelta !== undefined && !Number.isNaN(priceDelta) && priceDelta !== 0 && (
+                                        <span
+                                          className={`text-[10px] font-mono font-extrabold px-1.5 py-0.5 rounded ${
+                                            priceDelta > 0
+                                              ? "bg-blue-500/15 text-blue-600 dark:text-blue-400 border border-blue-500/25"
+                                              : "bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/25"
+                                          }`}
+                                        >
+                                          {priceDelta > 0 ? `+₹${priceDelta}` : `-₹${Math.abs(priceDelta)}`}
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5 font-mono tabular-nums flex-wrap justify-end">
+                                      <span className="text-xs font-semibold text-slate-400 dark:text-slate-500 line-through px-1.5 py-0.5 rounded bg-slate-200/60 dark:bg-slate-800/70">
+                                        ₹{msg.action.currentPrice ?? "—"}
+                                      </span>
+                                      <span className="text-blue-500 dark:text-blue-400 text-xs font-black">
+                                        →
+                                      </span>
+                                      <span className="text-xs sm:text-sm font-black text-blue-700 dark:text-blue-300 bg-blue-500/10 dark:bg-blue-500/20 border border-blue-500/25 px-2 py-0.5 rounded-md">
+                                        ₹{msg.action.newPrice}
+                                      </span>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {!msg.actionApplied ? (
+                                  <button
+                                    disabled={executingActionId === msg.id}
+                                    onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                    className="w-full py-2.5 px-3.5 bg-gradient-to-r from-blue-600 via-blue-500 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-blue-600/25 transition-all cursor-pointer border border-blue-400/25"
+                                  >
+                                    {executingActionId === msg.id ? (
+                                      <>
+                                        <RefreshCw size={13} className="animate-spin shrink-0" />
+                                        <span>Updating Price...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <CheckCircle2 size={14} className="shrink-0" />
+                                        <span>Confirm Price Change</span>
+                                      </>
+                                    )}
+                                  </button>
+                                ) : (
+                                  <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
+                                    <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                    <span>Price saved to store catalog</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
 
                         {/* 3. ADD_PRODUCT */}
                         {msg.action.type === "ADD_PRODUCT" && (() => {
@@ -2621,84 +2759,101 @@ export function AdminAIAssistant({
                           const isBatch = batchItems.length > 1;
 
                           return (
-                            <div className="p-3.5 rounded-2xl bg-emerald-50/70 dark:bg-gradient-to-b dark:from-emerald-950/60 dark:via-slate-900/80 dark:to-slate-950/90 border border-emerald-200 dark:border-emerald-500/30 shadow-sm dark:shadow-lg dark:shadow-emerald-950/30 space-y-3">
-                              <div className="flex items-center justify-between gap-2 border-b border-emerald-200/70 dark:border-emerald-500/15 pb-2.5">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <div className="w-6 h-6 rounded-lg bg-emerald-500/15 dark:bg-emerald-500/20 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
-                                    <PlusCircle size={13} />
+                            <div className="rounded-2xl bg-gradient-to-b from-emerald-50/90 via-white to-emerald-50/40 dark:from-emerald-950/60 dark:via-slate-900/95 dark:to-slate-950 border border-emerald-200/90 dark:border-emerald-500/30 shadow-md shadow-emerald-950/5 dark:shadow-emerald-950/40 overflow-hidden">
+                              {/* Header */}
+                              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-emerald-500/[0.06] dark:bg-emerald-500/[0.08] border-b border-emerald-200/70 dark:border-emerald-500/20">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-7 h-7 rounded-xl bg-emerald-500/15 dark:bg-emerald-500/25 flex items-center justify-center text-emerald-600 dark:text-emerald-300 shrink-0 border border-emerald-400/30 shadow-2xs">
+                                    <PlusCircle size={14} />
                                   </div>
-                                  <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-800 dark:text-emerald-200 truncate">
-                                    {isBatch
-                                      ? `Batch Product Addition (${batchItems.length} Items)`
-                                      : "New Product Addition"}
-                                  </span>
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                      {isBatch ? `Add ${batchItems.length} Products` : "New Catalog Product"}
+                                    </span>
+                                    <span className="text-[10px] font-medium text-emerald-600/80 dark:text-emerald-300/70 block leading-tight mt-0.5">
+                                      Store Catalog Addition
+                                    </span>
+                                  </div>
                                 </div>
-                                {msg.actionApplied && (
-                                  <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/15 px-2.5 py-0.5 rounded-full border border-emerald-500/30 shrink-0 whitespace-nowrap">
-                                    <CheckCircle2 size={11} />
-                                    {isBatch ? `Created (${batchItems.length})` : "Created"}
+                                {msg.actionApplied ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-md border border-emerald-500/30 shrink-0">
+                                    <CheckCircle2 size={10} />
+                                    {isBatch ? `Added (${batchItems.length})` : "Created"}
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-md border border-emerald-500/30 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 animate-pulse" />
+                                    Ready
                                   </span>
                                 )}
                               </div>
 
-                              <div className="space-y-2 pt-0.5">
-                                {batchItems.map((item, idx) => (
-                                  <div
-                                    key={`${item.name}-${idx}`}
-                                    className="flex items-center justify-between gap-3 py-1.5 px-2.5 rounded-xl bg-white/75 dark:bg-slate-900/55 border border-emerald-200/60 dark:border-slate-800/80"
-                                  >
-                                    <div className="min-w-0">
-                                      <span className="text-[10px] text-slate-500 dark:text-slate-400 font-medium block">
-                                        {isBatch ? `Product #${idx + 1}` : "Product Name"}
-                                      </span>
-                                      <span className="text-sm font-bold text-slate-900 dark:text-white truncate block">
-                                        {item.name}
-                                      </span>
+                              {/* Structured Data Rows */}
+                              <div className="p-3 space-y-2.5">
+                                <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                  {batchItems.map((item, idx) => (
+                                    <div
+                                      key={`${item.name}-${idx}`}
+                                      className="flex items-center justify-between gap-2.5 px-3 py-2.5"
+                                    >
+                                      <div className="min-w-0 flex-1">
+                                        <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white block break-words">
+                                          {item.name}
+                                        </span>
+                                        <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 block mt-0.5">
+                                          {item.category || "General"}
+                                        </span>
+                                      </div>
+                                      <div className="flex items-center gap-1.5 shrink-0 font-mono tabular-nums text-xs">
+                                        <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 dark:bg-emerald-500/20 border border-emerald-500/25 font-black text-emerald-700 dark:text-emerald-300">
+                                          ₹{item.price}
+                                        </span>
+                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 font-semibold text-slate-600 dark:text-slate-300">
+                                          {item.stock ?? 0}{" "}
+                                          <span className="text-[10px] font-sans opacity-80">units</span>
+                                        </span>
+                                      </div>
                                     </div>
-                                    <div className="flex items-center gap-1.5 shrink-0 font-mono text-xs">
-                                      <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 font-bold text-emerald-700 dark:text-emerald-300">
-                                        ₹{item.price}
-                                      </span>
-                                      <span className="px-2 py-1 rounded-lg bg-white dark:bg-slate-900/80 border border-slate-200 dark:border-slate-700/60 font-medium text-slate-700 dark:text-slate-300">
-                                        {item.stock ?? 0} units
-                                      </span>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-
-                              {!msg.actionApplied ? (
-                                <button
-                                  disabled={executingActionId === msg.id}
-                                  onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                  className="w-full py-2.5 px-4 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-500 hover:to-emerald-400 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/25 transition-all cursor-pointer"
-                                >
-                                  {executingActionId === msg.id ? (
-                                    <>
-                                      <RefreshCw size={13} className="animate-spin" />
-                                      {isBatch
-                                        ? `Adding ${batchItems.length} Products...`
-                                        : "Adding Product..."}
-                                    </>
-                                  ) : (
-                                    <>
-                                      <PlusCircle size={14} />
-                                      {isBatch
-                                        ? `Create ${batchItems.length} Products in Store`
-                                        : "Create Product in Store"}
-                                    </>
-                                  )}
-                                </button>
-                              ) : (
-                                <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
-                                  <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
-                                  <span>
-                                    {isBatch
-                                      ? `All ${batchItems.length} products added to live catalog`
-                                      : "Product added to live catalog"}
-                                  </span>
+                                  ))}
                                 </div>
-                              )}
+
+                                {!msg.actionApplied ? (
+                                  <button
+                                    disabled={executingActionId === msg.id}
+                                    onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                    className="w-full py-2.5 px-3.5 bg-gradient-to-r from-emerald-600 via-emerald-500 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-emerald-600/25 transition-all cursor-pointer border border-emerald-400/25"
+                                  >
+                                    {executingActionId === msg.id ? (
+                                      <>
+                                        <RefreshCw size={13} className="animate-spin shrink-0" />
+                                        <span>
+                                          {isBatch
+                                            ? `Adding ${batchItems.length} Products...`
+                                            : "Adding Product..."}
+                                        </span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <PlusCircle size={14} className="shrink-0" />
+                                        <span>
+                                          {isBatch
+                                            ? `Create ${batchItems.length} Products in Store`
+                                            : "Create Product in Store"}
+                                        </span>
+                                      </>
+                                    )}
+                                  </button>
+                                ) : (
+                                  <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
+                                    <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                    <span>
+                                      {isBatch
+                                        ? `All ${batchItems.length} products added to catalog`
+                                        : "Product added to live catalog"}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           );
                         })()}
@@ -2713,79 +2868,97 @@ export function AdminAIAssistant({
                             ? billItems.reduce((acc: number, item: any) => acc + (Number(item.quantity) || 1), 0)
                             : (msg.action.itemsCount || 1);
                           return (
-                            <div className="p-4 rounded-2xl bg-cyan-50/70 dark:bg-gradient-to-b dark:from-cyan-950/80 dark:via-slate-900/90 dark:to-slate-950/95 border border-cyan-200 dark:border-cyan-500/35 shadow-sm dark:shadow-xl dark:shadow-cyan-950/40 space-y-3.5 backdrop-blur-md">
-                              <div className="flex items-center justify-between gap-2 border-b border-cyan-200/70 dark:border-cyan-500/20 pb-2.5">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <div className="w-7 h-7 rounded-xl bg-cyan-500/15 dark:bg-cyan-500/20 flex items-center justify-center text-cyan-600 dark:text-cyan-400 shrink-0 border border-cyan-400/30 dark:border-cyan-500/30 shadow-xs">
+                            <div className="rounded-2xl bg-gradient-to-b from-cyan-50/90 via-white to-cyan-50/40 dark:from-cyan-950/60 dark:via-slate-900/95 dark:to-slate-950 border border-cyan-200/90 dark:border-cyan-500/30 shadow-md shadow-cyan-950/5 dark:shadow-cyan-950/40 overflow-hidden">
+                              {/* Header */}
+                              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-cyan-500/[0.06] dark:bg-cyan-500/[0.08] border-b border-cyan-200/70 dark:border-cyan-500/20">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-7 h-7 rounded-xl bg-cyan-500/15 dark:bg-cyan-500/25 flex items-center justify-center text-cyan-600 dark:text-cyan-300 shrink-0 border border-cyan-400/30 shadow-2xs">
                                     <Receipt size={14} />
                                   </div>
-                                  <div>
-                                    <span className="text-[11.5px] font-black uppercase tracking-wider text-cyan-900 dark:text-cyan-200 block">
-                                      Adjust Transaction Total
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                      Bill Total Adjustment
                                     </span>
-                                    <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
-                                      #{msg.action.billId?.slice(0, 8)}
+                                    <span className="text-[10px] font-mono font-medium text-cyan-600/80 dark:text-cyan-300/70 block leading-tight mt-0.5">
+                                      Receipt #{msg.action.billId?.slice(0, 8)}
                                     </span>
                                   </div>
                                 </div>
                                 {msg.actionApplied ? (
-                                  <span className="inline-flex items-center gap-1.5 text-[10.5px] font-bold text-emerald-700 dark:text-emerald-400 bg-emerald-500/15 dark:bg-emerald-500/20 px-2.5 py-1 rounded-full border border-emerald-500/40 shrink-0 shadow-xs">
-                                    <CheckCircle2 size={12} />
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-md border border-emerald-500/30 shrink-0">
+                                    <CheckCircle2 size={10} />
                                     Updated
                                   </span>
                                 ) : (
-                                  <span className="text-[10px] font-semibold text-cyan-700 dark:text-cyan-300/90 bg-cyan-500/15 px-2 py-0.5 rounded-md border border-cyan-500/25">
-                                    Action Required
+                                  <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-cyan-700 dark:text-cyan-300 bg-cyan-500/15 px-2 py-0.5 rounded-md border border-cyan-500/30 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-500 dark:bg-cyan-400 animate-pulse" />
+                                    Ready
                                   </span>
                                 )}
                               </div>
 
-                              {/* Amount & Quantity in short */}
-                              <div className="grid grid-cols-2 gap-2.5">
-                                <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 flex flex-col justify-center">
-                                  <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 dark:text-slate-400">Total Change</span>
-                                  <div className="flex items-center gap-1.5 font-mono">
-                                    <span className="text-slate-400 line-through text-xs">₹{oldTot}</span>
-                                    <span className="text-cyan-600 dark:text-cyan-400 font-black">➔</span>
-                                    <span className="text-base font-black text-emerald-600 dark:text-emerald-300">₹{newTot}</span>
+                              {/* Structured Data Rows */}
+                              <div className="p-3 space-y-2.5">
+                                <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                  <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                        Bill Total
+                                      </span>
+                                      {diff !== 0 && (
+                                        <span className="text-[10px] font-mono font-extrabold px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-700 dark:text-cyan-300 border border-cyan-500/25">
+                                          {diff > 0 ? `+₹${diff}` : `-₹${Math.abs(diff)}`}
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="flex items-center gap-1.5 font-mono tabular-nums flex-wrap justify-end">
+                                      <span className="text-xs font-semibold text-slate-400 line-through px-1.5 py-0.5 rounded bg-slate-200/60 dark:bg-slate-800/70">
+                                        ₹{oldTot}
+                                      </span>
+                                      <span className="text-cyan-600 dark:text-cyan-400 text-xs font-black">
+                                        →
+                                      </span>
+                                      <span className="text-xs sm:text-sm font-black text-emerald-600 dark:text-emerald-300 bg-emerald-500/10 dark:bg-emerald-500/20 border border-emerald-500/25 px-2 py-0.5 rounded-md">
+                                        ₹{newTot}
+                                      </span>
+                                    </div>
                                   </div>
-                                </div>
-                                <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950/70 border border-cyan-200 dark:border-cyan-500/30 flex flex-col justify-center">
-                                  <span className="text-[10px] uppercase font-bold tracking-wider text-cyan-700 dark:text-cyan-300">Quantity</span>
-                                  <div className="flex items-baseline gap-1 font-mono">
-                                    <span className="text-base font-black text-slate-900 dark:text-slate-100">{totalQty}</span>
-                                    <span className="text-xs text-slate-500 dark:text-slate-400">units</span>
-                                    <span className="text-[10px] text-cyan-600 dark:text-cyan-400 ml-auto font-sans font-semibold">
-                                      {diff >= 0 ? `+₹${diff}` : `-₹${Math.abs(diff)}`}
+
+                                  <div className="flex items-center justify-between gap-3 px-3 py-2 bg-slate-50/60 dark:bg-slate-900/50">
+                                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                      Total Quantity
+                                    </span>
+                                    <span className="text-xs font-mono font-bold text-slate-700 dark:text-slate-200">
+                                      {totalQty} <span className="font-sans font-normal text-slate-500">units</span>
                                     </span>
                                   </div>
                                 </div>
-                              </div>
 
-                              {!msg.actionApplied ? (
-                                <button
-                                  disabled={executingActionId === msg.id}
-                                  onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                  className="w-full py-2.5 px-4 bg-gradient-to-r from-cyan-600 via-cyan-500 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-cyan-600/25 dark:shadow-cyan-950/50 transition-all cursor-pointer border border-cyan-400/30"
-                                >
-                                  {executingActionId === msg.id ? (
-                                    <>
-                                      <RefreshCw size={13} className="animate-spin" />
-                                      Applying to Firestore...
-                                    </>
-                                  ) : (
-                                    <>
-                                      <CheckCircle2 size={14} />
-                                      Confirm & Update Total to ₹{newTot}
-                                    </>
-                                  )}
-                                </button>
-                              ) : (
-                                <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
-                                  <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
-                                  <span>Transaction updated in Firestore</span>
-                                </div>
-                              )}
+                                {!msg.actionApplied ? (
+                                  <button
+                                    disabled={executingActionId === msg.id}
+                                    onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                    className="w-full py-2.5 px-3.5 bg-gradient-to-r from-cyan-600 via-cyan-500 to-blue-600 hover:from-cyan-500 hover:to-blue-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-cyan-600/25 transition-all cursor-pointer border border-cyan-400/30"
+                                  >
+                                    {executingActionId === msg.id ? (
+                                      <>
+                                        <RefreshCw size={13} className="animate-spin shrink-0" />
+                                        <span>Updating Bill Total...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <CheckCircle2 size={14} className="shrink-0" />
+                                        <span>Confirm Total (₹{newTot})</span>
+                                      </>
+                                    )}
+                                  </button>
+                                ) : (
+                                  <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
+                                    <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                    <span>Transaction total updated</span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           );
                         })()}
@@ -2800,162 +2973,186 @@ export function AdminAIAssistant({
                           const itemCount = billItems.length > 0 ? billItems.length : (msg.action.itemsCount || 1);
 
                           return (
-                            <div className="p-4 rounded-2xl bg-rose-50/70 dark:bg-gradient-to-b dark:from-rose-950/80 dark:via-slate-900/90 dark:to-slate-950/95 border border-rose-200 dark:border-rose-500/35 shadow-sm dark:shadow-xl dark:shadow-rose-950/40 space-y-3.5 backdrop-blur-md">
+                            <div className="rounded-2xl bg-gradient-to-b from-rose-50/90 via-white to-rose-50/40 dark:from-rose-950/65 dark:via-slate-900/95 dark:to-slate-950 border border-rose-200/90 dark:border-rose-500/35 shadow-md shadow-rose-950/5 dark:shadow-rose-950/40 overflow-hidden">
                               {/* Header */}
-                              <div className="flex items-center justify-between gap-2 border-b border-rose-200/70 dark:border-rose-500/20 pb-2.5">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  <div className="w-7 h-7 rounded-xl bg-rose-500/15 dark:bg-rose-500/20 flex items-center justify-center text-rose-600 dark:text-rose-400 shrink-0 border border-rose-400/30 dark:border-rose-500/30 shadow-xs">
+                              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-rose-500/[0.06] dark:bg-rose-500/[0.08] border-b border-rose-200/70 dark:border-rose-500/20">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-7 h-7 rounded-xl bg-rose-500/15 dark:bg-rose-500/25 flex items-center justify-center text-rose-600 dark:text-rose-300 shrink-0 border border-rose-400/30 shadow-2xs">
                                     <Receipt size={14} />
                                   </div>
-                                  <div>
-                                    <span className="text-[11.5px] font-black uppercase tracking-wider text-rose-900 dark:text-rose-200 block">
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
                                       Void Transaction
                                     </span>
-                                    <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono">
-                                      #{msg.action.billId?.slice(0, 8)}
+                                    <span className="text-[10px] font-mono font-medium text-rose-600/80 dark:text-rose-300/70 block leading-tight mt-0.5">
+                                      Receipt #{msg.action.billId?.slice(0, 8)}
                                     </span>
                                   </div>
                                 </div>
                                 {msg.actionApplied ? (
-                                  <span className="inline-flex items-center gap-1.5 text-[10.5px] font-bold text-rose-700 dark:text-rose-300 bg-rose-500/15 dark:bg-rose-500/20 px-2.5 py-1 rounded-full border border-rose-500/40 shrink-0 shadow-xs">
-                                    <CheckCircle2 size={12} />
-                                    Voided & Restored
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/35 shrink-0">
+                                    <CheckCircle2 size={10} />
+                                    Voided
                                   </span>
                                 ) : (
-                                  <span className="text-[10px] font-semibold text-rose-600 dark:text-rose-400/90 bg-rose-500/10 px-2 py-0.5 rounded-md border border-rose-500/20">
-                                    Action Required
+                                  <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-rose-600 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/30 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500 dark:bg-rose-400 animate-pulse" />
+                                    Ready
                                   </span>
                                 )}
                               </div>
 
-                              {/* Bill Amount & Quantity in short */}
-                              <div className="grid grid-cols-2 gap-2.5">
-                                <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950/70 border border-rose-200 dark:border-rose-500/20 flex flex-col justify-center">
-                                  <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 dark:text-slate-400">Bill Amount</span>
-                                  <span className="text-lg font-black text-rose-600 dark:text-rose-300 font-mono tracking-tight">₹{totalAmount}</span>
-                                </div>
-                                <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 flex flex-col justify-center">
-                                  <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 dark:text-slate-400">Total Quantity</span>
-                                  <div className="flex items-baseline gap-1.5">
-                                    <span className="text-lg font-black text-slate-900 dark:text-slate-100 font-mono">{totalQty}</span>
-                                    <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">units</span>
-                                    <span className="text-[10.5px] text-indigo-600 dark:text-indigo-300 font-mono ml-auto">({itemCount} {itemCount === 1 ? 'item' : 'items'})</span>
+                              {/* Structured Data Rows */}
+                              <div className="p-3 space-y-2.5">
+                                <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                  <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                      Bill Amount
+                                    </span>
+                                    <span className="text-xs sm:text-sm font-black font-mono tabular-nums text-rose-600 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/20 border border-rose-500/25 px-2 py-0.5 rounded-md">
+                                      ₹{totalAmount}
+                                    </span>
                                   </div>
-                                </div>
-                              </div>
 
-                              {/* Reassurance note */}
-                              <div className="text-[10.5px] text-slate-600 dark:text-slate-400/90 leading-tight bg-white/80 dark:bg-slate-950/40 p-2 rounded-lg border border-slate-200 dark:border-slate-800/60">
-                                ℹ️ Voiding this transaction will restore all items and their quantities back to stock, even if the product was deleted.
-                              </div>
+                                  <div className="flex items-center justify-between gap-3 px-3 py-2 bg-slate-50/60 dark:bg-slate-900/50">
+                                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                      Restored Stock
+                                    </span>
+                                    <div className="flex items-center gap-1.5 font-mono text-xs">
+                                      <span className="font-bold text-slate-800 dark:text-slate-200">
+                                        {totalQty} units
+                                      </span>
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 border border-indigo-500/20">
+                                        {itemCount} {itemCount === 1 ? "item" : "items"}
+                                      </span>
+                                    </div>
+                                  </div>
 
-                              {/* Short Item Preview */}
-                              {msg.action.itemSummary && (
-                                <div className="px-3 py-2 rounded-xl bg-white dark:bg-slate-950/50 border border-slate-200 dark:border-slate-800/80 text-[11px] text-slate-700 dark:text-slate-300 flex items-center justify-between gap-2">
-                                  <span className="text-slate-500 dark:text-slate-400 text-[10px] font-semibold uppercase tracking-wider shrink-0">Items:</span>
-                                  <span className="truncate text-slate-800 dark:text-slate-200 font-medium text-right">{msg.action.itemSummary}</span>
-                                </div>
-                              )}
-
-                              {/* Button / Applied State */}
-                              {!msg.actionApplied ? (
-                                <button
-                                  disabled={executingActionId === msg.id}
-                                  onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                  className="w-full py-2.5 px-4 bg-gradient-to-r from-rose-600 via-rose-500 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-rose-600/25 dark:shadow-rose-950/50 transition-all cursor-pointer border border-rose-400/30"
-                                >
-                                  {executingActionId === msg.id ? (
-                                    <>
-                                      <RefreshCw size={13} className="animate-spin" />
-                                      Voiding Transaction & Restoring Stock...
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Trash2 size={14} />
-                                      Confirm & Void Transaction (₹{totalAmount})
-                                    </>
+                                  {msg.action.itemSummary && (
+                                    <div className="flex items-center justify-between gap-3 px-3 py-2">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                        Summary
+                                      </span>
+                                      <span className="text-[11px] text-slate-700 dark:text-slate-300 font-medium text-right break-words min-w-0">
+                                        {msg.action.itemSummary}
+                                      </span>
+                                    </div>
                                   )}
-                                </button>
-                              ) : (
-                                <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-300 text-xs font-semibold">
-                                  <Trash2 size={13} className="text-rose-600 dark:text-rose-400 shrink-0" />
-                                  <span>Transaction #{msg.action.billId?.slice(0, 8)} voided & stock returned to inventory</span>
                                 </div>
-                              )}
+
+                                {!msg.actionApplied ? (
+                                  <button
+                                    disabled={executingActionId === msg.id}
+                                    onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                    className="w-full py-2.5 px-3.5 bg-gradient-to-r from-rose-600 via-rose-500 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-rose-600/25 transition-all cursor-pointer border border-rose-400/30"
+                                  >
+                                    {executingActionId === msg.id ? (
+                                      <>
+                                        <RefreshCw size={13} className="animate-spin shrink-0" />
+                                        <span>Voiding Bill & Restoring Stock...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Trash2 size={14} className="shrink-0" />
+                                        <span>Confirm & Void Bill (₹{totalAmount})</span>
+                                      </>
+                                    )}
+                                  </button>
+                                ) : (
+                                  <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-300 text-xs font-semibold">
+                                    <CheckCircle2 size={13} className="text-rose-600 dark:text-rose-400 shrink-0" />
+                                    <span>Bill #{msg.action.billId?.slice(0, 8)} voided & stock restored</span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           );
                         })()}
 
                         {/* 6. DELETE_PRODUCT */}
                         {msg.action.type === "DELETE_PRODUCT" && (
-                          <div className="p-4 rounded-2xl bg-rose-50/70 dark:bg-gradient-to-b dark:from-rose-950/80 dark:via-slate-900/90 dark:to-slate-950/95 border border-rose-200 dark:border-rose-500/35 shadow-sm dark:shadow-xl dark:shadow-rose-950/40 space-y-3.5 backdrop-blur-md">
-                            <div className="flex items-center justify-between gap-2 border-b border-rose-200/70 dark:border-rose-500/20 pb-2.5">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="w-7 h-7 rounded-xl bg-rose-500/15 dark:bg-rose-500/20 flex items-center justify-center text-rose-600 dark:text-rose-400 shrink-0 border border-rose-400/30 dark:border-rose-500/30 shadow-xs">
+                          <div className="rounded-2xl bg-gradient-to-b from-rose-50/90 via-white to-rose-50/40 dark:from-rose-950/65 dark:via-slate-900/95 dark:to-slate-950 border border-rose-200/90 dark:border-rose-500/35 shadow-md shadow-rose-950/5 dark:shadow-rose-950/40 overflow-hidden">
+                            {/* Header */}
+                            <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-rose-500/[0.06] dark:bg-rose-500/[0.08] border-b border-rose-200/70 dark:border-rose-500/20">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded-xl bg-rose-500/15 dark:bg-rose-500/25 flex items-center justify-center text-rose-600 dark:text-rose-300 shrink-0 border border-rose-400/30 shadow-2xs">
                                   <Trash2 size={14} />
                                 </div>
-                                <span className="text-[11.5px] font-black uppercase tracking-wider text-rose-900 dark:text-rose-200 truncate">
-                                  Catalog Deletion Safeguard
-                                </span>
+                                <div className="min-w-0">
+                                  <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                    Remove Product
+                                  </span>
+                                  <span className="text-[10px] font-medium text-rose-600/80 dark:text-rose-300/70 block leading-tight mt-0.5">
+                                    Catalog Deletion
+                                  </span>
+                                </div>
                               </div>
                               {msg.actionApplied ? (
-                                <span className="inline-flex items-center gap-1.5 text-[10.5px] font-bold text-rose-700 dark:text-rose-300 bg-rose-500/15 dark:bg-rose-500/20 px-2.5 py-1 rounded-full border border-rose-500/40 shrink-0 whitespace-nowrap shadow-xs">
-                                  <CheckCircle2 size={12} />
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/35 shrink-0">
+                                  <CheckCircle2 size={10} />
                                   Removed
                                 </span>
                               ) : (
-                                <span className="text-[10px] font-semibold text-rose-600 dark:text-rose-400/90 bg-rose-500/10 px-2 py-0.5 rounded-md border border-rose-500/20">
-                                  Action Required
+                                <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-rose-600 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/30 shrink-0">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500 dark:bg-rose-400 animate-pulse" />
+                                  Ready
                                 </span>
                               )}
                             </div>
 
-                            <div className="grid grid-cols-2 gap-2.5">
-                              <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950/70 border border-rose-200 dark:border-rose-500/20 flex flex-col justify-center">
-                                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 dark:text-slate-400">Item Name & Price</span>
-                                <span className="text-sm font-bold text-slate-900 dark:text-white truncate block">
-                                  {msg.action.productName || "Product"}
-                                </span>
-                                <span className="text-base font-black text-rose-600 dark:text-rose-300 font-mono mt-0.5">
-                                  ₹{msg.action.currentPrice ?? "—"}
-                                </span>
-                              </div>
-                              <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950/70 border border-slate-200 dark:border-slate-800 flex flex-col justify-center">
-                                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 dark:text-slate-400">Stock in Inventory</span>
-                                <div className="flex items-baseline gap-1 font-mono">
-                                  <span className="text-lg font-black text-amber-600 dark:text-amber-300">{msg.action.currentStock ?? 0}</span>
-                                  <span className="text-xs text-slate-500 dark:text-slate-400 font-sans">units</span>
+                            {/* Structured Data Rows */}
+                            <div className="p-3 space-y-2.5">
+                              <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                    Catalog Item
+                                  </span>
+                                  <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white text-right break-words min-w-0">
+                                    {msg.action.productName || "Product"}
+                                  </span>
                                 </div>
-                                <span className="text-[9.5px] text-slate-500 dark:text-slate-400 mt-1 block">
-                                  Can be restored by deleting bill
-                                </span>
-                              </div>
-                            </div>
 
-                            {!msg.actionApplied ? (
-                              <button
-                                disabled={executingActionId === msg.id}
-                                onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                className="w-full py-2.5 px-4 bg-gradient-to-r from-rose-600 via-rose-500 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-rose-600/25 dark:shadow-rose-950/50 transition-all cursor-pointer border border-rose-400/30"
-                              >
-                                {executingActionId === msg.id ? (
-                                  <>
-                                    <RefreshCw size={13} className="animate-spin" />
-                                    Removing from Store...
-                                  </>
-                                ) : (
-                                  <>
-                                    <Trash2 size={14} />
-                                    Confirm & Delete Product
-                                  </>
-                                )}
-                              </button>
-                            ) : (
-                              <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-300 text-xs font-semibold">
-                                <Trash2 size={13} className="text-rose-600 dark:text-rose-400 shrink-0" />
-                                <span>Product removed from store catalog</span>
+                                <div className="flex items-center justify-between gap-2 px-3 py-2.5 bg-slate-50/60 dark:bg-slate-900/50">
+                                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                    Price & Stock
+                                  </span>
+                                  <div className="flex items-center gap-1.5 font-mono tabular-nums flex-wrap justify-end text-xs">
+                                    <span className="px-2 py-0.5 rounded-md bg-rose-500/10 dark:bg-rose-500/20 border border-rose-500/25 font-black text-rose-600 dark:text-rose-300">
+                                      ₹{msg.action.currentPrice ?? "—"}
+                                    </span>
+                                    <span className="px-2 py-0.5 rounded-md bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/25 font-bold text-amber-700 dark:text-amber-300">
+                                      {msg.action.currentStock ?? 0}{" "}
+                                      <span className="text-[10px] font-sans opacity-80">units</span>
+                                    </span>
+                                  </div>
+                                </div>
                               </div>
-                            )}
+
+                              {!msg.actionApplied ? (
+                                <button
+                                  disabled={executingActionId === msg.id}
+                                  onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                  className="w-full py-2.5 px-3.5 bg-gradient-to-r from-rose-600 via-rose-500 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-rose-600/25 transition-all cursor-pointer border border-rose-400/30"
+                                >
+                                  {executingActionId === msg.id ? (
+                                    <>
+                                      <RefreshCw size={13} className="animate-spin shrink-0" />
+                                      <span>Removing from Store...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Trash2 size={14} className="shrink-0" />
+                                      <span>Confirm & Delete Product</span>
+                                    </>
+                                  )}
+                                </button>
+                              ) : (
+                                <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-300 text-xs font-semibold">
+                                  <CheckCircle2 size={13} className="text-rose-600 dark:text-rose-400 shrink-0" />
+                                  <span>Product removed from store catalog</span>
+                                </div>
+                              )}
+                            </div>
                           </div>
                         )}
 
@@ -2966,254 +3163,141 @@ export function AdminAIAssistant({
                             const catKey = normalizeClientExpenseCategory(msg.action.category);
                             const catLabelMap: Record<string, string> = {
                               expense: "Expense",
-                              borrow: "Borrowed / Debt",
-                              due: "Dynamic Due",
+                              borrow: "Borrowed",
+                              due: "Due",
                               other: "Other Cost",
                             };
                             return (
-                              <div className="p-3.5 rounded-2xl bg-amber-50/70 dark:bg-gradient-to-b dark:from-amber-950/60 dark:via-slate-900/80 dark:to-slate-950/90 border border-amber-200 dark:border-amber-500/30 shadow-sm dark:shadow-lg dark:shadow-amber-950/30 space-y-3">
-                                <div className="flex items-center justify-between gap-2 border-b border-amber-200/70 dark:border-amber-500/15 pb-2.5">
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <div className="w-6 h-6 rounded-lg bg-amber-500/15 dark:bg-amber-500/20 flex items-center justify-center text-amber-600 dark:text-amber-400 shrink-0">
-                                      <Receipt size={13} />
+                              <div className="rounded-2xl bg-gradient-to-b from-amber-50/90 via-white to-amber-50/40 dark:from-amber-950/60 dark:via-slate-900/95 dark:to-slate-950 border border-amber-200/90 dark:border-amber-500/30 shadow-md shadow-amber-950/5 dark:shadow-amber-950/40 overflow-hidden">
+                                {/* Header */}
+                                <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-amber-500/[0.06] dark:bg-amber-500/[0.08] border-b border-amber-200/70 dark:border-amber-500/20">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <div className="w-7 h-7 rounded-xl bg-amber-500/15 dark:bg-amber-500/25 flex items-center justify-center text-amber-600 dark:text-amber-300 shrink-0 border border-amber-400/30 shadow-2xs">
+                                      <Receipt size={14} />
                                     </div>
-                                    <span className="text-[11px] font-bold uppercase tracking-wider text-amber-900 dark:text-amber-200 truncate">
-                                      Other Cost / Expense Entry
-                                    </span>
+                                    <div className="min-w-0">
+                                      <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                        Record Store Cost
+                                      </span>
+                                      <span className="text-[10px] font-medium text-amber-600/80 dark:text-amber-300/70 block leading-tight mt-0.5">
+                                        {catLabelMap[catKey] || "Expense"} Ledger
+                                      </span>
+                                    </div>
                                   </div>
                                   {msg.actionApplied ? (
-                                    <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/15 px-2.5 py-0.5 rounded-full border border-emerald-500/30 shrink-0 whitespace-nowrap">
-                                      <CheckCircle2 size={11} />
+                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-md border border-emerald-500/30 shrink-0">
+                                      <CheckCircle2 size={10} />
                                       Recorded
                                     </span>
                                   ) : (
-                                    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-800 dark:text-amber-300 border border-amber-500/30 shrink-0">
-                                      {catLabelMap[catKey] || "Expense"}
+                                    <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-amber-700 dark:text-amber-300 bg-amber-500/15 px-2 py-0.5 rounded-md border border-amber-500/30 shrink-0">
+                                      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 dark:bg-amber-400 animate-pulse" />
+                                      Ready
                                     </span>
                                   )}
                                 </div>
 
-                                <div className="flex items-center justify-between gap-3 pt-0.5">
-                                  <div className="min-w-0">
-                                    <span className="text-[10.5px] text-slate-500 dark:text-slate-400 font-medium block">
-                                      Title / Description
-                                    </span>
-                                    <span className="text-sm font-bold text-slate-900 dark:text-white truncate block">
-                                      {msg.action.title}
-                                    </span>
-                                  </div>
-                                  <span className="text-amber-800 dark:text-amber-300 font-mono text-sm font-black px-2.5 py-1 rounded-lg bg-amber-500/15 dark:bg-amber-500/20 border border-amber-400/40 dark:border-amber-500/35 shrink-0">
-                                    ₹{msg.action.amount}
-                                  </span>
-                                </div>
+                                {/* Structured Data Rows */}
+                                <div className="p-3 space-y-2.5">
+                                  <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                    <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                        Description
+                                      </span>
+                                      <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white text-right break-words min-w-0">
+                                        {msg.action.title}
+                                      </span>
+                                    </div>
 
-                                {!msg.actionApplied ? (
-                                  <button
-                                    disabled={executingActionId === msg.id}
-                                    onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                    className="w-full py-2.5 px-4 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-600/25 transition-all cursor-pointer"
-                                  >
-                                    {executingActionId === msg.id ? (
-                                      <>
-                                        <RefreshCw size={13} className="animate-spin" />
-                                        Recording Cost...
-                                      </>
-                                    ) : (
-                                      <>
-                                        <CheckCircle2 size={14} />
-                                        Confirm & Record Expense (₹{msg.action.amount})
-                                      </>
-                                    )}
-                                  </button>
-                                ) : (
-                                  <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
-                                    <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
-                                    <span>Recorded in Other Costs ledger</span>
+                                    <div className="flex items-center justify-between gap-3 px-3 py-2.5 bg-slate-50/60 dark:bg-slate-900/50">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                        Amount
+                                      </span>
+                                      <span className="text-xs sm:text-sm font-black font-mono tabular-nums text-amber-700 dark:text-amber-300 bg-amber-500/15 dark:bg-amber-500/20 border border-amber-500/30 px-2 py-0.5 rounded-md">
+                                        ₹{msg.action.amount}
+                                      </span>
+                                    </div>
                                   </div>
-                                )}
+
+                                  {!msg.actionApplied ? (
+                                    <button
+                                      disabled={executingActionId === msg.id}
+                                      onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                      className="w-full py-2.5 px-3.5 bg-gradient-to-r from-amber-600 via-amber-500 to-orange-500 hover:from-amber-500 hover:to-orange-400 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-amber-600/25 transition-all cursor-pointer border border-amber-400/25"
+                                    >
+                                      {executingActionId === msg.id ? (
+                                        <>
+                                          <RefreshCw size={13} className="animate-spin shrink-0" />
+                                          <span>Recording Cost...</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <CheckCircle2 size={14} className="shrink-0" />
+                                          <span>Confirm Expense (₹{msg.action.amount})</span>
+                                        </>
+                                      )}
+                                    </button>
+                                  ) : (
+                                    <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
+                                      <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                      <span>Recorded in Other Costs ledger</span>
+                                    </div>
+                                  )}
+                                </div>
                               </div>
                             );
                           })()}
 
                         {/* 7B. DELETE_EXPENSE */}
                         {msg.action.type === "DELETE_EXPENSE" && Boolean(msg.action.expenseId) && (
-                          <div className="p-3.5 rounded-2xl bg-rose-50/70 dark:bg-gradient-to-b dark:from-rose-950/70 dark:via-slate-900/85 dark:to-slate-950/90 border border-rose-200 dark:border-rose-500/35 shadow-sm dark:shadow-lg dark:shadow-rose-950/30 space-y-3">
-                            <div className="flex items-center justify-between gap-2 border-b border-rose-200/70 dark:border-rose-500/15 pb-2.5">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="w-6 h-6 rounded-lg bg-rose-500/15 dark:bg-rose-500/20 flex items-center justify-center text-rose-600 dark:text-rose-400 shrink-0">
-                                  <Trash2 size={13} />
+                          <div className="rounded-2xl bg-gradient-to-b from-rose-50/90 via-white to-rose-50/40 dark:from-rose-950/65 dark:via-slate-900/95 dark:to-slate-950 border border-rose-200/90 dark:border-rose-500/35 shadow-md shadow-rose-950/5 dark:shadow-rose-950/40 overflow-hidden">
+                            {/* Header */}
+                            <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-rose-500/[0.06] dark:bg-rose-500/[0.08] border-b border-rose-200/70 dark:border-rose-500/20">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded-xl bg-rose-500/15 dark:bg-rose-500/25 flex items-center justify-center text-rose-600 dark:text-rose-300 shrink-0 border border-rose-400/30 shadow-2xs">
+                                  <Trash2 size={14} />
                                 </div>
-                                <span className="text-[11px] font-bold uppercase tracking-wider text-rose-900 dark:text-rose-200 truncate">
-                                  Delete Expense Record
-                                </span>
+                                <div className="min-w-0">
+                                  <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                    Remove Expense
+                                  </span>
+                                  <span className="text-[10px] font-medium text-rose-600/80 dark:text-rose-300/70 block leading-tight mt-0.5">
+                                    Cost Ledger Removal
+                                  </span>
+                                </div>
                               </div>
-                              {msg.actionApplied && (
-                                <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold text-rose-700 dark:text-rose-300 bg-rose-500/15 px-2.5 py-0.5 rounded-full border border-rose-500/30 shrink-0 whitespace-nowrap">
-                                  <CheckCircle2 size={11} />
+                              {msg.actionApplied ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/35 shrink-0">
+                                  <CheckCircle2 size={10} />
                                   Deleted
                                 </span>
-                              )}
-                            </div>
-
-                            <div className="flex items-center justify-between gap-3 pt-0.5">
-                              <div className="min-w-0">
-                                <span className="text-[10.5px] text-slate-500 dark:text-slate-400 font-medium block">
-                                  Expense Title
-                                </span>
-                                <span className="text-sm font-bold text-slate-900 dark:text-white truncate block">
-                                  {msg.action.title || "Expense Record"}
-                                </span>
-                              </div>
-                              {msg.action.amount !== undefined && (
-                                <span className="text-rose-700 dark:text-rose-300 font-mono text-sm font-black px-2.5 py-1 rounded-lg bg-rose-500/15 dark:bg-rose-500/20 border border-rose-400/40 dark:border-rose-500/35 shrink-0">
-                                  ₹{msg.action.amount}
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-rose-600 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/30 shrink-0">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500 dark:bg-rose-400 animate-pulse" />
+                                  Ready
                                 </span>
                               )}
                             </div>
 
-                            {!msg.actionApplied ? (
-                              <button
-                                disabled={executingActionId === msg.id}
-                                onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                className="w-full py-2.5 px-4 bg-gradient-to-r from-rose-600 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-rose-600/25 dark:shadow-rose-950/40 transition-all cursor-pointer"
-                              >
-                                {executingActionId === msg.id ? (
-                                  <>
-                                    <RefreshCw size={13} className="animate-spin" />
-                                    Deleting Expense...
-                                  </>
-                                ) : (
-                                  <>
-                                    <Trash2 size={14} />
-                                    Confirm & Delete Expense
-                                  </>
-                                )}
-                              </button>
-                            ) : (
-                              <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-300 text-xs font-medium">
-                                <CheckCircle2 size={13} className="text-rose-600 dark:text-rose-400 shrink-0" />
-                                <span>Expense removed from store ledger</span>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* 8. UPDATE_ROLE */}
-                        {msg.action.type === "UPDATE_ROLE" && (
-                          <div className="p-3.5 rounded-2xl bg-purple-50/70 dark:bg-gradient-to-b dark:from-purple-950/60 dark:via-slate-900/80 dark:to-slate-950/90 border border-purple-200 dark:border-purple-500/30 shadow-sm dark:shadow-lg dark:shadow-purple-950/30 space-y-3">
-                            <div className="flex items-center justify-between gap-2 border-b border-purple-200/70 dark:border-purple-500/15 pb-2.5">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="w-6 h-6 rounded-lg bg-purple-500/15 dark:bg-purple-500/20 flex items-center justify-center text-purple-600 dark:text-purple-400 shrink-0">
-                                  <ShieldCheck size={13} />
-                                </div>
-                                <span className="text-[11px] font-bold uppercase tracking-wider text-purple-900 dark:text-purple-200 truncate">
-                                  Staff Permission Governance
-                                </span>
-                              </div>
-                              {msg.actionApplied && (
-                                <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold text-emerald-700 dark:text-emerald-400 bg-emerald-500/15 px-2.5 py-0.5 rounded-full border border-emerald-500/30 shrink-0 whitespace-nowrap">
-                                  <CheckCircle2 size={11} />
-                                  Role Updated
-                                </span>
-                              )}
-                            </div>
-
-                            <div className="flex items-center justify-between gap-3 pt-0.5">
-                              <div className="min-w-0">
-                                <span className="text-sm font-bold text-slate-900 dark:text-white truncate block">
-                                  {msg.action.userName || msg.action.userEmail || "Staff Member"}
-                                </span>
-                                <span className="text-[10.5px] text-slate-500 dark:text-slate-400 font-mono truncate block mt-0.5">
-                                  {msg.action.userEmail}
-                                </span>
-                              </div>
-                              <span className="px-3 py-1 rounded-lg bg-purple-500/15 dark:bg-purple-500/20 text-purple-800 dark:text-purple-200 font-mono text-xs font-bold border border-purple-400/40 dark:border-purple-500/35 shrink-0">
-                                {msg.action.isAdminRole ? "Admin" : "Staff"}
-                              </span>
-                            </div>
-
-                            {!msg.actionApplied ? (
-                              <button
-                                disabled={executingActionId === msg.id}
-                                onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                className="w-full py-2.5 px-4 bg-gradient-to-r from-purple-600 to-purple-500 hover:from-purple-500 hover:to-purple-400 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-purple-600/25 transition-all cursor-pointer"
-                              >
-                                {executingActionId === msg.id ? (
-                                  <>
-                                    <RefreshCw size={13} className="animate-spin" />
-                                    Applying Permission Update...
-                                  </>
-                                ) : (
-                                  <>
-                                    <CheckCircle2 size={14} />
-                                    Confirm Role Update
-                                  </>
-                                )}
-                              </button>
-                            ) : (
-                              <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-medium">
-                                <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
-                                <span>Staff role updated in settings</span>
-                              </div>
-                            )}
-                          </div>
-                        )}
-
-                        {/* 9. PURGE_STORE_DATA */}
-                        {msg.action.type === "PURGE_STORE_DATA" && (() => {
-                          const targetScope = msg.action.target || "both";
-                          const prodCount = msg.action.productsCount ?? products.length;
-                          const billCount = msg.action.billsCount ?? bills.length;
-                          return (
-                            <div className="p-4 rounded-2xl bg-rose-50/70 dark:bg-gradient-to-b dark:from-rose-950/85 dark:via-slate-900/90 dark:to-slate-950/95 border border-rose-200 dark:border-rose-500/40 shadow-sm dark:shadow-xl dark:shadow-rose-950/40 space-y-3.5 backdrop-blur-md">
-                              <div className="flex items-center justify-between gap-2 border-b border-rose-200/70 dark:border-rose-500/20 pb-2.5">
-                                <div className="flex items-center gap-2 min-w-0 flex-1">
-                                  <div className="w-7 h-7 rounded-xl bg-rose-500/15 dark:bg-rose-500/20 flex items-center justify-center text-rose-600 dark:text-rose-400 shrink-0 border border-rose-400/30 dark:border-rose-500/30">
-                                    <Trash2 size={14} />
-                                  </div>
-                                  <div className="min-w-0 flex-1">
-                                    <span className="text-[10.5px] sm:text-[11.5px] font-black uppercase tracking-wide text-rose-900 dark:text-rose-200 block leading-tight">
-                                      Bulk Store Data Purge
-                                    </span>
-                                    <span className="text-[10px] text-slate-500 dark:text-slate-400 block leading-tight mt-0.5">
-                                      {targetScope === "both"
-                                        ? "All Products & Bills"
-                                        : targetScope === "products"
-                                        ? "Entire Product Catalog"
-                                        : "All Transaction Bills"}
-                                    </span>
-                                  </div>
-                                </div>
-                                {msg.actionApplied ? (
-                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700 dark:text-rose-300 bg-rose-500/15 dark:bg-rose-500/20 px-2 py-0.5 rounded-full border border-rose-500/40 shrink-0">
-                                    <CheckCircle2 size={11} />
-                                    Purged
+                            {/* Structured Data Rows */}
+                            <div className="p-3 space-y-2.5">
+                              <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                    Expense Entry
                                   </span>
-                                ) : (
-                                  <span className="text-[9.5px] font-semibold text-rose-600 dark:text-rose-400 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/25 shrink-0 whitespace-nowrap">
-                                    Confirm Required
+                                  <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white text-right break-words min-w-0">
+                                    {msg.action.title || "Expense Record"}
                                   </span>
-                                )}
-                              </div>
+                                </div>
 
-                              <div className="grid grid-cols-2 gap-2.5">
-                                {(targetScope === "products" || targetScope === "both") && (
-                                  <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950/70 border border-rose-200 dark:border-rose-500/25 flex flex-col justify-center">
-                                    <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 dark:text-slate-400">
-                                      Catalog Products
+                                {msg.action.amount !== undefined && (
+                                  <div className="flex items-center justify-between gap-3 px-3 py-2.5 bg-slate-50/60 dark:bg-slate-900/50">
+                                    <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                      Amount
                                     </span>
-                                    <span className="text-base font-black text-rose-600 dark:text-rose-300 font-mono mt-0.5">
-                                      {prodCount} items
-                                    </span>
-                                  </div>
-                                )}
-                                {(targetScope === "bills" || targetScope === "both") && (
-                                  <div className="p-2.5 rounded-xl bg-white dark:bg-slate-950/70 border border-rose-200 dark:border-rose-500/25 flex flex-col justify-center">
-                                    <span className="text-[10px] uppercase font-bold tracking-wider text-slate-500 dark:text-slate-400">
-                                      Recorded Bills
-                                    </span>
-                                    <span className="text-base font-black text-rose-600 dark:text-rose-300 font-mono mt-0.5">
-                                      {billCount} bills
+                                    <span className="text-xs sm:text-sm font-black font-mono tabular-nums text-rose-600 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/20 border border-rose-500/25 px-2 py-0.5 rounded-md">
+                                      ₹{msg.action.amount}
                                     </span>
                                   </div>
                                 )}
@@ -3223,26 +3307,205 @@ export function AdminAIAssistant({
                                 <button
                                   disabled={executingActionId === msg.id}
                                   onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                  className="w-full py-2.5 px-4 bg-gradient-to-r from-rose-600 via-rose-500 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-lg shadow-rose-600/25 dark:shadow-rose-950/50 transition-all cursor-pointer border border-rose-400/30"
+                                  className="w-full py-2.5 px-3.5 bg-gradient-to-r from-rose-600 via-rose-500 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-rose-600/25 transition-all cursor-pointer border border-rose-400/30"
                                 >
                                   {executingActionId === msg.id ? (
                                     <>
-                                      <RefreshCw size={13} className="animate-spin" />
-                                      Purging Selected Store Records...
+                                      <RefreshCw size={13} className="animate-spin shrink-0" />
+                                      <span>Deleting Expense...</span>
                                     </>
                                   ) : (
                                     <>
-                                      <Trash2 size={14} />
-                                      Confirm & Purge {targetScope === "both" ? "All Products & Bills" : targetScope === "products" ? "All Products" : "All Bills"}
+                                      <Trash2 size={14} className="shrink-0" />
+                                      <span>Confirm & Delete Expense</span>
                                     </>
                                   )}
                                 </button>
                               ) : (
                                 <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-300 text-xs font-semibold">
                                   <CheckCircle2 size={13} className="text-rose-600 dark:text-rose-400 shrink-0" />
-                                  <span>Selected store records permanently purged from database</span>
+                                  <span>Expense removed from store ledger</span>
                                 </div>
                               )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 8. UPDATE_ROLE */}
+                        {msg.action.type === "UPDATE_ROLE" && (
+                          <div className="rounded-2xl bg-gradient-to-b from-purple-50/90 via-white to-purple-50/40 dark:from-purple-950/60 dark:via-slate-900/95 dark:to-slate-950 border border-purple-200/90 dark:border-purple-500/30 shadow-md shadow-purple-950/5 dark:shadow-purple-950/40 overflow-hidden">
+                            {/* Header */}
+                            <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-purple-500/[0.06] dark:bg-purple-500/[0.08] border-b border-purple-200/70 dark:border-purple-500/20">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-7 h-7 rounded-xl bg-purple-500/15 dark:bg-purple-500/25 flex items-center justify-center text-purple-600 dark:text-purple-300 shrink-0 border border-purple-400/30 shadow-2xs">
+                                  <ShieldCheck size={14} />
+                                </div>
+                                <div className="min-w-0">
+                                  <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                    Role Assignment
+                                  </span>
+                                  <span className="text-[10px] font-medium text-purple-600/80 dark:text-purple-300/70 block leading-tight mt-0.5">
+                                    Staff Permissions
+                                  </span>
+                                </div>
+                              </div>
+                              {msg.actionApplied ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-md border border-emerald-500/30 shrink-0">
+                                  <CheckCircle2 size={10} />
+                                  Updated
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-purple-700 dark:text-purple-300 bg-purple-500/15 px-2 py-0.5 rounded-md border border-purple-500/30 shrink-0">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-purple-500 dark:bg-purple-400 animate-pulse" />
+                                  Ready
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Structured Data Rows */}
+                            <div className="p-3 space-y-2.5">
+                              <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                                  <div className="min-w-0">
+                                    <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white block truncate">
+                                      {msg.action.userName || msg.action.userEmail || "Staff Member"}
+                                    </span>
+                                    {msg.action.userEmail && (
+                                      <span className="text-[10px] text-slate-500 dark:text-slate-400 font-mono block truncate mt-0.5">
+                                        {msg.action.userEmail}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <span className="px-2.5 py-1 rounded-md bg-purple-500/15 dark:bg-purple-500/20 text-purple-800 dark:text-purple-200 font-mono text-xs font-extrabold border border-purple-400/40 dark:border-purple-500/35 shrink-0">
+                                    {msg.action.isAdminRole ? "Admin" : "Staff"}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {!msg.actionApplied ? (
+                                <button
+                                  disabled={executingActionId === msg.id}
+                                  onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                  className="w-full py-2.5 px-3.5 bg-gradient-to-r from-purple-600 via-purple-500 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-purple-600/25 transition-all cursor-pointer border border-purple-400/25"
+                                >
+                                  {executingActionId === msg.id ? (
+                                    <>
+                                      <RefreshCw size={13} className="animate-spin shrink-0" />
+                                      <span>Applying Permission Update...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <CheckCircle2 size={14} className="shrink-0" />
+                                      <span>Confirm Role Update</span>
+                                    </>
+                                  )}
+                                </button>
+                              ) : (
+                                <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
+                                  <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                  <span>Staff role updated in settings</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 9. PURGE_STORE_DATA */}
+                        {msg.action.type === "PURGE_STORE_DATA" && (() => {
+                          const targetScope = msg.action.target || "both";
+                          const prodCount = msg.action.productsCount ?? products.length;
+                          const billCount = msg.action.billsCount ?? bills.length;
+                          return (
+                            <div className="rounded-2xl bg-gradient-to-b from-rose-50/90 via-white to-rose-50/40 dark:from-rose-950/70 dark:via-slate-900/95 dark:to-slate-950 border border-rose-200/90 dark:border-rose-500/40 shadow-md shadow-rose-950/5 dark:shadow-rose-950/40 overflow-hidden">
+                              {/* Header */}
+                              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-rose-500/[0.06] dark:bg-rose-500/[0.08] border-b border-rose-200/70 dark:border-rose-500/20">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-7 h-7 rounded-xl bg-rose-500/15 dark:bg-rose-500/25 flex items-center justify-center text-rose-600 dark:text-rose-300 shrink-0 border border-rose-400/30 shadow-2xs">
+                                    <Trash2 size={14} />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                      Bulk Data Purge
+                                    </span>
+                                    <span className="text-[10px] font-medium text-rose-600/80 dark:text-rose-300/70 block leading-tight mt-0.5">
+                                      {targetScope === "both"
+                                        ? "All Products & Bills"
+                                        : targetScope === "products"
+                                        ? "Entire Product Catalog"
+                                        : "All Transaction Bills"}
+                                    </span>
+                                  </div>
+                                </div>
+                                {msg.actionApplied ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/35 shrink-0">
+                                    <CheckCircle2 size={10} />
+                                    Purged
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-rose-600 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/30 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500 dark:bg-rose-400 animate-pulse" />
+                                    Ready
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Structured Data Rows */}
+                              <div className="p-3 space-y-2.5">
+                                <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                  {(targetScope === "products" || targetScope === "both") && (
+                                    <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                        Catalog Products
+                                      </span>
+                                      <span className="text-xs sm:text-sm font-black font-mono tabular-nums text-rose-600 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/20 border border-rose-500/25 px-2 py-0.5 rounded-md">
+                                        {prodCount} items
+                                      </span>
+                                    </div>
+                                  )}
+                                  {(targetScope === "bills" || targetScope === "both") && (
+                                    <div className="flex items-center justify-between gap-3 px-3 py-2.5 bg-slate-50/60 dark:bg-slate-900/50">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                        Recorded Bills
+                                      </span>
+                                      <span className="text-xs sm:text-sm font-black font-mono tabular-nums text-rose-600 dark:text-rose-300 bg-rose-500/10 dark:bg-rose-500/20 border border-rose-500/25 px-2 py-0.5 rounded-md">
+                                        {billCount} bills
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+
+                                {!msg.actionApplied ? (
+                                  <button
+                                    disabled={executingActionId === msg.id}
+                                    onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                    className="w-full py-2.5 px-3.5 bg-gradient-to-r from-rose-600 via-rose-500 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-rose-600/25 transition-all cursor-pointer border border-rose-400/30"
+                                  >
+                                    {executingActionId === msg.id ? (
+                                      <>
+                                        <RefreshCw size={13} className="animate-spin shrink-0" />
+                                        <span>Purging Store Records...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Trash2 size={14} className="shrink-0" />
+                                        <span>
+                                          Confirm & Purge{" "}
+                                          {targetScope === "both"
+                                            ? "All Products & Bills"
+                                            : targetScope === "products"
+                                            ? "All Products"
+                                            : "All Bills"}
+                                        </span>
+                                      </>
+                                    )}
+                                  </button>
+                                ) : (
+                                  <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-300 text-xs font-semibold">
+                                    <CheckCircle2 size={13} className="text-rose-600 dark:text-rose-400 shrink-0" />
+                                    <span>Selected store records permanently purged</span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           );
                         })()}

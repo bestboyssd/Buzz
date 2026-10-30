@@ -204,18 +204,67 @@ export const showLocalNotification = async (
 
 import { useReducedMotion } from 'motion/react';
 
+/**
+ * Performance & Battery Saver Mode (removes animations & heavy GPU effects).
+ * Default is ON (true) for all users unless explicitly toggled off ("false").
+ */
+export function isPerformanceModeEnabled(uid?: string): boolean {
+    if (typeof window === 'undefined') return true;
+    try {
+        const activeUid = uid || auth.currentUser?.uid;
+        if (activeUid) {
+            const userVal = localStorage.getItem(`performanceMode_${activeUid}`);
+            if (userVal === 'false') return false;
+            if (userVal === 'true') return true;
+        }
+        const globalVal = localStorage.getItem('performanceMode');
+        if (globalVal === 'false') return false;
+        return true;
+    } catch {
+        return true;
+    }
+}
+
+export function applyPerformanceMode(enabled: boolean, uid?: string): void {
+    if (typeof document === 'undefined') return;
+    try {
+        document.documentElement.classList.toggle('performance-mode', enabled);
+        localStorage.setItem('performanceMode', enabled ? 'true' : 'false');
+        const activeUid = uid || auth.currentUser?.uid;
+        if (activeUid) {
+            localStorage.setItem(`performanceMode_${activeUid}`, enabled ? 'true' : 'false');
+        }
+        window.dispatchEvent(
+            new CustomEvent('performanceModeChanged', { detail: { enabled } })
+        );
+    } catch {}
+}
+
+// Apply immediately on module load so initial render has zero animation lag
+if (typeof document !== 'undefined') {
+    try {
+        document.documentElement.classList.toggle(
+            'performance-mode',
+            isPerformanceModeEnabled()
+        );
+    } catch {}
+}
+
 export function useOptimizedTransition(customTransition?: any) {
     const shouldReduceMotion = useReducedMotion();
-    if (shouldReduceMotion) {
+    if (shouldReduceMotion || isPerformanceModeEnabled()) {
         return {
             type: 'tween' as const,
             duration: 0
         };
     }
-    return { type: 'spring' as const, stiffness: 350, damping: 25, mass: 0.8 };
+    return customTransition || { type: 'spring' as const, stiffness: 350, damping: 25, mass: 0.8 };
 }
 
 export function useHardwareAcceleration() {
+    if (isPerformanceModeEnabled()) {
+        return "";
+    }
     return "transform-gpu will-change-transform";
 }
 

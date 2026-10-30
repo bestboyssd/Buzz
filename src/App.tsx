@@ -5,7 +5,7 @@
 
 import React, { useEffect, useState, useRef } from "react";
 import { BrowserRouter, Routes, Route, useLocation, useNavigate } from "react-router-dom";
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, motion, MotionConfig } from "motion/react";
 import { BottomNav } from "./components/BottomNav";
 import { Home } from "./pages/Home";
 import { Products } from "./pages/Products";
@@ -64,6 +64,7 @@ import {
   getAppBusinessIsoDate,
   getDeviceId,
   isLocalSecurityAlertTriggered,
+  isPerformanceModeEnabled,
 } from "./lib/utils";
 import appletConfig from "../firebase-applet-config.json";
 
@@ -76,7 +77,7 @@ const formatDateToDMY = (timestamp: number | string | Date) => {
   return `${day}/${month}/${year}`;
 };
 
-function AnimatedRoutes() {
+function AnimatedRoutes({ performanceMode }: { performanceMode: boolean }) {
   const location = useLocation();
   const { isAdmin, isRealAdmin } = useAuth();
 
@@ -99,6 +100,24 @@ function AnimatedRoutes() {
     }
   }, [location.pathname, isAdmin, isRealAdmin]);
 
+  if (performanceMode) {
+    return (
+      <Routes location={location}>
+        <Route path="/" element={<Home />} />
+        <Route path="/checkout" element={<Checkout />} />
+        <Route path="/products" element={<Products />} />
+        <Route path="/history" element={<History />} />
+        <Route path="/admin" element={<Admin />} />
+        <Route path="/all-bills" element={<AllBills />} />
+        <Route path="/analytics" element={<Analytics />} />
+        <Route path="/other-costs" element={<OtherCosts />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/account" element={<Account />} />
+        <Route path="/privacy" element={<PrivacyPolicy />} />
+      </Routes>
+    );
+  }
+
   return (
     <AnimatePresence mode="wait">
       <Routes location={location} key={location.pathname}>
@@ -120,9 +139,27 @@ function AnimatedRoutes() {
 
 function AppContent() {
   const { user, loading, isAdmin, isRealAdmin } = useAuth();
+  const [performanceMode, setPerformanceMode] = useState<boolean>(() =>
+    isPerformanceModeEnabled(user?.uid)
+  );
   const [securityMessage, setSecurityMessage] = useState<any | null>(null);
   const [broadcastNotification, setBroadcastNotification] = useState<any | null>(null);
   const [showExitToast, setShowExitToast] = useState(false);
+
+  useEffect(() => {
+    const syncPerformanceMode = (e?: Event) => {
+      const custom = e as CustomEvent<{ enabled?: boolean }> | undefined;
+      const enabled =
+        custom?.detail?.enabled !== undefined
+          ? Boolean(custom.detail.enabled)
+          : isPerformanceModeEnabled(user?.uid);
+      setPerformanceMode(enabled);
+      document.documentElement.classList.toggle("performance-mode", enabled);
+    };
+    syncPerformanceMode();
+    window.addEventListener("performanceModeChanged", syncPerformanceMode);
+    return () => window.removeEventListener("performanceModeChanged", syncPerformanceMode);
+  }, [user?.uid]);
 
   useEffect(() => {
     let timer: any;
@@ -848,26 +885,27 @@ function AppContent() {
 
     // Create an unthrottled Web Worker timer that triggers native & Service Worker background checks while app is minimized/hidden
     try {
+      const intervalMs = performanceMode ? 30000 : 8000;
       const workerCode = `
         setInterval(() => {
           self.postMessage('TICK');
-        }, 3000);
+        }, ${intervalMs});
       `;
       const blob = new Blob([workerCode], { type: "application/javascript" });
       workerUrl = URL.createObjectURL(blob);
       bgWorker = new Worker(workerUrl);
       bgWorker.onmessage = () => {
-        if (document.visibilityState === "hidden" || Capacitor.isNativePlatform()) {
+        if (document.visibilityState === "hidden") {
           pollBackgroundAlertsNative().catch(() => {});
+          syncContextToServiceWorker().then(() => {
+            if ("serviceWorker" in navigator) {
+              navigator.serviceWorker.getRegistration().then((reg) => {
+                const targetSW = reg?.active || navigator.serviceWorker.controller;
+                targetSW?.postMessage({ type: "CHECK_NOTIFICATIONS_NOW" });
+              }).catch(() => {});
+            }
+          });
         }
-        syncContextToServiceWorker().then(() => {
-          if (document.visibilityState === "hidden" && "serviceWorker" in navigator) {
-            navigator.serviceWorker.getRegistration().then((reg) => {
-              const targetSW = reg?.active || navigator.serviceWorker.controller;
-              targetSW?.postMessage({ type: "CHECK_NOTIFICATIONS_NOW" });
-            }).catch(() => {});
-          }
-        });
       };
     } catch {}
 
@@ -888,7 +926,7 @@ function AppContent() {
         URL.revokeObjectURL(workerUrl);
       }
     };
-  }, [user?.uid, isAdmin, isRealAdmin]);
+  }, [user?.uid, isAdmin, isRealAdmin, performanceMode]);
 
   useEffect(() => {
     const getStorageKey = (key: string) => (user ? `${key}_${user.uid}` : key);
@@ -1180,7 +1218,7 @@ function AppContent() {
   // Preload and decode product images while the real native splash screen is active
   useEffect(() => {
     if (productsLoading) return;
-    if (!products || products.length === 0) {
+    if (performanceMode || !products || products.length === 0) {
       setImagesPreloaded(true);
       return;
     }
@@ -1240,7 +1278,10 @@ function AppContent() {
   }, [allAssetsReady, maxSplashReached]);
 
   return (
-    <>
+    <MotionConfig
+      reducedMotion={performanceMode ? "always" : "never"}
+      transition={performanceMode ? { duration: 0, type: "tween" } : undefined}
+    >
       {!loading && !user ? (
         <div className="flex-1 overflow-y-auto relative z-10 w-full min-h-0">
           <Login />
@@ -1304,7 +1345,7 @@ function AppContent() {
               paddingBottom: "calc(5.5rem + env(safe-area-inset-bottom))",
             }}
           >
-            <AnimatedRoutes />
+            <AnimatedRoutes performanceMode={performanceMode} />
           </div>
           <BottomNav />
         </>
@@ -1613,7 +1654,7 @@ function AppContent() {
           </div>
         )}
       </AnimatePresence>
-    </>
+    </MotionConfig>
   );
 }
 

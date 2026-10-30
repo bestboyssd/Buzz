@@ -11,11 +11,13 @@ import {
   Bell,
   ChevronRight,
   Printer,
+  Zap,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { triggerHaptic } from "../lib/haptics";
 import { useAuth } from "../lib/AuthContext";
 import { updateStatusBarTheme } from "../lib/capacitor";
+import { isPerformanceModeEnabled, applyPerformanceMode } from "../lib/utils";
 
 import { Capacitor } from "@capacitor/core";
 import { LocalNotifications } from "@capacitor/local-notifications";
@@ -54,6 +56,9 @@ export function Settings() {
     }
     return document.documentElement.classList.contains("dark");
   });
+  const [performanceMode, setPerformanceMode] = useState(() =>
+    isPerformanceModeEnabled(user?.uid)
+  );
   const [haptics, setHaptics] = useState(
     () => localStorage.getItem(getStorageKey("hapticsEnabled")) !== "false"
   );
@@ -87,6 +92,7 @@ export function Settings() {
         ? stored === "dark"
         : document.documentElement.classList.contains("dark")
     );
+    setPerformanceMode(isPerformanceModeEnabled(user?.uid));
     setHaptics(
       localStorage.getItem(getStorageKey("hapticsEnabled")) !== "false"
     );
@@ -114,6 +120,19 @@ export function Settings() {
     };
     window.addEventListener("keepScreenOnChanged", handleKeepScreenChanged);
     return () => window.removeEventListener("keepScreenOnChanged", handleKeepScreenChanged);
+  }, [user]);
+
+  useEffect(() => {
+    const handlePerfChanged = (e: Event) => {
+      const customEvt = e as CustomEvent<{ enabled?: boolean }>;
+      if (customEvt.detail?.enabled !== undefined) {
+        setPerformanceMode(Boolean(customEvt.detail.enabled));
+      } else {
+        setPerformanceMode(isPerformanceModeEnabled(user?.uid));
+      }
+    };
+    window.addEventListener("performanceModeChanged", handlePerfChanged);
+    return () => window.removeEventListener("performanceModeChanged", handlePerfChanged);
   }, [user]);
 
   useEffect(() => {
@@ -161,6 +180,13 @@ export function Settings() {
     }
     window.dispatchEvent(new CustomEvent("themeChanged", { detail: { theme: value } }));
     updateSettingInFirestore("theme", value);
+  };
+
+  const togglePerformanceMode = (checked: boolean) => {
+    triggerHaptic("medium");
+    setPerformanceMode(checked);
+    applyPerformanceMode(checked, user?.uid);
+    updateSettingInFirestore("performanceMode", checked);
   };
 
   const toggleHaptics = (checked: boolean) => {
@@ -271,7 +297,7 @@ export function Settings() {
           <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-3 pl-2">
             Appearance
           </h2>
-          <div className="glass-card overflow-hidden">
+          <div className="glass-card overflow-hidden divide-y divide-slate-100/50 dark:divide-white/10">
             <SettingItem
               icon={<Moon size={20} className="text-indigo-500" />}
               label="Dark Mode"
@@ -280,6 +306,17 @@ export function Settings() {
                 <Switch
                   checked={darkMode}
                   onChange={() => toggleDarkMode(!darkMode)}
+                />
+              }
+            />
+            <SettingItem
+              icon={<Zap size={20} className="text-amber-500" />}
+              label="Remove Animations"
+              description="Disable animations to save battery"
+              action={
+                <Switch
+                  checked={performanceMode}
+                  onChange={() => togglePerformanceMode(!performanceMode)}
                 />
               }
             />
@@ -328,29 +365,12 @@ export function Settings() {
             <SettingItem
               icon={<Printer size={20} className="text-violet-500" />}
               label="Enable Printer"
-              badge={
-                <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border transition-colors ${
-                    printerState.connecting
-                      ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25"
-                      : printerState.connected
-                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25"
-                      : "bg-slate-100 dark:bg-slate-800/90 text-slate-500 dark:text-slate-400 border-slate-200/80 dark:border-white/[0.08]"
-                  }`}
-                >
-                  {printerState.connecting
-                    ? "Pairing..."
-                    : printerState.connected
-                    ? "Connected"
-                    : "Not Connected"}
-                </span>
-              }
               description={
                 printerState.connecting
-                  ? "Searching for nearby Bluetooth or USB printer..."
+                  ? "Pairing thermal printer..."
                   : printerState.connected
-                  ? printerState.deviceName || "Thermal printer paired and ready"
-                  : printerState.error || "Pair a Bluetooth or USB thermal printer"
+                  ? printerState.deviceName || "Thermal printer connected"
+                  : "Pair thermal receipt printer"
               }
               action={
                 <Switch

@@ -1,6 +1,6 @@
 import { Capacitor } from "@capacitor/core";
 import { db } from "./firebase";
-import { doc, setDoc, onSnapshot, deleteDoc } from "firebase/firestore";
+import { doc, setDoc, getDoc, getDocFromServer, onSnapshot, deleteDoc } from "firebase/firestore";
 import { MAX_PRODUCT_STOCK, MAX_BILL_AMOUNT } from "./utils";
 
 export interface BatchProductItem {
@@ -103,6 +103,14 @@ export interface AssistantResponse {
 // Tracks whether direct HTTP /api/gemini/* is reachable from the current origin/device
 let lastHttpFailureAt = 0;
 
+function isMobileClientDevice(): boolean {
+  if (Capacitor.isNativePlatform()) return true;
+  if (typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)) {
+    return true;
+  }
+  return false;
+}
+
 function shouldPreferFirestoreBridge(): boolean {
   if (Capacitor.isNativePlatform()) {
     const customHost = localStorage.getItem("buzz_api_server_url");
@@ -112,7 +120,7 @@ function shouldPreferFirestoreBridge(): boolean {
       return true;
     }
   }
-  if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 10000) {
+  if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 30000) {
     return true;
   }
   return false;
@@ -126,6 +134,20 @@ export function getApiBaseUrl(): string {
     return "https://ais-pre-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app";
   }
   return "";
+}
+
+function getCandidateApiBaseUrls(): string[] {
+  const urls: string[] = [];
+  const customHost = typeof localStorage !== "undefined" ? localStorage.getItem("buzz_api_server_url") : null;
+  if (customHost) {
+    urls.push(customHost.replace(/\/$/, ""));
+  }
+  if (!Capacitor.isNativePlatform()) {
+    urls.push("");
+  }
+  urls.push("https://ais-pre-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app");
+  urls.push("https://ais-dev-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app");
+  return Array.from(new Set(urls));
 }
 
 function buildClientSystemPrompt(ctx: StoreContext): string {
@@ -608,8 +630,14 @@ async function askViaFirestoreBridge(
   return new Promise<AssistantResponse>((resolve, reject) => {
     let settled = false;
     let unsub: (() => void) | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let lastPartialSeen = "";
 
     const cleanup = () => {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
       if (unsub) {
         try {
           unsub();
@@ -645,7 +673,7 @@ async function askViaFirestoreBridge(
         cleanup();
         reject(new Error("Firestore AI bridge timed out"));
       }
-    }, 12000);
+    }, 15000);
 
     const refreshStreamTimer = () => {
       clearTimeout(timer);
@@ -655,53 +683,67 @@ async function askViaFirestoreBridge(
           cleanup();
           reject(new Error("Firestore AI bridge stream timed out"));
         }
-      }, 8000);
+      }, 10000);
+    };
+
+    const handleDocData = (data: any) => {
+      if (settled || !data) return;
+      if (data.status === "streaming" && typeof data.partialReply === "string" && onChunk) {
+        if (data.partialReply !== lastPartialSeen) {
+          lastPartialSeen = data.partialReply;
+          refreshStreamTimer();
+          onChunk(data.partialReply);
+        }
+      } else if (data.status === "completed" && data.reply) {
+        settled = true;
+        clearTimeout(timer);
+        const validatedAction = validateClientAction(
+          data.action,
+          prompt,
+          data.reply,
+          compactedContext
+        );
+        if (onChunk) {
+          onChunk(data.reply);
+        }
+        cleanup();
+        resolve({
+          reply: data.reply,
+          action: validatedAction,
+          thought:
+            data.thought ||
+            generateDynamicThought(prompt, data.reply, compactedContext),
+        });
+      } else if (data.status === "error") {
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        reject(new Error(data.error || "Firestore AI bridge error"));
+      }
     };
 
     unsub = onSnapshot(
       reqRef,
       (snap) => {
         if (settled || !snap.exists()) return;
-        const data = snap.data();
-        if (data?.status === "streaming" && typeof data.partialReply === "string" && onChunk) {
-          refreshStreamTimer();
-          onChunk(data.partialReply);
-        } else if (data?.status === "completed" && data?.reply) {
-          settled = true;
-          clearTimeout(timer);
-          const validatedAction = validateClientAction(
-            data.action,
-            prompt,
-            data.reply,
-            compactedContext
-          );
-          if (onChunk) {
-            onChunk(data.reply);
-          }
-          cleanup();
-          resolve({
-            reply: data.reply,
-            action: validatedAction,
-            thought:
-              data.thought ||
-              generateDynamicThought(prompt, data.reply, compactedContext),
-          });
-        } else if (data?.status === "error") {
-          settled = true;
-          clearTimeout(timer);
-          cleanup();
-          reject(new Error(data.error || "Firestore AI bridge error"));
-        }
+        handleDocData(snap.data());
       },
-      (err) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          cleanup();
-          reject(err);
-        }
+      () => {
+        // Do not reject on transient onSnapshot listener errors; server polling continues below
       }
     );
+
+    // Poll getDocFromServer every 650ms so Android WebViews with experimentalForceLongPolling
+    // receive streaming/completed responses immediately without waiting on long-poll stream re-registration
+    pollInterval = setInterval(async () => {
+      if (settled) return;
+      try {
+        const snap = await getDocFromServer(reqRef).catch(() => getDoc(reqRef));
+        if (!settled && snap && snap.exists()) {
+          handleDocData(snap.data());
+        }
+      } catch {}
+    }, 650);
 
     setDoc(reqRef, {
       type: "chat",
@@ -798,50 +840,51 @@ export async function askGeminiAssistant(
   ).action;
 
   const tryHttpChat = async (): Promise<AssistantResponse | null> => {
-    const baseUrl = getApiBaseUrl();
-    const endpoint = `${baseUrl}/api/gemini/chat`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10000);
+    for (const baseUrl of getCandidateApiBaseUrls()) {
+      const endpoint = `${baseUrl}/api/gemini/chat`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 7500);
 
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          prompt: prompt.trim().slice(0, 1200),
-          conversationHistory: compactedHistory,
-          storeContext: compactedContext,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            prompt: prompt.trim().slice(0, 1200),
+            conversationHistory: compactedHistory,
+            storeContext: compactedContext,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
 
-      const contentType = response.headers.get("content-type") || "";
-      if (response.ok && contentType.includes("application/json")) {
-        lastHttpFailureAt = 0;
-        const data = await response.json();
-        const replyStr = String(data?.reply || "").trim();
-        if (replyStr) {
-          data.reply = replyStr;
-          data.action =
-            validateClientAction(data.action, prompt, data.reply, compactedContext) ||
-            localActionCandidate ||
-            null;
-          return data;
+        const contentType = response.headers.get("content-type") || "";
+        if (response.ok && contentType.includes("application/json")) {
+          lastHttpFailureAt = 0;
+          const data = await response.json();
+          const replyStr = String(data?.reply || "").trim();
+          if (replyStr) {
+            data.reply = replyStr;
+            data.action =
+              validateClientAction(data.action, prompt, data.reply, compactedContext) ||
+              localActionCandidate ||
+              null;
+            return data;
+          }
+        } else {
+          lastHttpFailureAt = Date.now();
         }
-      } else {
+      } catch {
+        clearTimeout(timer);
         lastHttpFailureAt = Date.now();
       }
-    } catch {
-      clearTimeout(timer);
-      lastHttpFailureAt = Date.now();
     }
     return null;
   };
 
-  if (!shouldPreferFirestoreBridge()) {
+  if (!shouldPreferFirestoreBridge() && !isMobileClientDevice()) {
     const httpRes = await tryHttpChat();
     if (httpRes) return httpRes;
   }
@@ -884,6 +927,7 @@ export async function askGeminiAssistantStream(
   let completed = false;
   let userAborted = false;
   const controller = new AbortController();
+  const bridgeAbortController = new AbortController();
 
   if (externalSignal) {
     if (externalSignal.aborted) {
@@ -896,6 +940,7 @@ export async function askGeminiAssistantStream(
         completed = true;
         clearTimeout(timeoutId);
         controller.abort();
+        bridgeAbortController.abort();
       },
       { once: true }
     );
@@ -907,16 +952,54 @@ export async function askGeminiAssistantStream(
     if (!cleanReply) return;
     completed = true;
     clearTimeout(timeoutId);
+    controller.abort();
+    bridgeAbortController.abort();
     onComplete({
       ...payload,
       reply: cleanReply,
     });
   };
 
+  // On mobile devices or when Firestore bridge is preferred, launch the Firestore RPC bridge
+  // immediately so mobile users never suffer from Cloud Run cookie redirects or CORS delays
+  const useFastBridge = shouldPreferFirestoreBridge() || isMobileClientDevice();
+  let bridgePromise: Promise<void> | null = null;
+
+  if (useFastBridge) {
+    bridgePromise = (async () => {
+      try {
+        const bridgeRes = await askViaFirestoreBridge(
+          prompt,
+          compactedHistory,
+          compactedContext,
+          (partial) => {
+            if (!completed && !userAborted) {
+              onChunk(partial);
+            }
+          },
+          bridgeAbortController.signal
+        );
+        if (!completed && !userAborted && String(bridgeRes.reply || "").trim()) {
+          const validatedAction =
+            validateClientAction(bridgeRes.action, prompt, bridgeRes.reply, compactedContext) ||
+            localActionCandidate ||
+            null;
+          onChunk(bridgeRes.reply);
+          safeComplete({
+            ...bridgeRes,
+            action: validatedAction,
+          });
+        }
+      } catch {
+        // Handled by fallback flow below if HTTP also fails
+      }
+    })();
+  }
+
   let timeoutId = setTimeout(() => {
     if (completed || userAborted) return;
     controller.abort();
-  }, 8500);
+  }, useFastBridge ? 4500 : 8500);
 
   if (!shouldPreferFirestoreBridge()) {
     try {
@@ -955,7 +1038,7 @@ export async function askGeminiAssistantStream(
       let buffer = "";
 
       while (true) {
-        if (userAborted || externalSignal?.aborted) {
+        if (userAborted || completed || externalSignal?.aborted) {
           try {
             reader.cancel();
           } catch {}
@@ -969,7 +1052,7 @@ export async function askGeminiAssistantStream(
         buffer = lines.pop() || "";
 
         for (const line of lines) {
-          if (userAborted || externalSignal?.aborted) return;
+          if (userAborted || completed || externalSignal?.aborted) return;
           const trimmed = line.trim();
           if (!trimmed || !trimmed.startsWith("data:")) continue;
           const payloadStr = trimmed.replace(/^data:\s*/, "");
@@ -986,7 +1069,7 @@ export async function askGeminiAssistantStream(
                 .replace(/```action[\s\S]*?```/g, "")
                 .replace(/```action[\s\S]*$/g, "")
                 .trim();
-              if (cleanDisplay && !userAborted) {
+              if (cleanDisplay && !userAborted && !completed) {
                 onChunk(cleanDisplay);
               }
             }
@@ -1023,7 +1106,7 @@ export async function askGeminiAssistantStream(
         }
       }
 
-      if (userAborted || externalSignal?.aborted) return;
+      if (userAborted || completed || externalSignal?.aborted) return;
 
       if (finalPayload && String(finalPayload.reply || "").trim()) {
         safeComplete(finalPayload);
@@ -1063,64 +1146,79 @@ export async function askGeminiAssistantStream(
     clearTimeout(timeoutId);
   }
 
-  if (userAborted || externalSignal?.aborted) return;
+  if (userAborted || completed || externalSignal?.aborted) return;
 
-  // Fallback 1: Server-side Firestore RPC bridge (works on both web & native Android APK)
-  try {
-    const bridgeRes = await askViaFirestoreBridge(
-      prompt,
-      compactedHistory,
-      compactedContext,
-      onChunk,
-      externalSignal
-    );
-    if (!userAborted && !externalSignal?.aborted && String(bridgeRes.reply || "").trim()) {
-      onChunk(bridgeRes.reply);
-      safeComplete(bridgeRes);
-      return;
-    }
-  } catch {
-    // Proceed to non-streaming HTTP fallback
-  }
-
-  if (userAborted || externalSignal?.aborted) return;
-
-  // Fallback 2: Direct non-streaming /api/gemini/chat endpoint
-  const baseUrl = getApiBaseUrl();
-  const chatEndpoint = `${baseUrl}/api/gemini/chat`;
-  const chatController = new AbortController();
-  const chatTimer = setTimeout(() => chatController.abort(), 10000);
-  try {
-    const response = await fetch(chatEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        prompt: prompt.trim().slice(0, 1200),
-        conversationHistory: compactedHistory,
-        storeContext: compactedContext,
-      }),
-      signal: chatController.signal,
-    });
-    clearTimeout(chatTimer);
-    if (response.ok) {
-      const data = await response.json();
-      const replyStr = String(data?.reply || "").trim();
-      if (replyStr && !userAborted && !externalSignal?.aborted) {
+  // Wait for in-flight fast bridge if already started, otherwise start it now
+  if (bridgePromise) {
+    await bridgePromise;
+    if (completed || userAborted || externalSignal?.aborted) return;
+  } else {
+    try {
+      const bridgeRes = await askViaFirestoreBridge(
+        prompt,
+        compactedHistory,
+        compactedContext,
+        onChunk,
+        externalSignal
+      );
+      if (!userAborted && !completed && !externalSignal?.aborted && String(bridgeRes.reply || "").trim()) {
         const validatedAction =
-          validateClientAction(data.action, prompt, replyStr, compactedContext) ||
+          validateClientAction(bridgeRes.action, prompt, bridgeRes.reply, compactedContext) ||
           localActionCandidate ||
           null;
-        onChunk(replyStr);
+        onChunk(bridgeRes.reply);
         safeComplete({
-          reply: replyStr,
+          ...bridgeRes,
           action: validatedAction,
-          thought: data.thought || generateDynamicThought(prompt, replyStr, storeContext),
         });
         return;
       }
+    } catch {
+      // Proceed to non-streaming HTTP fallback
     }
-  } catch {
-    clearTimeout(chatTimer);
+  }
+
+  if (userAborted || completed || externalSignal?.aborted) return;
+
+  // Fallback 2: Try all candidate non-streaming /api/gemini/chat endpoints
+  for (const baseUrl of getCandidateApiBaseUrls()) {
+    if (userAborted || completed || externalSignal?.aborted) return;
+    const chatEndpoint = `${baseUrl}/api/gemini/chat`;
+    const chatController = new AbortController();
+    const chatTimer = setTimeout(() => chatController.abort(), 6500);
+    try {
+      const response = await fetch(chatEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: prompt.trim().slice(0, 1200),
+          conversationHistory: compactedHistory,
+          storeContext: compactedContext,
+        }),
+        signal: chatController.signal,
+      });
+      clearTimeout(chatTimer);
+      const contentType = response.headers.get("content-type") || "";
+      if (response.ok && contentType.includes("application/json")) {
+        const data = await response.json();
+        const replyStr = String(data?.reply || "").trim();
+        if (replyStr && !userAborted && !completed && !externalSignal?.aborted) {
+          const validatedAction =
+            validateClientAction(data.action, prompt, replyStr, compactedContext) ||
+            localActionCandidate ||
+            null;
+          onChunk(replyStr);
+          safeComplete({
+            reply: replyStr,
+            action: validatedAction,
+            thought: data.thought || generateDynamicThought(prompt, replyStr, storeContext),
+          });
+          return;
+        }
+      }
+    } catch {
+      clearTimeout(chatTimer);
+    }
   }
 
   throw new Error("Could not reach Buzz AI server. Please check your internet connection and try again.");
@@ -2304,9 +2402,9 @@ export function generateClientStoreResponse(
     };
   }
 
-  // 15. Concise General Fallback
+  // 15. General Fallback (empty reply so real Gemini AI always answers)
   return {
-    reply: `**Store Snapshot:** **${products.length} products** in catalog · **₹${totalRevenue.toLocaleString("en-IN")}** sales today across **${billsToday} orders**. How can I help with your store?`,
+    reply: "",
     action: null,
     thought: generateDynamicThought(prompt, "", storeContext),
     thoughtDuration: 1,
@@ -2370,8 +2468,13 @@ async function transcribeViaFirestoreBridge(
   return new Promise<string>((resolve, reject) => {
     let settled = false;
     let unsub: (() => void) | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     const cleanup = () => {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
       if (unsub) {
         try {
           unsub();
@@ -2387,34 +2490,41 @@ async function transcribeViaFirestoreBridge(
         cleanup();
         reject(new Error("Server transcription timed out"));
       }
-    }, 8000);
+    }, 9000);
+
+    const handleDocData = (data: any) => {
+      if (settled || !data) return;
+      if (data.status === "completed" && typeof data.transcript === "string") {
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        resolve(data.transcript.trim());
+      } else if (data.status === "error") {
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        reject(new Error(data.error || "Transcription error"));
+      }
+    };
 
     unsub = onSnapshot(
       reqRef,
       (snap) => {
         if (settled || !snap.exists()) return;
-        const data = snap.data();
-        if (data?.status === "completed" && typeof data.transcript === "string") {
-          settled = true;
-          clearTimeout(timer);
-          cleanup();
-          resolve(data.transcript.trim());
-        } else if (data?.status === "error") {
-          settled = true;
-          clearTimeout(timer);
-          cleanup();
-          reject(new Error(data.error || "Transcription error"));
-        }
+        handleDocData(snap.data());
       },
-      (err) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          cleanup();
-          reject(err);
-        }
-      }
+      () => {}
     );
+
+    pollInterval = setInterval(async () => {
+      if (settled) return;
+      try {
+        const snap = await getDocFromServer(reqRef).catch(() => getDoc(reqRef));
+        if (!settled && snap && snap.exists()) {
+          handleDocData(snap.data());
+        }
+      } catch {}
+    }, 650);
 
     setDoc(reqRef, {
       type: "transcribe",
@@ -2526,8 +2636,13 @@ async function ttsViaFirestoreBridge(
   return new Promise<string>((resolve, reject) => {
     let settled = false;
     let unsub: (() => void) | null = null;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     const cleanup = () => {
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
       if (unsub) {
         try {
           unsub();
@@ -2545,32 +2660,39 @@ async function ttsViaFirestoreBridge(
       }
     }, timeoutMs);
 
+    const handleDocData = (data: any) => {
+      if (settled || !data) return;
+      if (data.status === "completed" && typeof data.audioBase64 === "string" && data.audioBase64) {
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        resolve(data.audioBase64);
+      } else if (data.status === "error") {
+        settled = true;
+        clearTimeout(timer);
+        cleanup();
+        reject(new Error(data.error || "TTS error"));
+      }
+    };
+
     unsub = onSnapshot(
       reqRef,
       (snap) => {
         if (settled || !snap.exists()) return;
-        const data = snap.data();
-        if (data?.status === "completed" && typeof data.audioBase64 === "string" && data.audioBase64) {
-          settled = true;
-          clearTimeout(timer);
-          cleanup();
-          resolve(data.audioBase64);
-        } else if (data?.status === "error") {
-          settled = true;
-          clearTimeout(timer);
-          cleanup();
-          reject(new Error(data.error || "TTS error"));
-        }
+        handleDocData(snap.data());
       },
-      (err) => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timer);
-          cleanup();
-          reject(err);
-        }
-      }
+      () => {}
     );
+
+    pollInterval = setInterval(async () => {
+      if (settled) return;
+      try {
+        const snap = await getDocFromServer(reqRef).catch(() => getDoc(reqRef));
+        if (!settled && snap && snap.exists()) {
+          handleDocData(snap.data());
+        }
+      } catch {}
+    }, 650);
 
     setDoc(reqRef, {
       type: "tts",

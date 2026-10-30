@@ -2531,9 +2531,9 @@ export function generateLocalDeterministicResponse(
     };
   }
 
-  // 18. Standard In-Scope Fallback
+  // 18. Standard In-Scope Fallback (empty reply so real Gemini AI always answers)
   return {
-    reply: `**Store Snapshot:** **${snapshot.products.length} products** in catalog · **₹${snapshot.todayRevenue.toLocaleString("en-IN")}** sales today across **${snapshot.todayBillsCount} orders**. How can I help with your store?`,
+    reply: "",
     action: null,
     status,
   };
@@ -3397,29 +3397,36 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
     deleteDoc(doc(db, "settings", "ai_bridge_config")).catch(() => {});
 
     const processedRpcIds = new Set<string>();
-    onSnapshot(
-      collection(db, "settings"),
-      (snap) => {
-        snap.docChanges().forEach(async (change) => {
-          const docSnap = change.doc;
-          if (!docSnap.id.startsWith("ai_rpc_req_")) return;
-          const data = docSnap.data();
-          if (data?.status !== "pending" || processedRpcIds.has(docSnap.id)) return;
+    const serverSeenFinishedAt = new Map<string, number>();
 
-          // Clean up stale RPC documents older than 30 seconds so old requests never clog the queue
-          if (data?.createdAt && Date.now() - Number(data.createdAt) > 30000) {
-            processedRpcIds.add(docSnap.id);
-            deleteDoc(doc(db!, "settings", docSnap.id)).catch(() => {});
-            return;
-          }
+    const handleRpcDocument = async (docSnap: any) => {
+      if (!docSnap || !docSnap.id || !docSnap.id.startsWith("ai_rpc_req_")) return;
+      const data = docSnap.data();
+      if (!data) return;
 
-          processedRpcIds.add(docSnap.id);
-          if (processedRpcIds.size > 200) {
-            const first = processedRpcIds.values().next().value;
-            if (first) processedRpcIds.delete(first);
-          }
+      // Clean up finished RPC documents 45s after server saw them complete so old docs never accumulate
+      if (data.status === "completed" || data.status === "error") {
+        const seenAt = serverSeenFinishedAt.get(docSnap.id) || Date.now();
+        serverSeenFinishedAt.set(docSnap.id, seenAt);
+        if (Date.now() - seenAt > 45000) {
+          serverSeenFinishedAt.delete(docSnap.id);
+          deleteDoc(doc(db!, "settings", docSnap.id)).catch(() => {});
+        }
+        return;
+      }
 
-          try {
+      if (data.status !== "pending" || processedRpcIds.has(docSnap.id)) return;
+
+      // NOTE: Never compare client `data.createdAt` against server `Date.now()` because the server
+      // container clock and user's mobile phone clock can differ, which previously caused mobile
+      // RPC requests to be misclassified as stale and deleted before processing!
+      processedRpcIds.add(docSnap.id);
+      if (processedRpcIds.size > 300) {
+        const first = processedRpcIds.values().next().value;
+        if (first) processedRpcIds.delete(first);
+      }
+
+      try {
             const reqType = String(data.type || "chat");
 
             if (reqType === "transcribe") {
@@ -3702,6 +3709,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               actionData
             );
 
+            serverSeenFinishedAt.set(docSnap.id, Date.now());
             await setDoc(
               doc(db!, "settings", docSnap.id),
               {
@@ -3715,6 +3723,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               { merge: true }
             );
           } catch (rpcErr: any) {
+            serverSeenFinishedAt.set(docSnap.id, Date.now());
             await setDoc(
               doc(db!, "settings", docSnap.id),
               {
@@ -3724,10 +3733,45 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               { merge: true }
             ).catch(() => {});
           }
+    };
+
+    let rpcUnsub: (() => void) | null = null;
+    const attachRpcListener = () => {
+      if (!db) return;
+      if (rpcUnsub) {
+        try {
+          rpcUnsub();
+        } catch {}
+        rpcUnsub = null;
+      }
+      rpcUnsub = onSnapshot(
+        collection(db, "settings"),
+        (snap) => {
+          snap.docChanges().forEach((change) => {
+            handleRpcDocument(change.doc).catch(() => {});
+          });
+        },
+        (err) => {
+          console.warn("Firestore RPC listener disconnected, re-subscribing:", err?.message || err);
+          setTimeout(attachRpcListener, 1500);
+        }
+      );
+    };
+
+    attachRpcListener();
+
+    // Backup poll every 2s so even if the Node.js WebChannel stream stalls, mobile RPC requests are answered immediately
+    setInterval(async () => {
+      if (!db) return;
+      try {
+        const snap = await getDocs(collection(db, "settings"));
+        snap.forEach((docSnap) => {
+          if (docSnap.id.startsWith("ai_rpc_req_")) {
+            handleRpcDocument(docSnap).catch(() => {});
+          }
         });
-      },
-      () => {}
-    );
+      } catch {}
+    }, 2000);
   }
 
   process.on("SIGTERM", () => {

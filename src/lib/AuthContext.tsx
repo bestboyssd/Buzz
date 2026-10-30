@@ -36,6 +36,8 @@ import {
   showLocalNotification,
   getDeviceId,
   markLocalSecurityAlertTriggered,
+  isPerformanceModeEnabled,
+  applyPerformanceMode,
 } from "./utils";
 import { logActivity } from "./firestoreHooks";
 
@@ -111,6 +113,7 @@ const wipeLocalAccountCache = (uid: string) => {
   localStorage.removeItem(`hapticsEnabled_${uid}`);
   localStorage.removeItem(`notifications_${uid}`);
   localStorage.removeItem(`keepScreenOn_${uid}`);
+  localStorage.removeItem(`performanceMode_${uid}`);
   localStorage.removeItem(`tempAdminAuth_${uid}`);
 };
 
@@ -428,6 +431,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             let hapticsEnabled = true;
             let notifications = true;
             let keepScreenOn = false;
+            let performanceMode = true;
             let isPrinterConnected = false;
 
             if (!isCreatingFreshAccount && docSnap?.exists()) {
@@ -500,6 +504,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               } else {
                 keepScreenOn = false;
               }
+              performanceMode =
+                data.performanceMode !== undefined
+                  ? data.performanceMode !== false
+                  : isPerformanceModeEnabled(currentUser.uid);
               isPrinterConnected = false;
             } else {
               // Brand new account OR re-creating a fresh account after Admin deletion!
@@ -548,6 +556,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               hapticsEnabled = true;
               notifications = true;
               keepScreenOn = false;
+              performanceMode = true;
               isPrinterConnected = false;
 
               recreatedAtRef.current = freshAccountTs;
@@ -618,8 +627,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             localStorage.setItem(`isPrinterConnected_${currentUser.uid}`, "false");
             window.dispatchEvent(new Event("keepScreenOnChanged"));
 
-            // Apply theme instantly and notify listeners
+            // Apply theme and performance mode instantly and notify listeners
             applyAppTheme(theme, currentUser.uid);
+            applyPerformanceMode(performanceMode, currentUser.uid);
 
             // Ensure customPhotoURL is NOT empty if currentUser has a photoURL
             if (!customPhotoURL && currentUser.photoURL) {
@@ -653,6 +663,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 notifications,
                 keepScreenOn,
                 keepScreenOnResetV2: true,
+                performanceMode,
                 isPrinterConnected,
                 ...(isCreatingFreshAccount
                   ? { createdAt: writeNow, recreatedAt: writeNow }
@@ -792,8 +803,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             isOwner ||
             String(savedEmail).trim().toLowerCase() === "suman.das.199972@gmail.com";
 
+          const recentExplicitSignIn =
+            isExplicitGoogleSignInRef.current ||
+            Date.now() - Number(sessionStorage.getItem("explicit_google_signin_ts") || 0) < 30000;
+
           // If admin blocked this account, immediately sign them out and show the blocked message
-          if (!isAcctOwner && data.isBlocked === true && !isExplicitGoogleSignInRef.current) {
+          if (!isAcctOwner && data.isBlocked === true && !recentExplicitSignIn) {
             localStorage.setItem(`is_blocked_cached_${user.uid}`, "true");
             notifyAndEnforceBlockedLogout(BLOCKED_LOGIN_MESSAGE);
             return;
@@ -810,6 +825,13 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               localStorage.getItem(`theme_${user.uid}`) !== data.theme
             ) {
               applyAppTheme(data.theme, user.uid);
+            }
+          }
+
+          if (data.performanceMode !== undefined) {
+            const targetPerf = data.performanceMode !== false;
+            if (isPerformanceModeEnabled(user.uid) !== targetPerf) {
+              applyPerformanceMode(targetPerf, user.uid);
             }
           }
           
@@ -848,7 +870,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         } else if (
           profileConfirmedInDbRef.current &&
           !isOwner &&
-          !isExplicitGoogleSignInRef.current
+          !isExplicitGoogleSignInRef.current &&
+          Date.now() - Number(sessionStorage.getItem("explicit_google_signin_ts") || 0) >= 30000
         ) {
           // Profile existed during this session and was just deleted from the database by an Admin
           skipProfileWriteRef.current = true;
@@ -893,7 +916,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     const unsubscribeBlocked = onSnapshot(
       blockedDoc,
       (snap) => {
-        if (!snap.exists() || isExplicitGoogleSignInRef.current) return;
+        const recentExplicitSignIn =
+          isExplicitGoogleSignInRef.current ||
+          Date.now() - Number(sessionStorage.getItem("explicit_google_signin_ts") || 0) < 30000;
+        if (!snap.exists() || recentExplicitSignIn) return;
         const isOwner =
           String(user.email || "").trim().toLowerCase() === "suman.das.199972@gmail.com";
         if (isOwner) return;

@@ -5527,39 +5527,39 @@ export function Admin() {
                       </div>
 
                       {/* Bottom Action Bar */}
-                      <div className="flex items-center justify-between pt-3.5 border-t border-slate-200/60 dark:border-white/[0.07] mt-0.5 gap-2">
-                        <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-400 dark:text-slate-500 whitespace-nowrap shrink-0">
+                      <div className="flex flex-wrap items-center justify-between pt-3 border-t border-slate-200/60 dark:border-white/[0.07] mt-0.5 gap-x-2 gap-y-2 w-full min-w-0">
+                        <div className="flex items-center gap-1.5 text-[10.5px] sm:text-[11px] font-semibold text-slate-400 dark:text-slate-500 truncate min-w-0">
                           {acc.updatedAt ? (
-                            <span>Synced {formatDateToDMY(acc.updatedAt)}</span>
+                            <span className="truncate">Synced {formatDateToDMY(acc.updatedAt)}</span>
                           ) : (
-                            <span>No recent activity</span>
+                            <span className="truncate">No recent activity</span>
                           )}
                         </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex items-center justify-end gap-1.5 ml-auto shrink-0 max-w-full">
                           {/* 1. Admin Role toggle */}
                           {acc.isAdmin ? (
                             <button
                               disabled={isSelfOrOwner || !isRealAdmin}
                               onClick={() => handleToggleAdmin(acc.uid, true)}
-                              className="px-3 py-1.5 rounded-full bg-amber-500/10 hover:bg-amber-500/20 dark:bg-amber-950/30 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 border border-amber-500/25 dark:border-amber-500/30 active:scale-95 transition-all text-xs font-bold flex items-center gap-1.5 whitespace-nowrap disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+                              className="px-2.5 sm:px-3 py-1.5 rounded-full bg-amber-500/10 hover:bg-amber-500/20 dark:bg-amber-950/30 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 border border-amber-500/25 dark:border-amber-500/30 active:scale-95 transition-all text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap disabled:opacity-35 disabled:pointer-events-none cursor-pointer shrink-0"
                               title={
                                 isSelfOrOwner
                                   ? "You cannot demote yourself"
                                   : "Demote from Admin"
                               }
                             >
-                              <ShieldOff size={13} className="stroke-[2.5]" />
+                              <ShieldOff size={12} className="stroke-[2.5] shrink-0" />
                               <span>Revoke</span>
                             </button>
                           ) : (
                             <button
                               disabled={!isRealAdmin || isBlocked}
                               onClick={() => handleToggleAdmin(acc.uid, false)}
-                              className="px-3 py-1.5 rounded-full bg-slate-100 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200/60 dark:border-white/[0.07] active:scale-95 transition-all text-xs font-bold flex items-center gap-1.5 whitespace-nowrap disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+                              className="px-2.5 sm:px-3 py-1.5 rounded-full bg-slate-100 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200/60 dark:border-white/[0.07] active:scale-95 transition-all text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap disabled:opacity-35 disabled:pointer-events-none cursor-pointer shrink-0"
                               title="Promote to Admin"
                             >
-                              <Shield size={13} className="stroke-[2.5]" />
+                              <Shield size={12} className="stroke-[2.5] shrink-0" />
                               <span>Make Admin</span>
                             </button>
                           )}
@@ -5570,18 +5570,18 @@ export function Admin() {
                               <button
                                 disabled={!isRealAdmin || isBlocked}
                                 onClick={() => handleResetAttempts(acc.uid)}
-                                className="px-3 py-1.5 rounded-full bg-emerald-500/10 hover:bg-emerald-500/20 dark:bg-emerald-950/30 dark:hover:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25 dark:border-emerald-500/30 active:scale-95 transition-all text-xs font-bold flex items-center gap-1.5 whitespace-nowrap disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+                                className="px-2.5 sm:px-3 py-1.5 rounded-full bg-emerald-500/10 hover:bg-emerald-500/20 dark:bg-emerald-950/30 dark:hover:bg-emerald-900/40 text-emerald-600 dark:text-emerald-400 border border-emerald-500/25 dark:border-emerald-500/30 active:scale-95 transition-all text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap disabled:opacity-35 disabled:pointer-events-none cursor-pointer shrink-0"
                               >
-                                <UserCheck size={13} className="stroke-[2.6]" />
+                                <UserCheck size={12} className="stroke-[2.6] shrink-0" />
                                 <span>Unlock</span>
                               </button>
                             ) : (
                               <button
                                 disabled={isSelfOrOwner || acc.isAdmin || !isRealAdmin || isBlocked}
                                 onClick={() => handleLockAccount(acc.uid)}
-                                className="px-3 py-1.5 rounded-full bg-rose-500/10 hover:bg-rose-500/20 dark:bg-rose-950/25 dark:hover:bg-rose-900/35 text-rose-600 dark:text-rose-400 border border-rose-500/20 dark:border-rose-500/25 active:scale-95 transition-all text-xs font-bold flex items-center gap-1.5 whitespace-nowrap disabled:opacity-35 disabled:pointer-events-none cursor-pointer"
+                                className="px-2.5 sm:px-3 py-1.5 rounded-full bg-rose-500/10 hover:bg-rose-500/20 dark:bg-rose-950/25 dark:hover:bg-rose-900/35 text-rose-600 dark:text-rose-400 border border-rose-500/20 dark:border-rose-500/25 active:scale-95 transition-all text-[11px] sm:text-xs font-bold flex items-center gap-1 whitespace-nowrap disabled:opacity-35 disabled:pointer-events-none cursor-pointer shrink-0"
                               >
-                                <UserX size={13} className="stroke-[2.5]" />
+                                <UserX size={12} className="stroke-[2.5] shrink-0" />
                                 <span>Lock</span>
                               </button>
                             ))}
@@ -5886,15 +5886,15 @@ export function Admin() {
                               <label className="block text-[10px] font-extrabold uppercase tracking-widest text-slate-400 dark:text-slate-400 mb-1.5 pl-1">
                                 Account Access & Removal
                               </label>
-                              <div className="grid grid-cols-2 gap-2.5">
+                              <div className="grid grid-cols-2 gap-2">
                                 {editingAccount.isBlocked ? (
                                   <button
                                     type="button"
                                     disabled={!isRealAdmin}
                                     onClick={() => handleToggleBlockAccount(editingAccount)}
-                                    className="py-2.5 px-3 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/50 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 font-extrabold text-xs flex items-center justify-center gap-1.5 active:scale-95 transition-all cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+                                    className="py-2.5 px-2.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 dark:bg-emerald-950/40 dark:hover:bg-emerald-900/50 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 font-extrabold text-[11px] sm:text-xs flex items-center justify-center gap-1.5 whitespace-nowrap active:scale-95 transition-all cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
                                   >
-                                    <Unlock size={14} className="stroke-[2.5] shrink-0" />
+                                    <Unlock size={13} className="stroke-[2.5] shrink-0" />
                                     <span>Unblock Login</span>
                                   </button>
                                 ) : (
@@ -5902,9 +5902,9 @@ export function Admin() {
                                     type="button"
                                     disabled={!isRealAdmin || Boolean(editingAccount.isAdmin) || editIsAdmin}
                                     onClick={() => handleToggleBlockAccount(editingAccount)}
-                                    className="py-2.5 px-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 dark:bg-amber-950/30 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 border border-amber-500/25 font-extrabold text-xs flex items-center justify-center gap-1.5 active:scale-95 transition-all cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+                                    className="py-2.5 px-2.5 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 dark:bg-amber-950/30 dark:hover:bg-amber-900/40 text-amber-600 dark:text-amber-400 border border-amber-500/25 font-extrabold text-[11px] sm:text-xs flex items-center justify-center gap-1.5 whitespace-nowrap active:scale-95 transition-all cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
                                   >
-                                    <Ban size={14} className="stroke-[2.5] shrink-0" />
+                                    <Ban size={13} className="stroke-[2.5] shrink-0" />
                                     <span>Block Login</span>
                                   </button>
                                 )}
@@ -5918,9 +5918,9 @@ export function Admin() {
                                     setEditingAccount(null);
                                     setAccountToDelete(target);
                                   }}
-                                  className="py-2.5 px-3 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 dark:bg-rose-950/30 dark:hover:bg-rose-900/40 text-rose-600 dark:text-rose-400 border border-rose-500/25 font-extrabold text-xs flex items-center justify-center gap-1.5 active:scale-95 transition-all cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+                                  className="py-2.5 px-2.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 dark:bg-rose-950/30 dark:hover:bg-rose-900/40 text-rose-600 dark:text-rose-400 border border-rose-500/25 font-extrabold text-[11px] sm:text-xs flex items-center justify-center gap-1.5 whitespace-nowrap active:scale-95 transition-all cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
                                 >
-                                  <Trash2 size={14} className="stroke-[2.5] shrink-0" />
+                                  <Trash2 size={13} className="stroke-[2.5] shrink-0" />
                                   <span>Delete Account</span>
                                 </button>
                               </div>

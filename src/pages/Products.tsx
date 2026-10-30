@@ -1660,68 +1660,50 @@ function AddStockModal({
                 </div>
               </div>
 
-              <motion.div
-                layout
-                transition={{
-                  layout: { type: "spring", stiffness: 380, damping: 30, mass: 0.75 },
-                }}
-                className={`grid gap-3 p-1 pb-4 flex-1 min-h-0 content-start overflow-y-auto overscroll-contain custom-scrollbar ${
-                  pullState === "full"
-                    ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4"
-                    : "grid-cols-2"
-                }`}
-              >
-                {filteredProducts.length === 0 && (
-                  <p className="text-sm text-slate-400 col-span-full text-center py-8">
-                    No products match your search.
-                  </p>
-                )}
-                {filteredProducts.map((p, idx) => {
-                  const isSelected = selectedProducts.some(
-                    (sp) => sp.id === p.id
-                  );
-                  const pImgUrl = getImageUrl(p.image);
-                  return (
-                    <motion.div
-                      layout="position"
-                      key={p.id || `p_${idx}`}
-                      whileHover={{ y: -1.5, scale: 1.01 }}
-                      whileTap={{ scale: 0.97 }}
-                      transition={{
-                        layout: { type: "spring", stiffness: 390, damping: 30, mass: 0.72 },
-                        scale: { type: "spring", stiffness: 450, damping: 25 },
-                      }}
-                      onClick={() => {
-                        if (isSelected) {
-                          setSelectedProducts(
-                            selectedProducts.filter((sp) => sp.id !== p.id)
-                          );
-                        } else {
-                          setSelectedProducts([...selectedProducts, p]);
-                        }
-                        triggerHaptic("light");
-                      }}
-                      className={`p-3 rounded-[1.25rem] cursor-pointer border-2 transition-colors duration-150 flex flex-col justify-between h-auto relative overflow-hidden transform-gpu ${
-                        isSelected
-                          ? "border-indigo-500 bg-indigo-50/80 dark:bg-indigo-950/50 shadow-[0_4px_20px_rgba(99,102,241,0.14)]"
-                          : "border-slate-200/80 dark:border-white/[0.08] hover:border-indigo-500/40 bg-white dark:bg-[#1b1f2b] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none"
-                      }`}
-                    >
-                      <AnimatePresence initial={false}>
+              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain custom-scrollbar">
+                <div
+                  className={`grid gap-3 p-1 pb-4 auto-rows-max ${
+                    pullState === "full"
+                      ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4"
+                      : "grid-cols-2"
+                  }`}
+                >
+                  {filteredProducts.length === 0 && (
+                    <p className="text-sm text-slate-400 col-span-full text-center py-8">
+                      No products match your search.
+                    </p>
+                  )}
+                  {filteredProducts.map((p, idx) => {
+                    const isSelected = selectedProducts.some(
+                      (sp) => sp.id === p.id
+                    );
+                    const pImgUrl = getImageUrl(p.image);
+                    return (
+                      <motion.div
+                        key={p.id || `p_${idx}`}
+                        whileHover={{ y: -1.5, scale: 1.01 }}
+                        whileTap={{ scale: 0.97 }}
+                        transition={{
+                          scale: { type: "spring", stiffness: 450, damping: 25 },
+                        }}
+                        onClick={() => {
+                          if (isSelected) {
+                            setSelectedProducts(
+                              selectedProducts.filter((sp) => sp.id !== p.id)
+                            );
+                          } else {
+                            setSelectedProducts([...selectedProducts, p]);
+                          }
+                          triggerHaptic("light");
+                        }}
+                        className={`p-3 rounded-[1.25rem] cursor-pointer border-2 transition-colors duration-150 flex flex-col justify-between h-fit min-h-fit relative transform-gpu ${
+                          isSelected
+                            ? "border-indigo-500 bg-indigo-50/80 dark:bg-indigo-950/50 shadow-[0_4px_20px_rgba(99,102,241,0.14)]"
+                            : "border-slate-200/80 dark:border-white/[0.08] hover:border-indigo-500/40 bg-white dark:bg-[#1b1f2b] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none"
+                        }`}
+                      >
                         {pullState === "full" && (
-                          <motion.div
-                            key="expanded-card-image"
-                            initial={{ opacity: 0, height: 0, marginBottom: 0, scale: 0.94 }}
-                            animate={{ opacity: 1, height: "auto", marginBottom: 8, scale: 1 }}
-                            exit={{ opacity: 0, height: 0, marginBottom: 0, scale: 0.94 }}
-                            transition={{
-                              type: "spring",
-                              stiffness: 390,
-                              damping: 30,
-                              mass: 0.72,
-                            }}
-                            className="w-full overflow-hidden rounded-xl shrink-0"
-                          >
+                          <div className="w-full overflow-hidden rounded-xl shrink-0 mb-2.5">
                             <div className="w-full aspect-square rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-950 flex items-center justify-center relative">
                               {pImgUrl ? (
                                 <img
@@ -1748,24 +1730,24 @@ function AddStockModal({
                               )}
                               <div className="absolute inset-0 bg-gradient-to-t from-black/15 via-transparent to-transparent pointer-events-none" />
                             </div>
-                          </motion.div>
+                          </div>
                         )}
-                      </AnimatePresence>
-                      <div className="min-w-0 w-full mt-1">
-                        <p className="font-bold text-sm text-slate-800 dark:text-slate-200 line-clamp-1">
-                          {p.name}
-                        </p>
-                        <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                          Stock:{" "}
-                          <span className="font-mono font-bold text-slate-700 dark:text-slate-300">
-                            {p.stock}
-                          </span>
-                        </p>
-                      </div>
-                    </motion.div>
-                  );
-                })}
-              </motion.div>
+                        <div className="min-w-0 w-full shrink-0">
+                          <p className="font-bold text-sm text-slate-800 dark:text-slate-200 truncate leading-snug">
+                            {p.name}
+                          </p>
+                          <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
+                            Stock:{" "}
+                            <span className="font-mono font-bold text-slate-700 dark:text-slate-300">
+                              {p.stock}
+                            </span>
+                          </p>
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
 
             <AnimatePresence initial={false}>
