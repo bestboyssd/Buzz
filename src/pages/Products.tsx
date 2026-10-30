@@ -43,6 +43,69 @@ import { ProfileMenu } from "../components/ProfileMenu";
 import { ProductImagePlaceholder } from "../components/ProductImagePlaceholder";
 import { normalizeProductCategory } from "../lib/geminiApi";
 
+const SHEET_BACKDROP_TRANSITION = {
+  duration: 0.22,
+  ease: [0.22, 1, 0.36, 1] as const,
+};
+
+const SHEET_VARIANTS = {
+  hidden: {
+    y: "100%",
+    opacity: 0.6,
+    scale: 0.985,
+  },
+  visible: {
+    y: 0,
+    opacity: 1,
+    scale: 1,
+    transition: {
+      type: "spring" as const,
+      stiffness: 395,
+      damping: 32,
+      mass: 0.78,
+      staggerChildren: 0.04,
+      delayChildren: 0.02,
+    },
+  },
+  exit: {
+    y: "104%",
+    opacity: 0,
+    scale: 0.985,
+    transition: {
+      duration: 0.19,
+      ease: [0.32, 0, 0.67, 0] as const,
+    },
+  },
+};
+
+const SHEET_ITEM_VARIANTS = {
+  hidden: {
+    opacity: 0,
+    y: 12,
+    scale: 0.98,
+  },
+  visible: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    transition: {
+      type: "spring" as const,
+      stiffness: 430,
+      damping: 28,
+      mass: 0.7,
+    },
+  },
+  exit: {
+    opacity: 0,
+    y: 6,
+    scale: 0.98,
+    transition: {
+      duration: 0.11,
+      ease: "easeIn" as const,
+    },
+  },
+};
+
 export function Products() {
   const { user } = useAuth();
   const [isAdding, setIsAdding] = useState(false);
@@ -54,6 +117,50 @@ export function Products() {
   const [stockFilter, setStockFilter] = useState<"all" | "low" | "out">("all");
   const [optionsShake, setOptionsShake] = useState(false);
   const segDragRef = useRef<{ startX: number; dragged: boolean }>({ startX: 0, dragged: false });
+
+  // Close active modal on Escape key or Android hardware back button
+  React.useEffect(() => {
+    const anyModalOpen =
+      Boolean(confirmDeleteId) ||
+      isAdding ||
+      Boolean(editingProduct) ||
+      isAddingStock ||
+      showAddOptions;
+
+    if (!anyModalOpen) return;
+
+    const closeTopModal = () => {
+      if (confirmDeleteId) {
+        setConfirmDeleteId(null);
+      } else if (isAdding) {
+        setIsAdding(false);
+      } else if (editingProduct) {
+        setEditingProduct(null);
+      } else if (isAddingStock) {
+        setIsAddingStock(false);
+      } else if (showAddOptions) {
+        setShowAddOptions(false);
+      }
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        closeTopModal();
+      }
+    };
+
+    const handleAndroidBack = (e: Event) => {
+      e.preventDefault();
+      closeTopModal();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("androidBackPress", handleAndroidBack);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("androidBackPress", handleAndroidBack);
+    };
+  }, [confirmDeleteId, isAdding, editingProduct, isAddingStock, showAddOptions]);
 
   const {
     products,
@@ -196,17 +303,26 @@ export function Products() {
           </p>
         </div>
         <div className="flex items-center gap-2.5">
-          <button
+          <motion.button
             type="button"
             aria-label="Add product or stock"
+            whileHover={{ scale: 1.06 }}
+            whileTap={{ scale: 0.9 }}
+            transition={{ type: "spring", stiffness: 450, damping: 24 }}
             onClick={() => {
               triggerHaptic("heavy");
               setShowAddOptions(true);
             }}
-            className="bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-full shadow-md shadow-indigo-600/25 w-10 h-10 flex items-center justify-center transition-colors duration-150 cursor-pointer"
+            className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-full shadow-md shadow-indigo-600/25 w-10 h-10 flex items-center justify-center transition-colors duration-150 cursor-pointer transform-gpu"
           >
-            <Plus size={20} strokeWidth={2.5} />
-          </button>
+            <motion.span
+              animate={{ rotate: showAddOptions ? 45 : 0 }}
+              transition={{ type: "spring", stiffness: 420, damping: 24 }}
+              className="flex items-center justify-center"
+            >
+              <Plus size={20} strokeWidth={2.5} />
+            </motion.span>
+          </motion.button>
           <ProfileMenu />
         </div>
       </header>
@@ -448,25 +564,31 @@ export function Products() {
 
                   {/* Ergonomic 40x40px Action Buttons */}
                   <div className="flex items-center gap-2 pl-2 border-l border-slate-200/70 dark:border-slate-800 shrink-0">
-                    <button
+                    <motion.button
                       type="button"
                       aria-label={`Edit ${product.name}`}
+                      whileHover={{ scale: 1.06, y: -1 }}
+                      whileTap={{ scale: 0.9 }}
+                      transition={{ type: "spring", stiffness: 450, damping: 24 }}
                       onClick={() => {
                         triggerHaptic("selection");
                         setEditingProduct(product);
                       }}
-                      className="w-10 h-10 flex items-center justify-center bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-500/20 dark:hover:text-indigo-300 active:scale-95 border border-slate-200/80 dark:border-slate-700 rounded-xl transition-colors duration-150 cursor-pointer"
+                      className="w-10 h-10 flex items-center justify-center bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-500/20 dark:hover:text-indigo-300 border border-slate-200/80 dark:border-slate-700 rounded-xl transition-colors duration-150 cursor-pointer transform-gpu"
                     >
                       <Edit2 size={16} />
-                    </button>
-                    <button
+                    </motion.button>
+                    <motion.button
                       type="button"
                       aria-label={`Delete ${product.name}`}
+                      whileHover={{ scale: 1.06, y: -1 }}
+                      whileTap={{ scale: 0.9 }}
+                      transition={{ type: "spring", stiffness: 450, damping: 24 }}
                       onClick={() => handleDeleteClick(product.id)}
-                      className="w-10 h-10 flex items-center justify-center bg-red-50/80 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 active:scale-95 border border-red-200/80 dark:border-red-500/25 rounded-xl transition-colors duration-150 cursor-pointer"
+                      className="w-10 h-10 flex items-center justify-center bg-red-50/80 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 border border-red-200/80 dark:border-red-500/25 rounded-xl transition-colors duration-150 cursor-pointer transform-gpu"
                     >
                       <Trash2 size={16} />
-                    </button>
+                    </motion.button>
                   </div>
                 </div>
               );
@@ -488,20 +610,35 @@ export function Products() {
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.14, ease: "easeOut" }}
+                  transition={SHEET_BACKDROP_TRANSITION}
                   onClick={() => setConfirmDeleteId(null)}
-                  className="absolute inset-0 bg-slate-900/40 dark:bg-slate-950/65 backdrop-blur-md transform-gpu"
+                  className="absolute inset-0 bg-slate-900/45 dark:bg-slate-950/70 backdrop-blur-md transform-gpu"
                 />
                 <motion.div
-                  initial={{ scale: 0.95, opacity: 0 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  exit={{ scale: 0.95, opacity: 0 }}
-                  transition={{ duration: 0.15, ease: [0.16, 1, 0.3, 1] }}
+                  initial={{ scale: 0.9, opacity: 0, y: 12, filter: "blur(6px)" }}
+                  animate={{ scale: 1, opacity: 1, y: 0, filter: "blur(0px)" }}
+                  exit={{ scale: 0.93, opacity: 0, y: 8, filter: "blur(4px)" }}
+                  transition={{
+                    type: "spring",
+                    stiffness: 420,
+                    damping: 29,
+                    mass: 0.75,
+                  }}
                   className="bg-white dark:bg-[#1b1f2b] w-full max-w-sm p-6 relative z-10 rounded-[2rem] text-center shadow-2xl border border-slate-200/80 dark:border-white/[0.08] transform-gpu will-change-transform"
                 >
-                  <div className="mx-auto w-16 h-16 bg-red-100 dark:bg-red-500/20 text-red-600 dark:text-red-400 rounded-full flex items-center justify-center mb-4">
+                  <motion.div
+                    initial={{ scale: 0.7, opacity: 0, rotate: -10 }}
+                    animate={{ scale: 1, opacity: 1, rotate: 0 }}
+                    transition={{
+                      type: "spring",
+                      stiffness: 440,
+                      damping: 22,
+                      delay: 0.04,
+                    }}
+                    className="mx-auto w-16 h-16 bg-red-100 dark:bg-red-500/20 text-red-600 dark:text-red-400 rounded-full flex items-center justify-center mb-4"
+                  >
                     <AlertTriangle size={32} />
-                  </div>
+                  </motion.div>
                   <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100 mb-2">
                     Delete Product
                   </h2>
@@ -510,20 +647,24 @@ export function Products() {
                     cannot be undone.
                   </p>
                   <div className="flex gap-3">
-                    <button
+                    <motion.button
                       type="button"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.96 }}
                       onClick={() => setConfirmDeleteId(null)}
                       className="flex-1 py-3 rounded-xl font-bold text-slate-700 dark:text-slate-200 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors duration-150 cursor-pointer"
                     >
                       Cancel
-                    </button>
-                    <button
+                    </motion.button>
+                    <motion.button
                       type="button"
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.96 }}
                       onClick={confirmDelete}
                       className="flex-1 py-3 rounded-xl font-bold text-white bg-red-600 hover:bg-red-700 transition-colors duration-150 shadow-lg shadow-red-600/30 cursor-pointer"
                     >
                       Delete
-                    </button>
+                    </motion.button>
                   </div>
                 </motion.div>
               </div>
@@ -540,9 +681,9 @@ export function Products() {
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   exit={{ opacity: 0 }}
-                  transition={{ duration: 0.16, ease: "easeOut" }}
+                  transition={SHEET_BACKDROP_TRANSITION}
                   onClick={() => setShowAddOptions(false)}
-                  className="absolute inset-0 bg-slate-900/40 dark:bg-slate-950/65 backdrop-blur-md transform-gpu"
+                  className="absolute inset-0 bg-slate-900/45 dark:bg-slate-950/70 backdrop-blur-md transform-gpu"
                 />
                 <motion.div
                   drag="y"
@@ -560,13 +701,10 @@ export function Products() {
                       setShowAddOptions(false);
                     }
                   }}
-                  initial={{ y: "100%" }}
-                  animate={{ y: 0 }}
-                  exit={{ y: "100%" }}
-                  transition={{
-                    duration: 0.2,
-                    ease: [0.16, 1, 0.3, 1],
-                  }}
+                  variants={SHEET_VARIANTS}
+                  initial="hidden"
+                  animate="visible"
+                  exit="exit"
                   className="bg-[#fcf8ff] dark:bg-[#161923] border border-slate-200/80 dark:border-white/[0.08] w-full max-w-lg p-6 pb-[calc(env(safe-area-inset-bottom)+2rem)] relative z-10 flex flex-col rounded-t-[2.5rem] rounded-b-none border-b-0 overflow-visible space-y-3 shadow-2xl transform-gpu will-change-transform"
                 >
                   <div
@@ -574,44 +712,58 @@ export function Products() {
                     className="pointer-events-none absolute top-[calc(100%-2px)] inset-x-[-1px] h-[100dvh] bg-[#fcf8ff] dark:bg-[#161923] border-x border-slate-200/80 dark:border-white/[0.08]"
                   />
                   <motion.div
-                    animate={
-                      optionsShake
-                        ? { x: [-6, 6, -6, 6, -3, 3, 0], y: [-2, 2, -2, 2, 0] }
-                        : {}
-                    }
-                    transition={{ duration: 0.4 }}
-                    className="w-12 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full mx-auto mb-4"
-                  />
-                  <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100 mb-4 text-center">
-                    Update Inventory
-                  </h2>
+                    variants={SHEET_ITEM_VARIANTS}
+                    className="flex flex-col items-center"
+                  >
+                    <motion.div
+                      animate={
+                        optionsShake
+                          ? { x: [-6, 6, -6, 6, -3, 3, 0], y: [-2, 2, -2, 2, 0] }
+                          : {}
+                      }
+                      transition={{ duration: 0.4 }}
+                      className="w-12 h-1.5 bg-slate-200 dark:bg-slate-700 rounded-full mx-auto mb-4"
+                    />
+                    <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100 mb-3 text-center">
+                      Update Inventory
+                    </h2>
+                  </motion.div>
 
-                  <button
+                  <motion.button
                     type="button"
+                    variants={SHEET_ITEM_VARIANTS}
+                    whileHover={{ scale: 1.012, y: -1 }}
+                    whileTap={{ scale: 0.975 }}
                     onClick={() => {
                       triggerHaptic("medium");
                       setShowAddOptions(false);
                       setIsAdding(true);
                     }}
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white p-4 rounded-2xl font-bold flex items-center justify-center gap-3 shadow-lg shadow-indigo-600/20 transition-colors duration-150 active:scale-[0.99] cursor-pointer"
+                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white p-4 rounded-2xl font-bold flex items-center justify-center gap-3 shadow-lg shadow-indigo-600/20 transition-colors duration-150 cursor-pointer transform-gpu"
                   >
                     <Plus size={20} /> Create New Product
-                  </button>
+                  </motion.button>
 
-                  <button
+                  <motion.button
                     type="button"
+                    variants={SHEET_ITEM_VARIANTS}
+                    whileHover={{ scale: 1.012, y: -1 }}
+                    whileTap={{ scale: 0.975 }}
                     onClick={() => {
                       triggerHaptic("medium");
                       setShowAddOptions(false);
                       setIsAddingStock(true);
                     }}
-                    className="w-full bg-white dark:bg-[#1b1f2b] hover:bg-[#f8f5fc] dark:hover:bg-[#222736] p-4 rounded-2xl font-bold flex items-center justify-center gap-3 text-slate-700 dark:text-slate-200 transition-colors duration-150 active:scale-[0.99] border border-slate-200/80 dark:border-white/[0.08] hover:border-indigo-500/30 cursor-pointer"
+                    className="w-full bg-white dark:bg-[#1b1f2b] hover:bg-[#f8f5fc] dark:hover:bg-[#222736] p-4 rounded-2xl font-bold flex items-center justify-center gap-3 text-slate-700 dark:text-slate-200 transition-colors duration-150 border border-slate-200/80 dark:border-white/[0.08] hover:border-indigo-500/30 cursor-pointer transform-gpu"
                   >
                     <Package size={20} /> Add Stock to Existing
-                  </button>
+                  </motion.button>
                 </motion.div>
               </div>
             )}
+          </AnimatePresence>
+
+          <AnimatePresence>
             {isAdding && (
               <AddProductModal
                 key="add-product-modal"
@@ -619,6 +771,9 @@ export function Products() {
                 products={products}
               />
             )}
+          </AnimatePresence>
+
+          <AnimatePresence>
             {editingProduct && (
               <AddProductModal
                 key={`edit-product-modal-${editingProduct.id || "item"}`}
@@ -627,6 +782,9 @@ export function Products() {
                 products={products}
               />
             )}
+          </AnimatePresence>
+
+          <AnimatePresence>
             {isAddingStock && (
               <AddStockModal
                 key="add-stock-modal"
@@ -889,9 +1047,9 @@ function AddProductModal({
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        transition={{ duration: 0.16, ease: "easeOut" }}
+        transition={SHEET_BACKDROP_TRANSITION}
         onClick={onClose}
-        className="absolute inset-0 bg-slate-900/40 dark:bg-slate-950/65 backdrop-blur-md transform-gpu"
+        className="absolute inset-0 bg-slate-900/45 dark:bg-slate-950/70 backdrop-blur-md transform-gpu"
       />
       <motion.div
         drag="y"
@@ -911,17 +1069,18 @@ function AddProductModal({
             onClose();
           }
         }}
-        initial={{ y: "100%" }}
-        animate={{ y: 0 }}
-        exit={{ y: "100%" }}
-        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+        variants={SHEET_VARIANTS}
+        initial="hidden"
+        animate="visible"
+        exit="exit"
         className="bg-[#fcf8ff] dark:bg-[#161923] border border-slate-200/80 dark:border-white/[0.08] shadow-2xl w-full max-w-lg p-5 pb-8 sm:pb-6 relative z-10 max-h-[90dvh] flex flex-col rounded-t-[2.5rem] rounded-b-none border-b-0 overflow-visible transform-gpu will-change-transform"
       >
         <div
           aria-hidden="true"
           className="pointer-events-none absolute top-[calc(100%-2px)] inset-x-[-1px] h-[100dvh] bg-[#fcf8ff] dark:bg-[#161923] border-x border-slate-200/80 dark:border-white/[0.08]"
         />
-        <div
+        <motion.div
+          variants={SHEET_ITEM_VARIANTS}
           onPointerDown={(e) => productDragControls.start(e)}
           className="pt-1 pb-2 -mt-1 cursor-row-resize touch-none select-none shrink-0"
         >
@@ -938,39 +1097,57 @@ function AddProductModal({
             <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">
               {editingProduct ? "Edit Product" : "Add Product"}
             </h2>
-            <button
+            <motion.button
               type="button"
+              whileHover={{ scale: 1.06, rotate: 90 }}
+              whileTap={{ scale: 0.9 }}
+              transition={{ type: "spring", stiffness: 420, damping: 24 }}
               onPointerDown={(e) => e.stopPropagation()}
               onClick={onClose}
-              className="p-2 bg-slate-100/50 dark:bg-slate-800/50 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-full text-slate-500 dark:text-slate-400 transition-colors shrink-0"
+              className="p-2 bg-slate-100/50 dark:bg-slate-800/50 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-full text-slate-500 dark:text-slate-400 transition-colors shrink-0 cursor-pointer"
             >
               <X size={20} />
-            </button>
+            </motion.button>
           </div>
-        </div>
+        </motion.div>
 
-        {formError && (
-          <div className="p-3 mb-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-900/30 text-red-600 dark:text-red-400 rounded-xl text-xs font-semibold flex items-center justify-between shrink-0">
-            <span className="flex items-center gap-2">
-              <AlertTriangle size={14} className="shrink-0" />
-              {formError}
-            </span>
-            <button onClick={() => setFormError("")} className="text-red-500 hover:text-red-700">
-              <X size={14} />
-            </button>
-          </div>
-        )}
+        <AnimatePresence initial={false}>
+          {formError && (
+            <motion.div
+              key="product-form-error"
+              initial={{ opacity: 0, y: -8, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -6, scale: 0.97 }}
+              transition={{ type: "spring", stiffness: 420, damping: 28 }}
+              className="p-3 mb-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-900/30 text-red-600 dark:text-red-400 rounded-xl text-xs font-semibold flex items-center justify-between shrink-0"
+            >
+              <span className="flex items-center gap-2">
+                <AlertTriangle size={14} className="shrink-0" />
+                {formError}
+              </span>
+              <button onClick={() => setFormError("")} className="text-red-500 hover:text-red-700">
+                <X size={14} />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <div className="space-y-2 text-slate-800 dark:text-slate-200 flex-1 px-1 flex flex-col justify-between">
           <div>
-            <div className="flex justify-center mb-3">
-              <label
+            <motion.div
+              variants={SHEET_ITEM_VARIANTS}
+              className="flex justify-center mb-3 relative"
+            >
+              <motion.label
+                whileHover={{ scale: 1.03, y: -1 }}
+                whileTap={{ scale: 0.96 }}
+                transition={{ type: "spring", stiffness: 420, damping: 25 }}
                 onClick={handlePickProductPhoto}
                 className={`w-24 h-24 rounded-[1.25rem] border-2 border-dashed ${
                   image
-                    ? "border-transparent"
+                    ? "border-transparent shadow-md"
                     : "border-indigo-200 dark:border-indigo-500/30"
-                } bg-indigo-50/50 dark:bg-indigo-500/10 flex flex-col items-center justify-center text-slate-400 cursor-pointer overflow-hidden relative hover:bg-indigo-50 dark:hover:bg-indigo-500/20 transition-colors`}
+                } bg-indigo-50/50 dark:bg-indigo-500/10 flex flex-col items-center justify-center text-slate-400 cursor-pointer overflow-hidden relative hover:bg-indigo-50 dark:hover:bg-indigo-500/20 transition-colors transform-gpu`}
               >
                 {image ? (
                   <img
@@ -1000,21 +1177,30 @@ function AddProductModal({
                   onChange={handleImage}
                   disabled={isProcessingImage}
                 />
-              </label>
-              {image && (
-                <button
-                  onClick={() => {
-                    setImage(undefined);
-                    setIsImageChanged(true);
-                  }}
-                  className="absolute bg-white text-red-500 border border-red-100 rounded-full p-1 translate-x-10 -translate-y-2 shadow-md hover:bg-red-50 transition-colors"
-                >
-                  <X size={12} />
-                </button>
-              )}
-            </div>
+              </motion.label>
+              <AnimatePresence>
+                {image && (
+                  <motion.button
+                    key="remove-product-photo"
+                    type="button"
+                    initial={{ scale: 0, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0, opacity: 0 }}
+                    whileHover={{ scale: 1.12 }}
+                    whileTap={{ scale: 0.9 }}
+                    onClick={() => {
+                      setImage(undefined);
+                      setIsImageChanged(true);
+                    }}
+                    className="absolute bg-white dark:bg-slate-800 text-red-500 border border-red-100 dark:border-red-500/30 rounded-full p-1 translate-x-10 -translate-y-2 shadow-md hover:bg-red-50 transition-colors cursor-pointer"
+                  >
+                    <X size={12} />
+                  </motion.button>
+                )}
+              </AnimatePresence>
+            </motion.div>
 
-            <div className="mb-2">
+            <motion.div variants={SHEET_ITEM_VARIANTS} className="mb-2">
               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 pl-1">
                 Product Name
               </label>
@@ -1025,9 +1211,12 @@ function AddProductModal({
                 className="glass-input w-full py-2"
                 placeholder="e.g. Premium Wheat"
               />
-            </div>
+            </motion.div>
 
-            <div className="grid grid-cols-2 gap-3 mb-3">
+            <motion.div
+              variants={SHEET_ITEM_VARIANTS}
+              className="grid grid-cols-2 gap-3 mb-3"
+            >
               <div>
                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 pl-1">
                   Price (₹)
@@ -1085,9 +1274,9 @@ function AddProductModal({
                   placeholder="0"
                 />
               </div>
-            </div>
+            </motion.div>
 
-            <div className="mb-4">
+            <motion.div variants={SHEET_ITEM_VARIANTS} className="mb-4">
               <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 pl-1">
                 Category
               </label>
@@ -1132,12 +1321,16 @@ function AddProductModal({
                   </button>
                 ))}
               </div>
-            </div>
+            </motion.div>
           </div>
 
-          <div className="pt-2 bg-transparent shrink-0">
+          <motion.div
+            variants={SHEET_ITEM_VARIANTS}
+            className="pt-2 bg-transparent shrink-0"
+          >
             <motion.button
-              whileTap={isSubmitting ? undefined : { scale: 0.98, y: 2 }}
+              whileHover={isSubmitting ? undefined : { scale: 1.01, y: -1 }}
+              whileTap={isSubmitting ? undefined : { scale: 0.975, y: 1 }}
               disabled={isSubmitting}
               onClick={() => {
                 if (!isSubmitting) {
@@ -1145,7 +1338,7 @@ function AddProductModal({
                   handleSave();
                 }
               }}
-              className={`w-full text-white font-bold uppercase tracking-widest py-3 rounded-xl shadow-lg transition-transform ${
+              className={`w-full text-white font-bold uppercase tracking-widest py-3 rounded-xl shadow-lg transition-colors cursor-pointer transform-gpu ${
                 isSubmitting
                   ? "bg-indigo-400 cursor-not-allowed shadow-none"
                   : "bg-indigo-600 shadow-indigo-600/30 hover:bg-indigo-700"
@@ -1157,7 +1350,7 @@ function AddProductModal({
                 ? "Save Changes"
                 : "Save Product"}
             </motion.button>
-          </div>
+          </motion.div>
         </div>
       </motion.div>
     </div>
@@ -1252,15 +1445,22 @@ function AddStockModal({
     }
   };
 
+  const targetSheetHeight =
+    pullState === "full"
+      ? "92dvh"
+      : selectedProducts.length > 0
+      ? "74dvh"
+      : "64dvh";
+
   return (
     <div className="fixed inset-0 z-[70] flex items-end justify-center p-0">
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
-        transition={{ duration: 0.16, ease: "easeOut" }}
+        transition={SHEET_BACKDROP_TRANSITION}
         onClick={onClose}
-        className="absolute inset-0 bg-slate-950/40 dark:bg-slate-950/65 backdrop-blur-md transform-gpu"
+        className="absolute inset-0 bg-slate-950/45 dark:bg-slate-950/70 backdrop-blur-md transform-gpu"
       />
       <motion.div
         drag="y"
@@ -1300,18 +1500,25 @@ function AddStockModal({
             }
           }
         }}
-        initial={{ y: "100%" }}
+        initial={{ y: "100%", opacity: 0.6, height: targetSheetHeight }}
         animate={{
           y: 0,
-          height:
-            pullState === "full"
-              ? "92dvh"
-              : selectedProducts.length > 0
-              ? "74dvh"
-              : "64dvh",
+          opacity: 1,
+          height: targetSheetHeight,
         }}
-        exit={{ y: "100%" }}
-        transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+        exit={{
+          y: "104%",
+          opacity: 0,
+          transition: {
+            y: { duration: 0.2, ease: [0.32, 0, 0.67, 0] },
+            opacity: { duration: 0.16, ease: "easeIn" },
+          },
+        }}
+        transition={{
+          y: { type: "spring", stiffness: 390, damping: 32, mass: 0.8 },
+          height: { type: "spring", stiffness: 370, damping: 32, mass: 0.8 },
+          opacity: { duration: 0.18, ease: "easeOut" },
+        }}
         className="bg-[#fcf8ff] dark:bg-[#161923] w-full max-w-lg p-5 pb-6 sm:pb-6 relative z-10 flex flex-col rounded-t-[2.5rem] rounded-b-none border-b-0 max-h-[92dvh] overflow-visible shadow-2xl border border-slate-200/80 dark:border-white/[0.08] transform-gpu will-change-transform"
       >
         <div
@@ -1338,43 +1545,78 @@ function AddStockModal({
               onPointerDown={(e) => e.stopPropagation()}
               className="flex gap-1.5 shrink-0"
             >
-              <button
+              <motion.button
                 type="button"
+                whileHover={{ scale: 1.06 }}
+                whileTap={{ scale: 0.9 }}
+                transition={{ type: "spring", stiffness: 430, damping: 24 }}
                 onClick={() => {
                   triggerHaptic("medium");
                   setPullState(pullState === "full" ? "half" : "full");
                 }}
-                className="p-2.5 bg-slate-100/60 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:hover:bg-slate-750 rounded-2xl text-indigo-600 dark:text-indigo-400 transition-all active:scale-90 cursor-pointer"
+                className="p-2.5 bg-slate-100/60 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:hover:bg-slate-750 rounded-2xl text-indigo-600 dark:text-indigo-400 transition-colors cursor-pointer transform-gpu"
                 title={pullState === "full" ? "Minimize View" : "Maximize View"}
               >
-                {pullState === "full" ? (
-                  <Minimize2 size={16} />
-                ) : (
-                  <Maximize2 size={16} />
-                )}
-              </button>
-              <button
+                <AnimatePresence mode="wait" initial={false}>
+                  {pullState === "full" ? (
+                    <motion.span
+                      key="minimize-icon"
+                      initial={{ scale: 0.65, opacity: 0, rotate: -45 }}
+                      animate={{ scale: 1, opacity: 1, rotate: 0 }}
+                      exit={{ scale: 0.65, opacity: 0, rotate: 45 }}
+                      transition={{ duration: 0.14, ease: "easeOut" }}
+                      className="flex items-center justify-center"
+                    >
+                      <Minimize2 size={16} />
+                    </motion.span>
+                  ) : (
+                    <motion.span
+                      key="maximize-icon"
+                      initial={{ scale: 0.65, opacity: 0, rotate: 45 }}
+                      animate={{ scale: 1, opacity: 1, rotate: 0 }}
+                      exit={{ scale: 0.65, opacity: 0, rotate: -45 }}
+                      transition={{ duration: 0.14, ease: "easeOut" }}
+                      className="flex items-center justify-center"
+                    >
+                      <Maximize2 size={16} />
+                    </motion.span>
+                  )}
+                </AnimatePresence>
+              </motion.button>
+              <motion.button
                 type="button"
+                whileHover={{ scale: 1.06, rotate: 90 }}
+                whileTap={{ scale: 0.9 }}
+                transition={{ type: "spring", stiffness: 430, damping: 24 }}
                 onClick={onClose}
-                className="p-2.5 bg-slate-100/60 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:hover:bg-slate-750 rounded-2xl text-slate-500 dark:text-slate-400 transition-all active:scale-90 cursor-pointer"
+                className="p-2.5 bg-slate-100/60 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:hover:bg-slate-750 rounded-2xl text-slate-500 dark:text-slate-400 transition-colors cursor-pointer transform-gpu"
               >
                 <X size={16} />
-              </button>
+              </motion.button>
             </div>
           </div>
         </div>
 
-        {stockError && (
-          <div className="p-3 mb-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-900/30 text-red-600 dark:text-red-400 rounded-xl text-xs font-semibold flex items-center justify-between shrink-0">
-            <span className="flex items-center gap-2">
-              <AlertTriangle size={14} className="shrink-0" />
-              {stockError}
-            </span>
-            <button onClick={() => setStockError("")} className="text-red-500 hover:text-red-700">
-              <X size={14} />
-            </button>
-          </div>
-        )}
+        <AnimatePresence initial={false}>
+          {stockError && (
+            <motion.div
+              key="stock-error-banner"
+              initial={{ opacity: 0, y: -8, scale: 0.97 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: -6, scale: 0.97 }}
+              transition={{ type: "spring", stiffness: 420, damping: 28 }}
+              className="p-3 mb-3 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-900/30 text-red-600 dark:text-red-400 rounded-xl text-xs font-semibold flex items-center justify-between shrink-0"
+            >
+              <span className="flex items-center gap-2">
+                <AlertTriangle size={14} className="shrink-0" />
+                {stockError}
+              </span>
+              <button onClick={() => setStockError("")} className="text-red-500 hover:text-red-700">
+                <X size={14} />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {products.length === 0 ? (
           <div className="flex flex-col items-center justify-center p-8 text-center bg-slate-50 dark:bg-slate-800/50 rounded-3xl mt-4">
@@ -1388,12 +1630,14 @@ function AddStockModal({
             <p className="text-sm font-medium text-slate-500 dark:text-slate-400 max-w-[200px] mb-6">
               You need to create a product first before you can add stock to it.
             </p>
-            <button
+            <motion.button
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.96 }}
               onClick={onClose}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold tracking-wide rounded-xl py-3 px-6 shadow-lg shadow-indigo-600/30 transition-all active:scale-95 text-sm"
+              className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold tracking-wide rounded-xl py-3 px-6 shadow-lg shadow-indigo-600/30 transition-colors text-sm cursor-pointer"
             >
               Close & Add Product
-            </button>
+            </motion.button>
           </div>
         ) : (
           <form
@@ -1416,7 +1660,11 @@ function AddStockModal({
                 </div>
               </div>
 
-              <div
+              <motion.div
+                layout
+                transition={{
+                  layout: { type: "spring", stiffness: 380, damping: 30, mass: 0.75 },
+                }}
                 className={`grid gap-3 p-1 pb-4 flex-1 min-h-0 content-start overflow-y-auto overscroll-contain custom-scrollbar ${
                   pullState === "full"
                     ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4"
@@ -1434,8 +1682,15 @@ function AddStockModal({
                   );
                   const pImgUrl = getImageUrl(p.image);
                   return (
-                    <div
+                    <motion.div
+                      layout="position"
                       key={p.id || `p_${idx}`}
+                      whileHover={{ y: -1.5, scale: 1.01 }}
+                      whileTap={{ scale: 0.97 }}
+                      transition={{
+                        layout: { type: "spring", stiffness: 390, damping: 30, mass: 0.72 },
+                        scale: { type: "spring", stiffness: 450, damping: 25 },
+                      }}
                       onClick={() => {
                         if (isSelected) {
                           setSelectedProducts(
@@ -1446,44 +1701,56 @@ function AddStockModal({
                         }
                         triggerHaptic("light");
                       }}
-                      className={`p-3 rounded-[1.25rem] cursor-pointer border-2 transition-colors duration-150 flex flex-col justify-between h-auto relative ${
+                      className={`p-3 rounded-[1.25rem] cursor-pointer border-2 transition-colors duration-150 flex flex-col justify-between h-auto relative overflow-hidden transform-gpu ${
                         isSelected
-                          ? "border-indigo-500 bg-indigo-50/80 dark:bg-indigo-950/50 shadow-[0_4px_20px_rgba(99,102,241,0.12)]"
+                          ? "border-indigo-500 bg-indigo-50/80 dark:bg-indigo-950/50 shadow-[0_4px_20px_rgba(99,102,241,0.14)]"
                           : "border-slate-200/80 dark:border-white/[0.08] hover:border-indigo-500/40 bg-white dark:bg-[#1b1f2b] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none"
                       }`}
                     >
-                      <div
-                        className={
-                          pullState === "full"
-                            ? "w-full aspect-square rounded-xl mb-2 overflow-hidden bg-slate-100 dark:bg-slate-950 shrink-0 flex items-center justify-center relative"
-                            : "hidden"
-                        }
-                      >
-                        {pImgUrl ? (
-                          <img
-                            src={pImgUrl}
-                            alt={p.name}
-                            loading="eager"
-                            decoding="sync"
-                            draggable={false}
-                            referrerPolicy="no-referrer"
-                            className="w-full h-full object-cover pointer-events-none"
-                          />
-                        ) : (
-                          <ProductImagePlaceholder
-                            name={p.name}
-                            category={normalizeProductCategory(p.category, p.name)}
-                            size={64}
-                            className="w-full h-full"
-                            rounded="rounded-xl"
-                            showBorder={false}
-                            showShadow={false}
-                            isHome={true}
-                            monogramSize="bottom-0 right-2 text-[92px] sm:text-[108px] font-black"
-                          />
+                      <AnimatePresence initial={false}>
+                        {pullState === "full" && (
+                          <motion.div
+                            key="expanded-card-image"
+                            initial={{ opacity: 0, height: 0, marginBottom: 0, scale: 0.94 }}
+                            animate={{ opacity: 1, height: "auto", marginBottom: 8, scale: 1 }}
+                            exit={{ opacity: 0, height: 0, marginBottom: 0, scale: 0.94 }}
+                            transition={{
+                              type: "spring",
+                              stiffness: 390,
+                              damping: 30,
+                              mass: 0.72,
+                            }}
+                            className="w-full overflow-hidden rounded-xl shrink-0"
+                          >
+                            <div className="w-full aspect-square rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-950 flex items-center justify-center relative">
+                              {pImgUrl ? (
+                                <img
+                                  src={pImgUrl}
+                                  alt={p.name}
+                                  loading="eager"
+                                  decoding="sync"
+                                  draggable={false}
+                                  referrerPolicy="no-referrer"
+                                  className="w-full h-full object-cover pointer-events-none"
+                                />
+                              ) : (
+                                <ProductImagePlaceholder
+                                  name={p.name}
+                                  category={normalizeProductCategory(p.category, p.name)}
+                                  size={64}
+                                  className="w-full h-full"
+                                  rounded="rounded-xl"
+                                  showBorder={false}
+                                  showShadow={false}
+                                  isHome={true}
+                                  monogramSize="bottom-0 right-2 text-[92px] sm:text-[108px] font-black"
+                                />
+                              )}
+                              <div className="absolute inset-0 bg-gradient-to-t from-black/15 via-transparent to-transparent pointer-events-none" />
+                            </div>
+                          </motion.div>
                         )}
-                        <div className="absolute inset-0 bg-gradient-to-t from-black/15 via-transparent to-transparent pointer-events-none" />
-                      </div>
+                      </AnimatePresence>
                       <div className="min-w-0 w-full mt-1">
                         <p className="font-bold text-sm text-slate-800 dark:text-slate-200 line-clamp-1">
                           {p.name}
@@ -1495,68 +1762,81 @@ function AddStockModal({
                           </span>
                         </p>
                       </div>
-                    </div>
+                    </motion.div>
                   );
                 })}
-              </div>
+              </motion.div>
             </div>
 
-            {selectedProducts.length > 0 && (
-              <motion.div
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="space-y-4 pt-2 shrink-0"
-              >
-                <div className="bg-slate-50/60 dark:bg-slate-900/40 p-4 rounded-2xl border border-slate-100 dark:border-slate-800/50">
-                  <div className="flex justify-between items-center mb-2.5">
-                    <label className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
-                      Add Quantity to {selectedProducts.length} Item(s)
-                    </label>
-                    <span className="text-[10px] bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 px-2 py-0.5 rounded-full font-bold">
-                      Selected
-                    </span>
-                  </div>
-                  <input
-                    type="number"
-                    min="1"
-                    max={MAX_PRODUCT_STOCK}
-                    required
-                    value={amount}
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      if (raw === "") {
-                        setAmount("");
-                        return;
-                      }
-                      const num = parseInt(raw, 10);
-                      if (!isNaN(num) && num > MAX_PRODUCT_STOCK) {
-                        triggerHaptic("warning");
-                        setAmount(String(MAX_PRODUCT_STOCK));
-                        setStockError(`Maximum stock per product is ${MAX_PRODUCT_STOCK.toLocaleString("en-IN")} units.`);
-                      } else {
-                        setAmount(raw);
-                      }
-                    }}
-                    className="glass-input w-full font-mono text-xl py-2.5 px-4 rounded-xl border border-slate-200 dark:border-slate-800 focus:border-indigo-500"
-                    placeholder="e.g. 10"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="w-full py-4 rounded-2xl font-black text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2"
+            <AnimatePresence initial={false}>
+              {selectedProducts.length > 0 && (
+                <motion.div
+                  key="selected-restock-footer"
+                  initial={{ opacity: 0, y: 16, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 12, scale: 0.98 }}
+                  transition={{
+                    type: "spring",
+                    stiffness: 410,
+                    damping: 30,
+                    mass: 0.72,
+                  }}
+                  className="space-y-4 pt-2 shrink-0"
                 >
-                  {isSubmitting ? (
-                    <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    "Confirm Restock"
-                  )}
-                </button>
-              </motion.div>
-            )}
+                  <div className="bg-slate-50/60 dark:bg-slate-900/40 p-4 rounded-2xl border border-slate-100 dark:border-slate-800/50">
+                    <div className="flex justify-between items-center mb-2.5">
+                      <label className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
+                        Add Quantity to {selectedProducts.length} Item(s)
+                      </label>
+                      <span className="text-[10px] bg-indigo-50 dark:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 px-2 py-0.5 rounded-full font-bold">
+                        Selected
+                      </span>
+                    </div>
+                    <input
+                      type="number"
+                      min="1"
+                      max={MAX_PRODUCT_STOCK}
+                      required
+                      value={amount}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") {
+                          setAmount("");
+                          return;
+                        }
+                        const num = parseInt(raw, 10);
+                        if (!isNaN(num) && num > MAX_PRODUCT_STOCK) {
+                          triggerHaptic("warning");
+                          setAmount(String(MAX_PRODUCT_STOCK));
+                          setStockError(`Maximum stock per product is ${MAX_PRODUCT_STOCK.toLocaleString("en-IN")} units.`);
+                        } else {
+                          setAmount(raw);
+                        }
+                      }}
+                      className="glass-input w-full font-mono text-xl py-2.5 px-4 rounded-xl border border-slate-200 dark:border-slate-800 focus:border-indigo-500"
+                      placeholder="e.g. 10"
+                    />
+                  </div>
+                  <motion.button
+                    type="submit"
+                    disabled={isSubmitting}
+                    whileHover={isSubmitting ? undefined : { scale: 1.01, y: -1 }}
+                    whileTap={isSubmitting ? undefined : { scale: 0.975 }}
+                    className="w-full py-4 rounded-2xl font-black text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors shadow-lg shadow-indigo-600/30 flex items-center justify-center gap-2 cursor-pointer transform-gpu"
+                  >
+                    {isSubmitting ? (
+                      <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    ) : (
+                      "Confirm Restock"
+                    )}
+                  </motion.button>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </form>
         )}
       </motion.div>
     </div>
   );
 }
+
