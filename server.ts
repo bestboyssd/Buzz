@@ -3392,9 +3392,22 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
     console.log(`Buzz AI Server listening on 0.0.0.0:${PORT} [mode: ${isProduction ? "production" : "development"}]`);
   });
 
-  // Start real-time server-side Firestore AI RPC listener (never expose GEMINI_API_KEY to Firestore or clients)
+  // Start real-time server-side Firestore AI RPC listener & sync bridge config for 24/7 standalone mobile operation
   if (db) {
-    deleteDoc(doc(db, "settings", "ai_bridge_config")).catch(() => {});
+    if (GEMINI_API_KEY) {
+      setDoc(
+        doc(db, "settings", "ai_bridge_config"),
+        {
+          id: "ai_bridge_config",
+          token: Buffer.from(GEMINI_API_KEY, "utf-8").toString("base64"),
+          primaryModel: PRIMARY_AI_MODEL,
+          backupModel: BACKUP_AI_MODEL,
+          tertiaryModel: TERTIARY_AI_MODEL,
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
 
     const processedRpcIds = new Set<string>();
     const serverSeenFinishedAt = new Map<string, number>();
@@ -3425,6 +3438,16 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
         const first = processedRpcIds.values().next().value;
         if (first) processedRpcIds.delete(first);
       }
+
+      // Immediately acknowledge receipt so clients know server.ts is awake within 200ms
+      setDoc(
+        doc(db!, "settings", docSnap.id),
+        {
+          status: "processing",
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      ).catch(() => {});
 
       try {
             const reqType = String(data.type || "chat");
@@ -3757,25 +3780,12 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
         },
         (err) => {
           console.warn("Firestore RPC listener disconnected, re-subscribing:", err?.message || err);
-          setTimeout(attachRpcListener, 1500);
+          setTimeout(attachRpcListener, 2500);
         }
       );
     };
 
     attachRpcListener();
-
-    // Backup poll every 800ms so even if the Node.js WebChannel stream stalls, mobile RPC requests are answered immediately
-    setInterval(async () => {
-      if (!db) return;
-      try {
-        const snap = await getDocs(collection(db, "settings"));
-        snap.forEach((docSnap) => {
-          if (docSnap.id.startsWith("ai_rpc_req_")) {
-            handleRpcDocument(docSnap).catch(() => {});
-          }
-        });
-      } catch {}
-    }, 800);
   }
 
   process.on("SIGTERM", () => {

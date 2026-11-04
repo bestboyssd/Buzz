@@ -44,11 +44,11 @@ export function compareSemver(a: string, b: string): number {
 
 export function getInitialBundledVersion(): string {
   try {
-    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.0.0";
-    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.0.0";
+    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.1.0";
+    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.1.0";
     return compareSemver(pkgVer, metaVer) > 0 ? pkgVer : metaVer;
   } catch {
-    return "1.0.0";
+    return "1.1.0";
   }
 }
 
