@@ -268,13 +268,22 @@ export function Products() {
 
   return (
     <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.18 }}
-      className="min-h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg md:max-w-2xl mx-auto [overflow-anchor:none]"
+      initial={perfMode ? false : { opacity: 0, y: 10, scale: 0.985 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={perfMode ? undefined : { opacity: 0, scale: 0.985 }}
+      transition={pageTransition}
+      className={`min-h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg md:max-w-2xl mx-auto [overflow-anchor:none] ${gpuClass}`}
     >
-      <header className="flex items-center justify-between mb-5 pl-1 shrink-0">
+      <motion.header
+        initial={perfMode ? false : { opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={
+          perfMode
+            ? { duration: 0 }
+            : { type: "spring", stiffness: 420, damping: 30, mass: 0.7 }
+        }
+        className="flex items-center justify-between mb-5 pl-1 shrink-0"
+      >
         <div>
           <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100">
             Inventory <span className="text-indigo-600 dark:text-indigo-400">Stock</span>
@@ -314,8 +323,8 @@ export function Products() {
           <motion.button
             type="button"
             aria-label="Add product or stock"
-            whileHover={{ scale: 1.06 }}
-            whileTap={{ scale: 0.9 }}
+            whileHover={perfMode ? undefined : { scale: 1.06 }}
+            whileTap={perfMode ? undefined : { scale: 0.9 }}
             transition={{ type: "spring", stiffness: 450, damping: 24 }}
             onClick={() => {
               triggerHaptic("heavy");
@@ -333,9 +342,18 @@ export function Products() {
           </motion.button>
           <ProfileMenu />
         </div>
-      </header>
+      </motion.header>
 
-      <div className="relative mb-4 shrink-0">
+      <motion.div
+        initial={perfMode ? false : { opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={
+          perfMode
+            ? { duration: 0 }
+            : { type: "spring", stiffness: 420, damping: 30, mass: 0.7, delay: 0.04 }
+        }
+        className="relative mb-4 shrink-0"
+      >
         <input
           type="text"
           placeholder="Search products..."
@@ -362,10 +380,17 @@ export function Products() {
             <X size={15} />
           </button>
         )}
-      </div>
+      </motion.div>
 
       {/* Material 3 Segmented Stock Health Filter Tabs — Pure GPU Compositor translate3d */}
-      <div
+      <motion.div
+        initial={perfMode ? false : { opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={
+          perfMode
+            ? { duration: 0 }
+            : { type: "spring", stiffness: 420, damping: 30, mass: 0.7, delay: 0.08 }
+        }
         onPointerDown={(e) => {
           segDragRef.current = { startX: e.clientX, dragged: false };
         }}
@@ -449,13 +474,20 @@ export function Products() {
             </button>
           );
         })}
-      </div>
+      </motion.div>
 
       {/* Stable height & scroll-anchor-isolated inventory list container */}
       <div className="flex-1 flex flex-col min-h-[320px] [overflow-anchor:none]">
         {loading ? null : filteredProducts.length === 0 ? (
-          <div
+          <motion.div
             key="stock-empty-state"
+            initial={perfMode ? false : { opacity: 0, y: 14, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={
+              perfMode
+                ? { duration: 0 }
+                : { type: "spring", stiffness: 380, damping: 28 }
+            }
             className="bg-white dark:bg-[#1b1f2b] border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] text-center py-14 px-6 text-slate-500 flex-1 flex flex-col items-center justify-center gap-2 shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none"
           >
             <Package
@@ -491,18 +523,44 @@ export function Products() {
                 Show All Items
               </button>
             )}
-          </div>
+          </motion.div>
         ) : (
-          <div key="stock-list-state" className="space-y-3 [overflow-anchor:none]">
+          <motion.div
+            key="stock-list-state"
+            layout={!perfMode}
+            className="space-y-3 [overflow-anchor:none]"
+          >
+            <AnimatePresence mode="popLayout" initial={false}>
             {filteredProducts.map((product, idx) => {
               const pStock = Number(product.stock) || 0;
               const isLowStock = pStock > 0 && pStock <= 5;
               const isOutOfStock = pStock === 0;
 
               return (
-                <div
+                <motion.div
                   key={product.id ? `prod_${product.id}` : `prod_idx_${idx}`}
-                  className={`bg-white dark:bg-[#1b1f2b] hover:bg-[#f8f5fc] dark:hover:bg-[#222736] transition-colors duration-150 border rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none p-3.5 sm:p-4 flex items-center gap-3.5 overflow-hidden relative group text-slate-800 ${
+                  layout={!perfMode}
+                  initial={perfMode ? false : { opacity: 0, y: 14, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={
+                    perfMode
+                      ? undefined
+                      : { opacity: 0, scale: 0.94, transition: { duration: 0.15 } }
+                  }
+                  whileHover={perfMode ? undefined : { y: -1.5, scale: 1.006 }}
+                  transition={
+                    perfMode
+                      ? { duration: 0 }
+                      : {
+                          layout: { type: "spring", stiffness: 340, damping: 29, mass: 0.72 },
+                          type: "spring",
+                          stiffness: 440,
+                          damping: 30,
+                          mass: 0.68,
+                          delay: Math.min(idx * 0.035, 0.22),
+                        }
+                  }
+                  className={`bg-white dark:bg-[#1b1f2b] hover:bg-[#f8f5fc] dark:hover:bg-[#222736] transition-colors duration-150 border rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none p-3.5 sm:p-4 flex items-center gap-3.5 overflow-hidden relative group text-slate-800 transform-gpu ${
                     isOutOfStock
                       ? "border-red-500/40 dark:border-red-500/35"
                       : isLowStock
@@ -521,7 +579,7 @@ export function Products() {
                           decoding="sync"
                           draggable={false}
                           referrerPolicy="no-referrer"
-                          className="w-full h-full object-cover"
+                          className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
                         />
                       ) : (
                         <ProductImagePlaceholder
@@ -529,7 +587,7 @@ export function Products() {
                           category={product.category}
                           rounded="rounded-2xl"
                           size={38}
-                          className="w-full h-full"
+                          className="w-full h-full transition-transform duration-300 group-hover:scale-105"
                           showBorder={false}
                           showShadow={false}
                           monogramSize="bottom-0.5 right-2 text-[40px] font-black"
@@ -598,10 +656,11 @@ export function Products() {
                       <Trash2 size={16} />
                     </motion.button>
                   </div>
-                </div>
+                </motion.div>
               );
             })}
-          </div>
+            </AnimatePresence>
+          </motion.div>
         )}
       </div>
 
@@ -1556,7 +1615,14 @@ function AddStockModal({
           className="pointer-events-none absolute top-[calc(100%-2px)] inset-x-[-1px] h-[100dvh] bg-[#fcf8ff] dark:bg-[#161923] border-x border-slate-200/80 dark:border-white/[0.08]"
         />
         {/* Dedicated top drag handle & header zone — only dragging here moves/expands the sheet */}
-        <div
+        <motion.div
+          initial={perfMode ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={
+            perfMode
+              ? { duration: 0 }
+              : { type: "spring", stiffness: 420, damping: 30, mass: 0.7 }
+          }
           onPointerDown={(e) => stockDragControls.start(e)}
           className="pt-1.5 pb-1.5 -mt-1 cursor-row-resize touch-none select-none shrink-0"
         >
@@ -1625,7 +1691,7 @@ function AddStockModal({
               </motion.button>
             </div>
           </div>
-        </div>
+        </motion.div>
 
         <AnimatePresence initial={false}>
           {stockError && (
@@ -1675,7 +1741,16 @@ function AddStockModal({
             className="space-y-3 flex flex-col flex-1 min-h-0"
           >
             <div className="flex flex-col flex-1 min-h-0">
-              <div className="flex items-center gap-2 mb-3 shrink-0">
+              <motion.div
+                initial={perfMode ? false : { opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={
+                  perfMode
+                    ? { duration: 0 }
+                    : { type: "spring", stiffness: 420, damping: 30, mass: 0.7, delay: 0.04 }
+                }
+                className="flex items-center gap-2 mb-3 shrink-0"
+              >
                 <label className="text-xs font-bold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
                   Select Product
                 </label>
@@ -1688,7 +1763,7 @@ function AddStockModal({
                     className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800/80 rounded-xl px-3 py-2 text-sm outline-none placeholder-slate-400 dark:placeholder-slate-500 text-slate-800 dark:text-slate-100 font-medium transition-all focus:border-indigo-500"
                   />
                 </div>
-              </div>
+              </motion.div>
 
               <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain custom-scrollbar">
                 <motion.div
@@ -1718,6 +1793,8 @@ function AddStockModal({
                       <motion.div
                         key={p.id || `p_${idx}`}
                         layout={!perfMode}
+                        initial={perfMode ? false : { opacity: 0, y: 12, scale: 0.95 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
                         whileHover={{ y: -1.5, scale: 1.01 }}
                         whileTap={{ scale: 0.97 }}
                         transition={
@@ -1730,6 +1807,11 @@ function AddStockModal({
                                   damping: 28,
                                   mass: 0.82,
                                 },
+                                type: "spring",
+                                stiffness: 420,
+                                damping: 28,
+                                mass: 0.7,
+                                delay: Math.min(0.06 + idx * 0.03, 0.22),
                                 scale: { type: "spring", stiffness: 450, damping: 25 },
                               }
                         }

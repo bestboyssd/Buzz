@@ -294,20 +294,37 @@ export function Settings() {
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 10 }}
+      initial={performanceMode ? false : { opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{
-        opacity: 0,
-        y: -10,
-        transition: { duration: 0.2, ease: [0.16, 1, 0.3, 1] },
-      }}
-      transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+      exit={
+        performanceMode
+          ? undefined
+          : {
+              opacity: 0,
+              y: -10,
+              transition: { duration: 0.2, ease: [0.16, 1, 0.3, 1] },
+            }
+      }
+      transition={
+        performanceMode
+          ? { duration: 0 }
+          : { duration: 0.3, ease: [0.16, 1, 0.3, 1] }
+      }
       className="pb-2 px-4 pt-12 max-w-lg mx-auto"
     >
-      <header className="mb-8 pl-2 flex items-center gap-4">
+      <motion.header
+        initial={performanceMode ? false : { opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={
+          performanceMode
+            ? { duration: 0 }
+            : { type: "spring", stiffness: 420, damping: 30, mass: 0.7 }
+        }
+        className="mb-8 pl-2 flex items-center gap-4"
+      >
         <motion.button
-          whileHover={{ scale: 1.06, x: -1 }}
-          whileTap={{ scale: 0.9 }}
+          whileHover={performanceMode ? undefined : { scale: 1.06, x: -1 }}
+          whileTap={performanceMode ? undefined : { scale: 0.9 }}
           transition={{ type: "spring", stiffness: 500, damping: 24 }}
           onClick={() => {
             triggerHaptic("heavy");
@@ -320,17 +337,42 @@ export function Settings() {
         <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100">
           Settings
         </h1>
-      </header>
+      </motion.header>
 
       <div className="space-y-6">
         {/* Appearance */}
-        <section>
+        <motion.section
+          initial={performanceMode ? false : { opacity: 0, y: 14, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={
+            performanceMode
+              ? { duration: 0 }
+              : { type: "spring", stiffness: 410, damping: 30, mass: 0.72, delay: 0.03 }
+          }
+        >
           <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-3 pl-2">
             Appearance
           </h2>
           <div className="glass-card overflow-hidden divide-y divide-slate-100/50 dark:divide-white/10">
             <SettingItem
-              icon={<Moon size={20} className="text-indigo-500" />}
+              icon={
+                <motion.div
+                  key={darkMode ? "dark-icon" : "light-icon"}
+                  initial={performanceMode ? false : { rotate: -35, scale: 0.75, opacity: 0 }}
+                  animate={{ rotate: 0, scale: 1, opacity: 1 }}
+                  transition={
+                    performanceMode
+                      ? { duration: 0 }
+                      : { type: "spring", stiffness: 440, damping: 22 }
+                  }
+                >
+                  {darkMode ? (
+                    <Moon size={20} className="text-indigo-500" />
+                  ) : (
+                    <Sun size={20} className="text-amber-500" />
+                  )}
+                </motion.div>
+              }
               label="Dark Mode"
               description="Switch between light and dark themes"
               action={
@@ -352,16 +394,36 @@ export function Settings() {
               }
             />
           </div>
-        </section>
+        </motion.section>
 
         {/* Preferences */}
-        <section>
+        <motion.section
+          initial={performanceMode ? false : { opacity: 0, y: 14, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={
+            performanceMode
+              ? { duration: 0 }
+              : { type: "spring", stiffness: 410, damping: 30, mass: 0.72, delay: 0.07 }
+          }
+        >
           <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-3 pl-2">
             Preferences
           </h2>
           <div className="glass-card overflow-hidden divide-y divide-slate-100/50 dark:divide-white/10">
             <SettingItem
-              icon={<Vibrate size={20} className="text-emerald-500" />}
+              icon={
+                <motion.div
+                  key={`haptics-${haptics}`}
+                  animate={
+                    !performanceMode && haptics
+                      ? { rotate: [0, -12, 12, -8, 8, 0] }
+                      : { rotate: 0 }
+                  }
+                  transition={{ duration: 0.35 }}
+                >
+                  <Vibrate size={20} className="text-emerald-500" />
+                </motion.div>
+              }
               label="Tactile Haptics & Audio"
               description="Vibration & subtle acoustic feedback on taps"
               action={
@@ -372,7 +434,19 @@ export function Settings() {
               }
             />
             <SettingItem
-              icon={<Bell size={20} className="text-rose-500" />}
+              icon={
+                <motion.div
+                  key={`notif-${notifications}`}
+                  animate={
+                    !performanceMode && notifications
+                      ? { rotate: [0, -15, 15, -10, 10, 0] }
+                      : { rotate: 0 }
+                  }
+                  transition={{ duration: 0.38 }}
+                >
+                  <Bell size={20} className="text-rose-500" />
+                </motion.div>
+              }
               label="Notifications"
               description="Alerts for sales and low stock"
               action={
@@ -411,10 +485,18 @@ export function Settings() {
               }
             />
           </div>
-        </section>
+        </motion.section>
 
         {/* Data & Security */}
-        <section>
+        <motion.section
+          initial={performanceMode ? false : { opacity: 0, y: 14, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={
+            performanceMode
+              ? { duration: 0 }
+              : { type: "spring", stiffness: 410, damping: 30, mass: 0.72, delay: 0.11 }
+          }
+        >
           <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-3 pl-2">
             Data & Security
           </h2>
@@ -430,10 +512,18 @@ export function Settings() {
               }}
             />
           </div>
-        </section>
+        </motion.section>
 
         {/* Support */}
-        <section>
+        <motion.section
+          initial={performanceMode ? false : { opacity: 0, y: 14, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={
+            performanceMode
+              ? { duration: 0 }
+              : { type: "spring", stiffness: 410, damping: 30, mass: 0.72, delay: 0.15 }
+          }
+        >
           <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-3 pl-2">
             Support
           </h2>
@@ -520,7 +610,7 @@ export function Settings() {
               }}
             />
           </div>
-        </section>
+        </motion.section>
       </div>
     </motion.div>
   );

@@ -333,16 +333,27 @@ export function Checkout() {
   const pageTransition = useOptimizedTransition({ duration: 0.35, ease: [0.16, 1, 0.3, 1] });
   const gpuClass = useHardwareAcceleration();
 
+  const perfMode = isPerformanceModeEnabled();
+
   return (
     <>
       <motion.div
-        initial={{ opacity: 0, scale: 0.98 }}
-        animate={{ opacity: 1, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.95 }}
+        initial={perfMode ? false : { opacity: 0, y: 10, scale: 0.985 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        exit={perfMode ? undefined : { opacity: 0, scale: 0.96 }}
         transition={pageTransition}
         className={`min-h-full h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg md:max-w-2xl mx-auto ${gpuClass}`}
       >
-        <header className="mb-5 pl-1 flex justify-between items-center shrink-0">
+        <motion.header
+          initial={perfMode ? false : { opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={
+            perfMode
+              ? { duration: 0 }
+              : { type: 'spring', stiffness: 420, damping: 30, mass: 0.7 }
+          }
+          className="mb-5 pl-1 flex justify-between items-center shrink-0"
+        >
           <div>
             <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100 flex items-center gap-2.5">
               <span>Order <span className="text-indigo-600 dark:text-indigo-400">Checkout</span></span>
@@ -372,16 +383,21 @@ export function Checkout() {
             </p>
           </div>
           <ProfileMenu />
-        </header>
+        </motion.header>
 
         <div className="flex-1 min-h-0 w-full relative flex flex-col">
           <AnimatePresence mode="wait">
             {cart.length === 0 && !isSuccess ? (
               <motion.div
                 key="empty-cart"
-                initial={{ opacity: 0, scale: 0.96 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.96 }}
+                initial={perfMode ? false : { opacity: 0, y: 14, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={perfMode ? undefined : { opacity: 0, scale: 0.96 }}
+                transition={
+                  perfMode
+                    ? { duration: 0 }
+                    : { type: 'spring', stiffness: 400, damping: 29, mass: 0.72, delay: 0.04 }
+                }
                 className="glass-card flex-1 flex flex-col items-center justify-center p-8 text-center text-slate-500 dark:text-slate-400 gap-3"
               >
                 <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800/80 flex items-center justify-center text-slate-400 dark:text-slate-500 mb-1">
@@ -396,7 +412,7 @@ export function Checkout() {
 
                 <div className="flex items-center gap-3 mt-3">
                   <motion.button
-                    whileTap={{ scale: 0.96 }}
+                    whileTap={perfMode ? undefined : { scale: 0.96 }}
                     onClick={() => {
                       triggerHaptic('selection');
                       navigate('/');
@@ -409,7 +425,7 @@ export function Checkout() {
 
                   {editingBill && (
                     <motion.button
-                      whileTap={{ scale: 0.96 }}
+                      whileTap={perfMode ? undefined : { scale: 0.96 }}
                       onClick={handleCancelEdit}
                       className="px-5 py-2.5 bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-bold rounded-full flex items-center justify-center transition-colors"
                     >
@@ -421,9 +437,14 @@ export function Checkout() {
             ) : (
               <motion.div
                 key="cart-list"
-                initial={{ opacity: 0, scale: 0.97 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.97 }}
+                initial={perfMode ? false : { opacity: 0, y: 14, scale: 0.975 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={perfMode ? undefined : { opacity: 0, scale: 0.97 }}
+                transition={
+                  perfMode
+                    ? { duration: 0 }
+                    : { type: 'spring', stiffness: 400, damping: 30, mass: 0.72, delay: 0.04 }
+                }
                 className="glass-panel p-4 sm:p-5 rounded-[2rem] relative z-10 flex flex-col min-h-0 flex-1"
               >
                 <div className="flex items-center justify-between gap-3 mb-3.5 px-1 shrink-0 border-b border-slate-200/70 dark:border-slate-800/90 pb-3.5">
@@ -443,8 +464,9 @@ export function Checkout() {
                   </div>
                   <div className="flex items-center gap-2.5 shrink-0">
                     {!editingBill && (
-                      <button
+                      <motion.button
                         type="button"
+                        whileTap={perfMode ? undefined : { scale: 0.92 }}
                         onClick={() => {
                           clearCart();
                         }}
@@ -452,11 +474,21 @@ export function Checkout() {
                       >
                         <Trash2 size={13} />
                         <span>Clear</span>
-                      </button>
+                      </motion.button>
                     )}
-                    <span className="text-indigo-600 dark:text-indigo-400 font-mono tabular-nums text-lg sm:text-xl font-extrabold tracking-tight leading-none">
+                    <motion.span
+                      key={`total_${totalAmount}`}
+                      initial={perfMode ? false : { y: -5, opacity: 0.6, scale: 0.94 }}
+                      animate={{ y: 0, opacity: 1, scale: 1 }}
+                      transition={
+                        perfMode
+                          ? { duration: 0 }
+                          : { type: 'spring', stiffness: 500, damping: 26, mass: 0.6 }
+                      }
+                      className="text-indigo-600 dark:text-indigo-400 font-mono tabular-nums text-lg sm:text-xl font-extrabold tracking-tight leading-none inline-block"
+                    >
                       ₹{formatPrice(totalAmount)}
-                    </span>
+                    </motion.span>
                   </div>
                 </div>
 

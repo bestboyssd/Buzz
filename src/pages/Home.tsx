@@ -188,15 +188,26 @@ export function Home() {
   });
   const gpuClass = useHardwareAcceleration();
 
+  const perfMode = isPerformanceModeEnabled();
+
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
-      exit={{ opacity: 0, scale: 0.98 }}
+      initial={perfMode ? false : { opacity: 0, y: 10, scale: 0.985 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={perfMode ? undefined : { opacity: 0, scale: 0.985 }}
       transition={pageTransition}
       className={`min-h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg md:max-w-3xl lg:max-w-5xl mx-auto ${gpuClass}`}
     >
-      <header className="mb-5 pl-1 flex justify-between items-center gap-4">
+      <motion.header
+        initial={perfMode ? false : { opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={
+          perfMode
+            ? { duration: 0 }
+            : { type: "spring", stiffness: 420, damping: 30, mass: 0.7 }
+        }
+        className="mb-5 pl-1 flex justify-between items-center gap-4"
+      >
         <div>
           <div className="flex items-center gap-2.5">
             <h1 className="text-3xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100">
@@ -215,9 +226,9 @@ export function Home() {
         <div className="flex items-center gap-2.5">
           {totalItemsInCart > 0 && (
             <motion.button
-              initial={{ opacity: 0, scale: 0.9 }}
+              initial={perfMode ? false : { opacity: 0, scale: 0.9 }}
               animate={{ opacity: 1, scale: 1 }}
-              whileTap={{ scale: 0.95 }}
+              whileTap={perfMode ? undefined : { scale: 0.95 }}
               onClick={() => {
                 triggerHaptic("medium");
                 navigate("/checkout");
@@ -232,7 +243,7 @@ export function Home() {
           )}
           <ProfileMenu />
         </div>
-      </header>
+      </motion.header>
 
       <AnimatePresence>
         {maxBillNotice && (
@@ -258,7 +269,16 @@ export function Home() {
       </AnimatePresence>
 
       {/* Search Bar with Instant Clear Button */}
-      <div className="relative mb-4">
+      <motion.div
+        initial={perfMode ? false : { opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={
+          perfMode
+            ? { duration: 0 }
+            : { type: "spring", stiffness: 420, damping: 30, mass: 0.7, delay: 0.04 }
+        }
+        className="relative mb-4"
+      >
         <input
           type="text"
           placeholder="Search products..."
@@ -285,22 +305,35 @@ export function Home() {
             <X size={15} />
           </button>
         )}
-      </div>
+      </motion.div>
 
       {/* Material 3 Interactive Category Segmented Filter Bar */}
       {categories.length > 1 && (
-        <div className="relative grid grid-cols-4 p-1 mb-5 bg-[#ece6f0]/90 dark:bg-[#161922]/95 border border-slate-200/80 dark:border-white/[0.07] rounded-full select-none">
+        <motion.div
+          initial={perfMode ? false : { opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={
+            perfMode
+              ? { duration: 0 }
+              : { type: "spring", stiffness: 420, damping: 30, mass: 0.7, delay: 0.08 }
+          }
+          className="relative grid grid-cols-4 p-1 mb-5 bg-[#ece6f0]/90 dark:bg-[#161922]/95 border border-slate-200/80 dark:border-white/[0.07] rounded-full select-none"
+        >
           <motion.div
             initial={false}
             animate={{
               x: `${Math.max(0, categories.indexOf(selectedCategory)) * 100}%`,
             }}
-            transition={{
-              type: "spring",
-              stiffness: 400,
-              damping: 30,
-              mass: 0.65,
-            }}
+            transition={
+              perfMode
+                ? { duration: 0 }
+                : {
+                    type: "spring",
+                    stiffness: 400,
+                    damping: 30,
+                    mass: 0.65,
+                  }
+            }
             style={{ width: `calc((100% - 8px) / ${categories.length})` }}
             className="absolute top-1 bottom-1 left-1 bg-[#e0e7ff] dark:bg-indigo-500/25 border border-indigo-200/70 dark:border-indigo-400/30 rounded-full shadow-2xs pointer-events-none transform-gpu will-change-transform"
           />
@@ -327,11 +360,20 @@ export function Home() {
               </button>
             );
           })}
-        </div>
+        </motion.div>
       )}
 
       {productsLoading ? null : sortedProducts.length === 0 ? (
-        <div className="glass-card text-center py-14 px-6 text-slate-500 flex-1 flex flex-col items-center justify-center gap-2">
+        <motion.div
+          initial={perfMode ? false : { opacity: 0, y: 14, scale: 0.97 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={
+            perfMode
+              ? { duration: 0 }
+              : { type: "spring", stiffness: 380, damping: 28 }
+          }
+          className="glass-card text-center py-14 px-6 text-slate-500 flex-1 flex flex-col items-center justify-center gap-2"
+        >
           <ShoppingBag
             size={44}
             className="text-slate-300 dark:text-slate-600 mb-1"
@@ -356,14 +398,16 @@ export function Home() {
               Reset Filters
             </button>
           )}
-        </div>
+        </motion.div>
       ) : (
         <motion.div
-          initial={{ opacity: 0 }}
+          layout={!perfMode}
+          initial={perfMode ? false : { opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ duration: 0.25 }}
+          transition={perfMode ? { duration: 0 } : { duration: 0.22 }}
           className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4"
         >
+          <AnimatePresence mode="popLayout" initial={false}>
           {sortedProducts.map((product, idx) => {
             const cartItem = cart.find((c) => c.product.id === product.id);
             const quantityInCart = cartItem?.quantity || 0;
@@ -387,24 +431,25 @@ export function Home() {
               pPrice > 0 && totalAmount + pPrice > MAX_BILL_AMOUNT;
             const disableAdd = isOutOfStock || isMaxAdded;
 
-            const perfMode = isPerformanceModeEnabled();
-
             return (
               <motion.div
                 key={product.id ? `pos_${product.id}` : `product_${idx}`}
-                initial={perfMode ? false : { opacity: 0, y: 12, scale: 0.96 }}
+                layout={!perfMode}
+                initial={perfMode ? false : { opacity: 0, y: 16, scale: 0.95 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                whileHover={!disableAdd && !perfMode ? { y: -2, scale: 1.01 } : undefined}
+                exit={perfMode ? undefined : { opacity: 0, scale: 0.92, transition: { duration: 0.15 } }}
+                whileHover={!disableAdd && !perfMode ? { y: -2.5, scale: 1.012 } : undefined}
                 whileTap={!disableAdd && !perfMode ? { scale: 0.96 } : undefined}
                 transition={
                   perfMode
                     ? { duration: 0 }
                     : {
+                        layout: { type: "spring", stiffness: 340, damping: 29, mass: 0.72 },
                         type: "spring",
-                        stiffness: 480,
-                        damping: 30,
-                        mass: 0.65,
-                        delay: Math.min(idx * 0.03, 0.18),
+                        stiffness: 440,
+                        damping: 29,
+                        mass: 0.68,
+                        delay: Math.min(idx * 0.035, 0.22),
                       }
                 }
                 onContextMenu={(e) => e.preventDefault()}
@@ -527,9 +572,19 @@ export function Home() {
                           >
                             <Minus size={13} strokeWidth={2.5} />
                           </button>
-                          <span className="min-w-[22px] text-center font-mono tabular-nums text-xs font-extrabold px-0.5">
+                          <motion.span
+                            key={`qty_${quantityInCart}`}
+                            initial={perfMode ? false : { y: -6, opacity: 0, scale: 0.78 }}
+                            animate={{ y: 0, opacity: 1, scale: 1 }}
+                            transition={
+                              perfMode
+                                ? { duration: 0 }
+                                : { type: "spring", stiffness: 520, damping: 24, mass: 0.55 }
+                            }
+                            className="min-w-[22px] text-center font-mono tabular-nums text-xs font-extrabold px-0.5 inline-block"
+                          >
                             {quantityInCart}
-                          </span>
+                          </motion.span>
                           <button
                             type="button"
                             aria-label={`Increase ${product.name} quantity`}
@@ -618,6 +673,7 @@ export function Home() {
               </motion.div>
             );
           })}
+          </AnimatePresence>
         </motion.div>
       )}
     </motion.div>
