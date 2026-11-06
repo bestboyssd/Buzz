@@ -333,7 +333,13 @@ export function Checkout() {
   const pageTransition = useOptimizedTransition({ duration: 0.35, ease: [0.16, 1, 0.3, 1] });
   const gpuClass = useHardwareAcceleration();
 
-  const perfMode = isPerformanceModeEnabled();
+  const [perfMode, setPerfMode] = useState(() => isPerformanceModeEnabled());
+
+  useEffect(() => {
+    const syncPerf = () => setPerfMode(isPerformanceModeEnabled());
+    window.addEventListener('performanceModeChanged', syncPerf);
+    return () => window.removeEventListener('performanceModeChanged', syncPerf);
+  }, []);
 
   return (
     <>

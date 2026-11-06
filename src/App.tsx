@@ -34,8 +34,8 @@ import { KeepAwake } from "@capacitor-community/keep-awake";
 import { Capacitor } from "@capacitor/core";
 import { SplashScreen } from "@capacitor/splash-screen";
 import { LocalNotifications } from "@capacitor/local-notifications";
-import { AlertOctagon, Bell, WifiOff, RefreshCw, AlertTriangle, IndianRupee, Download, ArrowRight } from "lucide-react";
-import { useAppVersionCheck, triggerInstantApkDownload } from "./lib/versionCheck";
+import { AlertOctagon, Bell, WifiOff, RefreshCw, AlertTriangle, IndianRupee, Download, ArrowRight, X, CheckCircle2 } from "lucide-react";
+import { useAppVersionCheck, triggerInstantApkDownload, cancelApkDownload } from "./lib/versionCheck";
 import { triggerHaptic } from "./lib/haptics";
 import {
   doc,
@@ -1750,20 +1750,51 @@ function AppContent() {
                 downloadState.status === "installing" ||
                 downloadState.status === "completed" ||
                 downloadState.status === "error") && (
-                <div className="rounded-2xl bg-indigo-500/8 dark:bg-indigo-500/12 border border-indigo-500/20 p-3.5 mb-4 text-left">
+                <div
+                  className={`rounded-2xl p-3.5 mb-4 text-left border transition-colors ${
+                    downloadState.status === "error"
+                      ? "bg-rose-500/8 dark:bg-rose-500/12 border-rose-500/25"
+                      : downloadState.status === "completed"
+                      ? "bg-emerald-500/8 dark:bg-emerald-500/12 border-emerald-500/25"
+                      : "bg-indigo-500/8 dark:bg-indigo-500/12 border-indigo-500/20"
+                  }`}
+                >
                   <div className="flex items-center justify-between gap-2 mb-2">
                     <span className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
                       {downloadState.status === "error"
-                        ? "Download failed — tap below to retry"
+                        ? downloadState.error || "Download failed — tap below to retry"
                         : downloadState.status === "installing"
                         ? "Launching package installer..."
                         : downloadState.status === "completed"
-                        ? "APK ready — tap Open/Install"
+                        ? "APK downloaded & verified — ready to install"
                         : `Downloading Buzz v${latestRelease.version}...`}
                     </span>
-                    <span className="font-mono text-xs font-extrabold text-indigo-600 dark:text-indigo-400 shrink-0">
-                      {downloadState.progress}%
-                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span
+                        className={`font-mono text-xs font-extrabold ${
+                          downloadState.status === "error"
+                            ? "text-rose-600 dark:text-rose-400"
+                            : downloadState.status === "completed"
+                            ? "text-emerald-600 dark:text-emerald-400"
+                            : "text-indigo-600 dark:text-indigo-400"
+                        }`}
+                      >
+                        {downloadState.progress}%
+                      </span>
+                      {downloadState.isDownloading && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            triggerHaptic("light");
+                            cancelApkDownload();
+                          }}
+                          title="Cancel download"
+                          className="p-0.5 rounded-full text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                        >
+                          <X size={13} strokeWidth={2.5} />
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <div className="w-full h-2.5 rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden">
                     <div
@@ -1779,7 +1810,7 @@ function AppContent() {
                   </div>
                   {downloadState.totalBytes > 0 && (
                     <div className="flex items-center justify-between text-[10px] font-medium text-slate-500 dark:text-slate-400 mt-1.5">
-                      <span>
+                      <span className="font-mono tabular-nums">
                         {(downloadState.downloadedBytes / (1024 * 1024)).toFixed(1)} MB /{" "}
                         {(downloadState.totalBytes / (1024 * 1024)).toFixed(1)} MB
                       </span>
@@ -1801,18 +1832,30 @@ function AppContent() {
                       latestRelease.sizeBytes
                     );
                   }}
-                  className="w-full py-3.5 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-75 active:scale-[0.98] text-white font-extrabold rounded-2xl text-sm shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  className={`w-full py-3.5 px-4 disabled:opacity-75 active:scale-[0.98] text-white font-extrabold rounded-2xl text-sm shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                    downloadState.status === "completed"
+                      ? "bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/30"
+                      : "bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/30"
+                  }`}
                 >
-                  <Download
-                    size={17}
-                    strokeWidth={2.5}
-                    className={downloadState.isDownloading ? "animate-bounce" : ""}
-                  />
+                  {downloadState.status === "completed" ? (
+                    <CheckCircle2 size={17} strokeWidth={2.5} />
+                  ) : (
+                    <Download
+                      size={17}
+                      strokeWidth={2.5}
+                      className={downloadState.isDownloading ? "animate-bounce" : ""}
+                    />
+                  )}
                   <span>
                     {downloadState.isDownloading
                       ? `Downloading in App... ${downloadState.progress}%`
                       : downloadState.status === "installing"
                       ? "Installing Update..."
+                      : downloadState.status === "completed"
+                      ? "Install Downloaded Update"
+                      : downloadState.status === "error"
+                      ? "Retry In-App Download"
                       : "Update Now (In-App Download)"}
                   </span>
                 </button>

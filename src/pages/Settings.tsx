@@ -13,6 +13,7 @@ import {
   Printer,
   Zap,
   Download,
+  X,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { triggerHaptic } from "../lib/haptics";
@@ -36,6 +37,7 @@ import {
   useAppVersionCheck,
   compareSemver,
   triggerInstantApkDownload,
+  cancelApkDownload,
 } from "../lib/versionCheck";
 
 export function Settings() {
@@ -558,7 +560,11 @@ export function Settings() {
                       <span>
                         Downloading v{latestRelease?.version || "latest"}...
                       </span>
-                      <span className="font-mono">{downloadState.progress}%</span>
+                      <span className="font-mono">
+                        {downloadState.totalBytes > 0
+                          ? `${(downloadState.downloadedBytes / (1024 * 1024)).toFixed(1)} / ${(downloadState.totalBytes / (1024 * 1024)).toFixed(1)} MB (${downloadState.progress}%)`
+                          : `${downloadState.progress}%`}
+                      </span>
                     </div>
                     <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
                       <div
@@ -569,6 +575,16 @@ export function Settings() {
                       />
                     </div>
                   </div>
+                ) : downloadState.status === "error" && isOutdated ? (
+                  <span className="inline-flex items-center flex-wrap gap-y-0.5 text-rose-500 dark:text-rose-400 font-semibold">
+                    <span>{downloadState.error || "Download failed"}</span>
+                    <span className="ml-2 underline">(Tap to retry)</span>
+                  </span>
+                ) : downloadState.status === "completed" && isOutdated ? (
+                  <span className="inline-flex items-center flex-wrap gap-y-0.5 text-emerald-600 dark:text-emerald-400 font-semibold">
+                    <span>v{latestRelease?.version} APK verified & ready</span>
+                    <span className="ml-2 underline">(Tap to install)</span>
+                  </span>
                 ) : isOutdated && latestRelease ? (
                   <span className="inline-flex items-center flex-wrap gap-y-0.5">
                     <span className="font-mono font-semibold text-slate-500 dark:text-slate-400">
@@ -589,12 +605,23 @@ export function Settings() {
                 )
               }
               action={
-                isOutdated ? (
+                downloadState.isDownloading ? (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      triggerHaptic("light");
+                      cancelApkDownload();
+                    }}
+                    title="Cancel download"
+                    className="p-1.5 rounded-full text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+                  >
+                    <X size={16} strokeWidth={2.5} />
+                  </button>
+                ) : isOutdated ? (
                   <Download
                     size={18}
-                    className={`text-rose-500 dark:text-rose-400 ${
-                      downloadState.isDownloading ? "animate-bounce text-indigo-500 dark:text-indigo-400" : ""
-                    }`}
+                    className="text-rose-500 dark:text-rose-400"
                   />
                 ) : undefined
               }

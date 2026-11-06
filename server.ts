@@ -3280,33 +3280,95 @@ app.post("/api/gemini/transcribe", async (req, res) => {
 // GET /api/github/apk-download (In-App Streaming APK Proxy with Progress)
 // ----------------------------------------------------------------------------
 app.get("/api/github/apk-download", async (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Disposition, Content-Type");
+
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let aborted = false;
+  req.on("close", () => {
+    aborted = true;
+    if (reader) {
+      reader.cancel().catch(() => {});
+    }
+  });
+
   try {
     const rawUrl = String(req.query.url || "").trim();
     const version = String(req.query.version || "latest").replace(/[^0-9a-zA-Z._-]/g, "");
-    const targetUrl =
-      rawUrl &&
-      (rawUrl.startsWith("https://github.com/bestboyssd/Buzz/") ||
+
+    let targetUrl = "";
+    const isAllowedDomain =
+      rawUrl.startsWith("https://github.com/bestboyssd/Buzz/") ||
+      rawUrl.startsWith("https://objects.githubusercontent.com/") ||
+      rawUrl.startsWith("https://release-assets.githubusercontent.com/") ||
+      rawUrl.startsWith("https://api.github.com/repos/bestboyssd/Buzz/releases/assets/");
+
+    const looksLikeDirectAsset =
+      isAllowedDomain &&
+      (rawUrl.toLowerCase().includes(".apk") ||
         rawUrl.startsWith("https://objects.githubusercontent.com/") ||
-        rawUrl.startsWith("https://release-assets.githubusercontent.com/"))
-        ? rawUrl
-        : "https://github.com/bestboyssd/Buzz/releases/latest";
+        rawUrl.startsWith("https://release-assets.githubusercontent.com/") ||
+        rawUrl.startsWith("https://api.github.com/repos/bestboyssd/Buzz/releases/assets/"));
+
+    if (looksLikeDirectAsset) {
+      targetUrl = rawUrl;
+    } else {
+      // Resolve the actual binary .apk asset URL from GitHub Releases API instead of fetching the HTML release page
+      try {
+        const relRes = await fetch("https://api.github.com/repos/bestboyssd/Buzz/releases/latest", {
+          headers: {
+            "User-Agent": "Buzz-POS-Updater",
+            Accept: "application/vnd.github+json",
+          },
+        });
+        if (relRes.ok) {
+          const relJson: any = await relRes.json();
+          const assets = Array.isArray(relJson?.assets) ? relJson.assets : [];
+          const apkAsset =
+            assets.find(
+              (a: any) =>
+                typeof a?.browser_download_url === "string" &&
+                String(a?.name || "").toLowerCase().endsWith(".apk")
+            ) || assets[0];
+          if (apkAsset?.browser_download_url) {
+            targetUrl = apkAsset.browser_download_url;
+          }
+        }
+      } catch {}
+
+      if (!targetUrl) {
+        targetUrl =
+          version && version !== "latest"
+            ? `https://github.com/bestboyssd/Buzz/releases/download/v${version.replace(/^v/i, "")}/Buzz-v${version.replace(/^v/i, "")}.apk`
+            : "https://github.com/bestboyssd/Buzz/releases/latest/download/Buzz.apk";
+      }
+    }
 
     const upstream = await fetch(targetUrl, {
       redirect: "follow",
       headers: {
         "User-Agent": "Buzz-POS-Updater",
-        Accept: "application/octet-stream, application/vnd.android.package-archive, */*",
+        Accept: targetUrl.includes("api.github.com/repos/")
+          ? "application/octet-stream"
+          : "application/octet-stream, application/vnd.android.package-archive, */*",
       },
     });
 
-    if (!upstream.ok || !upstream.body) {
-      res.status(upstream.status || 502).json({ error: "Failed to stream APK from GitHub Releases." });
+    const upstreamContentType = String(upstream.headers.get("content-type") || "").toLowerCase();
+    if (!upstream.ok || !upstream.body || upstreamContentType.includes("text/html")) {
+      res.status(upstream.status >= 400 ? upstream.status : 502).json({
+        error: "Failed to stream valid APK binary from GitHub Releases.",
+      });
       return;
     }
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Disposition");
     res.setHeader("Content-Type", "application/vnd.android.package-archive");
+    res.setHeader("Cache-Control", "no-store");
     res.setHeader(
       "Content-Disposition",
       `attachment; filename="Buzz-v${version || "latest"}.apk"`
@@ -3316,15 +3378,20 @@ app.get("/api/github/apk-download", async (req, res) => {
       res.setHeader("Content-Length", contentLength);
     }
 
-    const reader = upstream.body.getReader();
-    while (true) {
+    reader = upstream.body.getReader();
+    while (!aborted) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (value) {
-        res.write(Buffer.from(value));
+      if (value && value.byteLength > 0 && !aborted) {
+        const canContinue = res.write(Buffer.from(value));
+        if (!canContinue && !aborted) {
+          await new Promise<void>((resolve) => res.once("drain", resolve));
+        }
       }
     }
-    res.end();
+    if (!aborted) {
+      res.end();
+    }
   } catch (err: any) {
     if (!res.headersSent) {
       res.status(500).json({ error: "APK stream failed." });

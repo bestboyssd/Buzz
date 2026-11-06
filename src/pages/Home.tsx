@@ -188,7 +188,13 @@ export function Home() {
   });
   const gpuClass = useHardwareAcceleration();
 
-  const perfMode = isPerformanceModeEnabled();
+  const [perfMode, setPerfMode] = useState(() => isPerformanceModeEnabled());
+
+  useEffect(() => {
+    const syncPerf = () => setPerfMode(isPerformanceModeEnabled());
+    window.addEventListener("performanceModeChanged", syncPerf);
+    return () => window.removeEventListener("performanceModeChanged", syncPerf);
+  }, []);
 
   return (
     <motion.div

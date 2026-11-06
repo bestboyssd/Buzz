@@ -54,6 +54,22 @@ public class MainActivity extends BridgeActivity {
     private boolean ttsReady = false;
     private WebView printWebView = null;
     private volatile boolean isDownloadingUpdate = false;
+    private volatile boolean cancelCurrentDownload = false;
+    private File pendingInstallApkFile = null;
+
+    private static boolean isValidApkFile(File f) {
+        if (f == null || !f.exists() || !f.isFile() || f.length() < 100 * 1024) {
+            return false;
+        }
+        try ( java.io.FileInputStream fis = new java.io.FileInputStream(f) ) {
+            byte[] magic = new byte[4];
+            if (fis.read(magic) != 4) return false;
+            // Standard ZIP / APK header: PK\x03\x04 (0x50, 0x4B, 0x03, 0x04)
+            return magic[0] == 0x50 && magic[1] == 0x4B && magic[2] == 0x03 && magic[3] == 0x04;
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
     public static int cleanupDownloadedApksStatic(Context context) {
         if (context == null) return 0;
@@ -74,7 +90,8 @@ public class MainActivity extends BridgeActivity {
                         for (File f : files) {
                             if (f != null && f.isFile()) {
                                 String name = f.getName().toLowerCase(Locale.US);
-                                if (name.endsWith(".apk") && (name.startsWith("buzz") || name.contains("update"))) {
+                                if ((name.endsWith(".apk") || name.endsWith(".apk.part"))
+                                        && (name.startsWith("buzz") || name.contains("update"))) {
                                     if (f.delete()) {
                                         deletedCount++;
                                     }
@@ -111,6 +128,34 @@ public class MainActivity extends BridgeActivity {
     private void launchApkInstaller(File apkFile) {
         runOnUiThread(() -> {
             try {
+                if (!isValidApkFile(apkFile)) {
+                    emitApkProgressToWebView(0, 0, 0, "error", "Downloaded APK file is incomplete or corrupted. Please tap Retry.");
+                    return;
+                }
+                pendingInstallApkFile = apkFile;
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    if (!getPackageManager().canRequestPackageInstalls()) {
+                        Toast.makeText(
+                            MainActivity.this,
+                            "Please allow 'Install unknown apps' to finish updating Buzz POS",
+                            Toast.LENGTH_LONG
+                        ).show();
+                        emitApkProgressToWebView(100, apkFile.length(), apkFile.length(), "completed", "");
+                        try {
+                            android.content.Intent permIntent = new android.content.Intent(
+                                android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:" + getPackageName())
+                            );
+                            permIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                            startActivity(permIntent);
+                            return;
+                        } catch (Exception ignored) {
+                            // Fall through to standard install intent if settings screen fails
+                        }
+                    }
+                }
+
                 Uri apkUri = FileProvider.getUriForFile(
                     MainActivity.this,
                     getPackageName() + ".fileprovider",
@@ -121,6 +166,7 @@ public class MainActivity extends BridgeActivity {
                 installIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
                 installIntent.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
                 startActivity(installIntent);
+                emitApkProgressToWebView(100, apkFile.length(), apkFile.length(), "completed", "");
             } catch (Exception e) {
                 e.printStackTrace();
                 emitApkProgressToWebView(0, 0, 0, "error", "Could not launch installer: " + e.getMessage());
@@ -156,31 +202,82 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public int cleanupDownloadedApks() {
+            pendingInstallApkFile = null;
             return cleanupDownloadedApksStatic(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public boolean cancelApkDownload() {
+            cancelCurrentDownload = true;
+            return true;
+        }
+
+        @JavascriptInterface
+        public boolean installDownloadedApk(String version) {
+            try {
+                String safeVer = (version != null && !version.trim().isEmpty())
+                    ? version.trim().replaceAll("[^0-9a-zA-Z._-]", "")
+                    : "latest";
+                File baseDir = getExternalCacheDir() != null ? getExternalCacheDir() : getCacheDir();
+                File updatesDir = new File(baseDir, "updates");
+                File targetFile = new File(updatesDir, "buzz_update_" + safeVer + ".apk");
+                if (isValidApkFile(targetFile)) {
+                    launchApkInstaller(targetFile);
+                    return true;
+                }
+                if (isValidApkFile(pendingInstallApkFile)) {
+                    launchApkInstaller(pendingInstallApkFile);
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+            return false;
         }
 
         @JavascriptInterface
         public boolean downloadAndInstallApk(String url, String version) {
             if (url == null || url.trim().isEmpty()) return false;
-            if (isDownloadingUpdate) return true;
-            isDownloadingUpdate = true;
-            final String targetUrl = url.trim();
             final String safeVer = (version != null && !version.trim().isEmpty())
                 ? version.trim().replaceAll("[^0-9a-zA-Z._-]", "")
                 : "latest";
 
+            // If this exact version is already downloaded and verified on disk, launch installer immediately
+            try {
+                File baseDir = getExternalCacheDir() != null ? getExternalCacheDir() : getCacheDir();
+                File updatesDir = new File(baseDir, "updates");
+                File existingApk = new File(updatesDir, "buzz_update_" + safeVer + ".apk");
+                if (!isDownloadingUpdate && isValidApkFile(existingApk)) {
+                    emitApkProgressToWebView(100, existingApk.length(), existingApk.length(), "installing", "");
+                    launchApkInstaller(existingApk);
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+
+            if (isDownloadingUpdate) return true;
+            isDownloadingUpdate = true;
+            cancelCurrentDownload = false;
+            final String targetUrl = url.trim();
+
             Executors.newSingleThreadExecutor().execute(() -> {
                 HttpURLConnection conn = null;
+                File partFile = null;
                 try {
                     emitApkProgressToWebView(1, 0, 0, "downloading", "");
                     String currentUrl = targetUrl;
+                    if (currentUrl.endsWith("/releases/latest") || currentUrl.contains("/releases/tag/")) {
+                        currentUrl = !safeVer.equals("latest")
+                            ? "https://github.com/bestboyssd/Buzz/releases/download/v" + safeVer.replaceFirst("^v", "") + "/Buzz-v" + safeVer.replaceFirst("^v", "") + ".apk"
+                            : "https://github.com/bestboyssd/Buzz/releases/latest/download/Buzz.apk";
+                    }
+
                     for (int redirects = 0; redirects < 10; redirects++) {
                         URL u = new URL(currentUrl);
                         conn = (HttpURLConnection) u.openConnection();
                         conn.setInstanceFollowRedirects(false);
                         conn.setConnectTimeout(15000);
                         conn.setReadTimeout(30000);
-                        conn.setRequestProperty("User-Agent", "Buzz-Android-Updater");
+                        conn.setRequestProperty("User-Agent", "Buzz-Android-Updater/1.1");
                         conn.setRequestProperty("Accept", "application/octet-stream, application/vnd.android.package-archive, */*");
                         int code = conn.getResponseCode();
                         if (code == HttpURLConnection.HTTP_MOVED_PERM
@@ -191,7 +288,7 @@ public class MainActivity extends BridgeActivity {
                             String loc = conn.getHeaderField("Location");
                             conn.disconnect();
                             if (loc == null || loc.isEmpty()) break;
-                            currentUrl = loc;
+                            currentUrl = new URL(u, loc).toString();
                             continue;
                         }
                         break;
@@ -199,6 +296,11 @@ public class MainActivity extends BridgeActivity {
 
                     if (conn == null || conn.getResponseCode() >= 400) {
                         throw new Exception("Download failed with HTTP " + (conn != null ? conn.getResponseCode() : 0));
+                    }
+
+                    String contentType = conn.getContentType();
+                    if (contentType != null && contentType.toLowerCase(Locale.US).contains("text/html")) {
+                        throw new Exception("Server returned HTML page instead of APK binary");
                     }
 
                     long totalBytes = conn.getContentLengthLong();
@@ -212,33 +314,37 @@ public class MainActivity extends BridgeActivity {
                     File[] oldFiles = updatesDir.listFiles();
                     if (oldFiles != null) {
                         for (File f : oldFiles) {
-                            if (f != null && f.isFile() && f.getName().endsWith(".apk")) {
+                            if (f != null && f.isFile() && (f.getName().endsWith(".apk") || f.getName().endsWith(".part"))) {
                                 f.delete();
                             }
                         }
                     }
 
+                    partFile = new File(updatesDir, "buzz_update_" + safeVer + ".apk.part");
                     File outFile = new File(updatesDir, "buzz_update_" + safeVer + ".apk");
                     long downloadedBytes = 0;
                     int lastProgress = 1;
                     long lastEmitTime = 0;
 
                     try (InputStream in = conn.getInputStream();
-                         FileOutputStream out = new FileOutputStream(outFile)) {
-                        byte[] buffer = new byte[16384];
+                         FileOutputStream out = new FileOutputStream(partFile)) {
+                        byte[] buffer = new byte[32768];
                         int read;
                         while ((read = in.read(buffer)) != -1) {
+                            if (cancelCurrentDownload) {
+                                throw new Exception("Download cancelled");
+                            }
                             out.write(buffer, 0, read);
                             downloadedBytes += read;
                             int pct;
                             if (totalBytes > 0) {
                                 pct = (int) Math.min(99, Math.max(1, (downloadedBytes * 100L) / totalBytes));
                             } else {
-                                // Estimate based on ~10MB typical APK size if Content-Length is omitted
-                                pct = (int) Math.min(95, Math.max(1, (downloadedBytes * 100L) / (10L * 1024L * 1024L)));
+                                // Estimate based on ~36.5MB APK size if Content-Length is omitted
+                                pct = (int) Math.min(95, Math.max(1, (downloadedBytes * 100L) / (36L * 1024L * 1024L)));
                             }
                             long now = System.currentTimeMillis();
-                            if (pct != lastProgress && (now - lastEmitTime >= 80 || pct >= 99)) {
+                            if (pct != lastProgress && (now - lastEmitTime >= 75 || pct >= 99)) {
                                 lastProgress = pct;
                                 lastEmitTime = now;
                                 emitApkProgressToWebView(pct, downloadedBytes, totalBytes > 0 ? totalBytes : downloadedBytes, "downloading", "");
@@ -247,11 +353,37 @@ public class MainActivity extends BridgeActivity {
                         out.flush();
                     }
 
+                    if (totalBytes > 0 && downloadedBytes < totalBytes) {
+                        throw new Exception("Connection closed early (" + (downloadedBytes / (1024 * 1024)) + "MB / " + (totalBytes / (1024 * 1024)) + "MB). Tap Retry.");
+                    }
+
+                    if (!isValidApkFile(partFile)) {
+                        throw new Exception("Downloaded file is not a valid Android APK package.");
+                    }
+
+                    if (outFile.exists()) {
+                        outFile.delete();
+                    }
+                    if (!partFile.renameTo(outFile)) {
+                        outFile = partFile;
+                    }
+
                     emitApkProgressToWebView(100, downloadedBytes, downloadedBytes, "installing", "");
                     launchApkInstaller(outFile);
                 } catch (Exception e) {
                     e.printStackTrace();
-                    emitApkProgressToWebView(0, 0, 0, "error", e.getMessage() != null ? e.getMessage() : "Download failed");
+                    if (partFile != null && partFile.exists()) {
+                        try {
+                            partFile.delete();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    String msg = e.getMessage() != null ? e.getMessage() : "Download failed";
+                    if ("Download cancelled".equals(msg)) {
+                        emitApkProgressToWebView(0, 0, 0, "idle", "");
+                    } else {
+                        emitApkProgressToWebView(0, 0, 0, "error", msg);
+                    }
                 } finally {
                     isDownloadingUpdate = false;
                     if (conn != null) {
@@ -492,6 +624,18 @@ public class MainActivity extends BridgeActivity {
             }
             bgPollExecutor = null;
         }
+
+        // If user just granted "Install unknown apps" permission and returned to Buzz POS, automatically launch installer
+        try {
+            if (pendingInstallApkFile != null && isValidApkFile(pendingInstallApkFile)) {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || getPackageManager().canRequestPackageInstalls()) {
+                    File toInstall = pendingInstallApkFile;
+                    pendingInstallApkFile = null;
+                    launchApkInstaller(toInstall);
+                }
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     @Override
@@ -551,6 +695,13 @@ public class MainActivity extends BridgeActivity {
                 } catch (Exception ignored) {
                 }
             }
+
+            webView.setDownloadListener((url, userAgent, contentDisposition, mimeType, contentLength) -> {
+                if (url != null && (url.toLowerCase(Locale.US).contains(".apk")
+                        || "application/vnd.android.package-archive".equalsIgnoreCase(mimeType))) {
+                    new AndroidExporter().downloadAndInstallApk(url, "latest");
+                }
+            });
 
             // Keep WebView renderer alive when backgrounded at checkout counter
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

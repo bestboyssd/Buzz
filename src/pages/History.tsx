@@ -84,12 +84,19 @@ export function History() {
 
   const pageTransition = useOptimizedTransition({ duration: 0.35, ease: [0.16, 1, 0.3, 1] });
   const gpuClass = useHardwareAcceleration();
+  const [perfMode, setPerfMode] = useState(() => isPerformanceModeEnabled());
+
+  useEffect(() => {
+    const syncPerf = () => setPerfMode(isPerformanceModeEnabled());
+    window.addEventListener('performanceModeChanged', syncPerf);
+    return () => window.removeEventListener('performanceModeChanged', syncPerf);
+  }, []);
 
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.98 }}
+      initial={perfMode ? false : { opacity: 0, scale: 0.98 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.95 }}
+      exit={perfMode ? undefined : { opacity: 0, scale: 0.95 }}
       transition={pageTransition}
       className={`min-h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg md:max-w-2xl mx-auto no-print ${gpuClass}`}
     >
@@ -107,10 +114,10 @@ export function History() {
 
       <div className="grid grid-cols-2 gap-3.5 mb-7">
         <motion.div
-          initial={isPerformanceModeEnabled() ? false : { y: 14, opacity: 0, scale: 0.96 }}
+          initial={perfMode ? false : { y: 14, opacity: 0, scale: 0.96 }}
           animate={{ y: 0, opacity: 1, scale: 1 }}
-          whileHover={isPerformanceModeEnabled() ? undefined : { y: -2, scale: 1.01 }}
-          transition={isPerformanceModeEnabled() ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 30, delay: 0.04 }}
+          whileHover={perfMode ? undefined : { y: -2, scale: 1.01 }}
+          transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 30, delay: 0.04 }}
         >
           <StatCard
             icon={<DollarSign size={20} className="text-indigo-600 dark:text-indigo-400" />}
@@ -120,10 +127,10 @@ export function History() {
           />
         </motion.div>
         <motion.div
-          initial={isPerformanceModeEnabled() ? false : { y: 14, opacity: 0, scale: 0.96 }}
+          initial={perfMode ? false : { y: 14, opacity: 0, scale: 0.96 }}
           animate={{ y: 0, opacity: 1, scale: 1 }}
-          whileHover={isPerformanceModeEnabled() ? undefined : { y: -2, scale: 1.01 }}
-          transition={isPerformanceModeEnabled() ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 30, delay: 0.08 }}
+          whileHover={perfMode ? undefined : { y: -2, scale: 1.01 }}
+          transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 30, delay: 0.08 }}
         >
           <StatCard
             icon={<TrendingUp size={20} className="text-emerald-600 dark:text-emerald-400" />}
@@ -135,9 +142,9 @@ export function History() {
       </div>
 
       <motion.div
-        initial={isPerformanceModeEnabled() ? false : { y: 12, opacity: 0 }}
+        initial={perfMode ? false : { y: 12, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
-        transition={isPerformanceModeEnabled() ? { duration: 0 } : { delay: 0.12 }}
+        transition={perfMode ? { duration: 0 } : { delay: 0.12 }}
         className="flex-1 flex flex-col"
       >
         <div className="flex items-center justify-between px-1 mb-3">
@@ -189,13 +196,12 @@ export function History() {
             </div>
           ) : (
             <motion.ul
-              initial={{ opacity: 0 }}
+              initial={perfMode ? false : { opacity: 0 }}
               animate={{ opacity: 1 }}
               className="space-y-2.5"
             >
               <AnimatePresence initial={false}>
               {filtered.map((bill, idx) => {
-                const perfMode = isPerformanceModeEnabled();
                 return (
                   <motion.li
                     layout={!perfMode}
