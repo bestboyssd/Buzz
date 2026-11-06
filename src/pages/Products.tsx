@@ -1469,10 +1469,10 @@ function AddStockModal({
 
   const targetSheetHeight =
     pullState === "full"
-      ? "92dvh"
+      ? "92vh"
       : selectedProducts.length > 0
-      ? "74dvh"
-      : "64dvh";
+      ? "74vh"
+      : "64vh";
 
   return (
     <div className="fixed inset-0 z-[70] flex items-end justify-center p-0">
@@ -1544,12 +1544,12 @@ function AddStockModal({
           perfMode
             ? { duration: 0 }
             : {
-                y: { type: "spring", stiffness: 390, damping: 32, mass: 0.8 },
-                height: { type: "spring", stiffness: 370, damping: 32, mass: 0.8 },
+                y: { type: "spring", stiffness: 360, damping: 32, mass: 0.8 },
+                height: { type: "spring", stiffness: 260, damping: 28, mass: 0.85 },
                 opacity: { duration: 0.18, ease: "easeOut" },
               }
         }
-        className="bg-[#fcf8ff] dark:bg-[#161923] w-full max-w-lg p-5 pb-6 sm:pb-6 relative z-10 flex flex-col rounded-t-[2.5rem] rounded-b-none border-b-0 max-h-[92dvh] overflow-visible shadow-2xl border border-slate-200/80 dark:border-white/[0.08] transform-gpu will-change-transform"
+        className="bg-[#fcf8ff] dark:bg-[#161923] w-full max-w-lg p-5 pb-6 sm:pb-6 relative z-10 flex flex-col rounded-t-[2.5rem] rounded-b-none border-b-0 max-h-[92dvh] overflow-visible shadow-2xl border border-slate-200/80 dark:border-white/[0.08] transform-gpu will-change-[transform,height]"
       >
         <div
           aria-hidden="true"
@@ -1594,7 +1594,7 @@ function AddStockModal({
                       initial={{ scale: 0.65, opacity: 0, rotate: -45 }}
                       animate={{ scale: 1, opacity: 1, rotate: 0 }}
                       exit={{ scale: 0.65, opacity: 0, rotate: 45 }}
-                      transition={{ duration: 0.14, ease: "easeOut" }}
+                      transition={{ duration: 0.18, ease: "easeOut" }}
                       className="flex items-center justify-center"
                     >
                       <Minimize2 size={16} />
@@ -1605,7 +1605,7 @@ function AddStockModal({
                       initial={{ scale: 0.65, opacity: 0, rotate: 45 }}
                       animate={{ scale: 1, opacity: 1, rotate: 0 }}
                       exit={{ scale: 0.65, opacity: 0, rotate: -45 }}
-                      transition={{ duration: 0.14, ease: "easeOut" }}
+                      transition={{ duration: 0.18, ease: "easeOut" }}
                       className="flex items-center justify-center"
                     >
                       <Maximize2 size={16} />
@@ -1691,7 +1691,13 @@ function AddStockModal({
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain custom-scrollbar">
-                <div
+                <motion.div
+                  layout={!perfMode}
+                  transition={
+                    perfMode
+                      ? { duration: 0 }
+                      : { type: "spring", stiffness: 280, damping: 28, mass: 0.82 }
+                  }
                   className={`grid gap-3 p-1 pb-4 auto-rows-max ${
                     pullState === "full"
                       ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4"
@@ -1711,11 +1717,22 @@ function AddStockModal({
                     return (
                       <motion.div
                         key={p.id || `p_${idx}`}
+                        layout={!perfMode}
                         whileHover={{ y: -1.5, scale: 1.01 }}
                         whileTap={{ scale: 0.97 }}
-                        transition={{
-                          scale: { type: "spring", stiffness: 450, damping: 25 },
-                        }}
+                        transition={
+                          perfMode
+                            ? { duration: 0 }
+                            : {
+                                layout: {
+                                  type: "spring",
+                                  stiffness: 280,
+                                  damping: 28,
+                                  mass: 0.82,
+                                },
+                                scale: { type: "spring", stiffness: 450, damping: 25 },
+                              }
+                        }
                         onClick={() => {
                           if (isSelected) {
                             setSelectedProducts(
@@ -1726,43 +1743,83 @@ function AddStockModal({
                           }
                           triggerHaptic("light");
                         }}
-                        className={`p-3 rounded-[1.25rem] cursor-pointer border-2 transition-colors duration-150 flex flex-col justify-between h-fit min-h-fit relative transform-gpu ${
+                        className={`p-3 rounded-[1.25rem] cursor-pointer border-2 transition-colors duration-150 flex flex-col justify-between h-fit min-h-fit relative transform-gpu overflow-hidden ${
                           isSelected
                             ? "border-indigo-500 bg-indigo-50/80 dark:bg-indigo-950/50 shadow-[0_4px_20px_rgba(99,102,241,0.14)]"
                             : "border-slate-200/80 dark:border-white/[0.08] hover:border-indigo-500/40 bg-white dark:bg-[#1b1f2b] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none"
                         }`}
                       >
-                        {pullState === "full" && (
-                          <div className="w-full overflow-hidden rounded-xl shrink-0 mb-2.5">
-                            <div className="w-full aspect-square rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-950 flex items-center justify-center relative">
-                              {pImgUrl ? (
-                                <img
-                                  src={pImgUrl}
-                                  alt={p.name}
-                                  loading="eager"
-                                  decoding="sync"
-                                  draggable={false}
-                                  referrerPolicy="no-referrer"
-                                  className="w-full h-full object-cover pointer-events-none"
-                                />
-                              ) : (
-                                <ProductImagePlaceholder
-                                  name={p.name}
-                                  category={normalizeProductCategory(p.category, p.name)}
-                                  size={64}
-                                  className="w-full h-full"
-                                  rounded="rounded-xl"
-                                  showBorder={false}
-                                  showShadow={false}
-                                  isHome={true}
-                                  monogramSize="bottom-0 right-2 text-[92px] sm:text-[108px] font-black"
-                                />
-                              )}
-                              <div className="absolute inset-0 bg-gradient-to-t from-black/15 via-transparent to-transparent pointer-events-none" />
-                            </div>
-                          </div>
-                        )}
-                        <div className="min-w-0 w-full shrink-0">
+                        <AnimatePresence initial={false}>
+                          {pullState === "full" && (
+                            <motion.div
+                              key="expanded-product-thumb"
+                              initial={
+                                perfMode
+                                  ? false
+                                  : { height: 0, opacity: 0, scale: 0.92, marginBottom: 0 }
+                              }
+                              animate={{
+                                height: "auto",
+                                opacity: 1,
+                                scale: 1,
+                                marginBottom: 10,
+                              }}
+                              exit={
+                                perfMode
+                                  ? undefined
+                                  : { height: 0, opacity: 0, scale: 0.92, marginBottom: 0 }
+                              }
+                              transition={
+                                perfMode
+                                  ? { duration: 0 }
+                                  : {
+                                      height: {
+                                        type: "spring",
+                                        stiffness: 270,
+                                        damping: 28,
+                                        mass: 0.82,
+                                      },
+                                      opacity: { duration: 0.22, ease: "easeOut" },
+                                      scale: {
+                                        type: "spring",
+                                        stiffness: 290,
+                                        damping: 26,
+                                      },
+                                      marginBottom: { duration: 0.22, ease: "easeOut" },
+                                    }
+                              }
+                              className="w-full overflow-hidden rounded-xl shrink-0"
+                            >
+                              <div className="w-full aspect-square rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-950 flex items-center justify-center relative">
+                                {pImgUrl ? (
+                                  <img
+                                    src={pImgUrl}
+                                    alt={p.name}
+                                    loading="eager"
+                                    decoding="sync"
+                                    draggable={false}
+                                    referrerPolicy="no-referrer"
+                                    className="w-full h-full object-cover pointer-events-none"
+                                  />
+                                ) : (
+                                  <ProductImagePlaceholder
+                                    name={p.name}
+                                    category={normalizeProductCategory(p.category, p.name)}
+                                    size={64}
+                                    className="w-full h-full"
+                                    rounded="rounded-xl"
+                                    showBorder={false}
+                                    showShadow={false}
+                                    isHome={true}
+                                    monogramSize="bottom-0 right-2 text-[92px] sm:text-[108px] font-black"
+                                  />
+                                )}
+                                <div className="absolute inset-0 bg-gradient-to-t from-black/15 via-transparent to-transparent pointer-events-none" />
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                        <motion.div layout={!perfMode} className="min-w-0 w-full shrink-0">
                           <p className="font-bold text-sm text-slate-800 dark:text-slate-200 truncate leading-snug">
                             {p.name}
                           </p>
@@ -1772,11 +1829,11 @@ function AddStockModal({
                               {p.stock}
                             </span>
                           </p>
-                        </div>
+                        </motion.div>
                       </motion.div>
                     );
                   })}
-                </div>
+                </motion.div>
               </div>
             </div>
 

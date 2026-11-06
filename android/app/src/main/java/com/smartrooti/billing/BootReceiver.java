@@ -18,6 +18,10 @@ public class BootReceiver extends BroadcastReceiver {
         if (Intent.ACTION_BOOT_COMPLETED.equals(action)
                 || Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)
                 || "android.intent.action.QUICKBOOT_POWERON".equals(action)) {
+            try {
+                MainActivity.cleanupDownloadedApksStatic(context);
+            } catch (Exception ignored) {
+            }
             BuzzNotificationWorker.ensureChannel(context);
 
             Constraints constraints = new Constraints.Builder()

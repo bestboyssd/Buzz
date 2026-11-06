@@ -223,6 +223,19 @@ html.dark.performance-mode .glass-dark {
   box-shadow: none !important;
 }
 
+html.performance-mode #bottom-nav-container,
+html.performance-mode #bottom-nav-container nav {
+  opacity: 1 !important;
+}
+
+html.performance-mode #bottom-nav-container nav {
+  background-color: #f3edf7 !important;
+}
+
+html.dark.performance-mode #bottom-nav-container nav {
+  background-color: #191c26 !important;
+}
+
 html.performance-mode .glass-card,
 html.performance-mode .glass-panel {
   box-shadow: none !important;

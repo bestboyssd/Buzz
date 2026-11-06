@@ -675,6 +675,37 @@ if (typeof window !== "undefined") {
   }, 400);
 }
 
+function formatActionSummaryReply(action: AssistantAction | null): string {
+  if (!action || !action.type) return "";
+  switch (action.type) {
+    case "ADD_PRODUCT":
+      if (Array.isArray(action.products) && action.products.length > 1) {
+        return `Prepared **${action.products.length} products** for your catalog (${action.products
+          .map((p) => `${p.name} ₹${p.price}`)
+          .join(", ")}). Confirm below to add them to your live inventory:`;
+      }
+      return `Prepared new product **${action.name || "Item"}** (₹${action.price ?? 0} · ${action.stock ?? 0} units in stock). Confirm below to add it to your catalog:`;
+    case "UPDATE_STOCK":
+      return `Prepared stock update for **${action.productName || "product"}** (${action.currentStock ?? 0} ➔ **${action.newStock ?? 0} units**). Confirm below to apply:`;
+    case "UPDATE_PRICE":
+      return `Prepared price update for **${action.productName || "product"}** (₹${action.currentPrice ?? 0} ➔ **₹${action.newPrice ?? 0}**). Confirm below to apply:`;
+    case "DELETE_PRODUCT":
+      return `Prepared product removal for **${action.productName || "product"}**. Confirm below to delete it from your catalog:`;
+    case "ADD_EXPENSE":
+      return `Prepared expense entry **${action.title || "Store Cost"}** for **₹${action.amount ?? 0}** (${action.category || "expense"}). Confirm below to record:`;
+    case "DELETE_EXPENSE":
+      return `Prepared removal for expense **${action.title || "entry"}** (₹${action.amount ?? 0}). Confirm below to delete:`;
+    case "UPDATE_BILL":
+      return `Prepared bill update (**₹${action.oldTotal ?? 0} ➔ ₹${action.newTotal ?? 0}**). Confirm below to update this transaction:`;
+    case "DELETE_BILL":
+      return `Prepared transaction cancellation (**₹${action.total ?? 0}**). Confirm below to delete this bill:`;
+    case "PURGE_STORE_DATA":
+      return `Prepared store data reset confirmation card below. Please review carefully before confirming:`;
+    default:
+      return "Prepared your requested store action below. Tap confirm to apply:";
+  }
+}
+
 async function askViaDirectGemini(
   prompt: string,
   compactedHistory: { role: "user" | "assistant"; content: string }[],
@@ -692,47 +723,102 @@ async function askViaDirectGemini(
 
   const systemInstruction = buildClientSystemPrompt(compactedContext);
   const contents = buildValidGeminiContents(compactedHistory, prompt);
-  const localActionCandidate = generateClientStoreResponse(
+  const localCandidateRes = generateClientStoreResponse(
     prompt,
     compactedContext,
     compactedHistory
-  ).action;
+  );
+  const localActionCandidate = localCandidateRes.action;
+
+  // Verified fast models (<1.3s 200 OK); avoids gemini-3.8-flash (503) and gemini-flash-latest (headers timeout)
   const candidateModels = [
     "gemini-3.1-flash-lite",
-    "gemini-3.8-flash",
-    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite-preview",
   ];
 
   let lastErr: any = null;
+  const requestBody = {
+    systemInstruction: {
+      parts: [{ text: systemInstruction }],
+    },
+    contents,
+    generationConfig: {
+      temperature: 0.35,
+    },
+  };
+
+  const finalizeRawModelOutput = (rawOutput: string): AssistantResponse | null => {
+    if (!rawOutput || !rawOutput.trim()) return null;
+    let rawAction: any = null;
+    const actionMatch = rawOutput.match(/```action\s*([\s\S]*?)\s*```/);
+    if (actionMatch && actionMatch[1]) {
+      try {
+        rawAction = JSON.parse(actionMatch[1]);
+      } catch {}
+    }
+    let extractedThought = "";
+    const thMatch = rawOutput.match(/<thought>\s*([\s\S]*?)\s*<\/thought>/);
+    if (thMatch && thMatch[1]) {
+      extractedThought = thMatch[1].trim();
+    }
+
+    let cleanReply = rawOutput
+      .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+      .replace(/<thought>[\s\S]*$/g, "")
+      .replace(/```action[\s\S]*?```/g, "")
+      .replace(/```action[\s\S]*$/g, "")
+      .trim();
+
+    const validatedAction =
+      validateClientAction(rawAction, prompt, cleanReply || rawOutput, compactedContext) ||
+      localActionCandidate ||
+      null;
+
+    // Crucial multi-turn fix: if the model emitted ONLY an ```action``` block (or thought + action)
+    // on a follow-up turn without prose outside the block, synthesize a natural summary instead of discarding!
+    if (!cleanReply && validatedAction) {
+      cleanReply = formatActionSummaryReply(validatedAction);
+    }
+    if (!cleanReply && localCandidateRes.reply) {
+      cleanReply = localCandidateRes.reply;
+    }
+    if (!cleanReply && extractedThought) {
+      cleanReply = extractedThought;
+    }
+    if (!cleanReply) return null;
+
+    if (onChunk) {
+      onChunk(cleanReply);
+    }
+    return {
+      reply: cleanReply,
+      action: validatedAction,
+      thought: extractedThought || generateDynamicThought(prompt, cleanReply, compactedContext),
+      rawText: rawOutput,
+    };
+  };
 
   for (let i = 0; i < candidateModels.length; i++) {
     if (externalSignal?.aborted) {
       throw new Error("Aborted");
     }
     const model = candidateModels[i];
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 9000);
-    const onExternalAbort = () => controller.abort();
-    externalSignal?.addEventListener("abort", onExternalAbort, { once: true });
+
+    // 1. Try SSE streaming with its own dedicated AbortController (6.5s timeout)
+    const streamController = new AbortController();
+    const streamTimeoutId = setTimeout(() => streamController.abort(), 6500);
+    const onExternalStreamAbort = () => streamController.abort();
+    externalSignal?.addEventListener("abort", onExternalStreamAbort, { once: true });
 
     try {
-      // Try SSE streaming first for real-time word-by-word output on mobile & web
       const streamUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
-      const requestBody = {
-        systemInstruction: {
-          parts: [{ text: systemInstruction }],
-        },
-        contents,
-        generationConfig: {
-          temperature: 0.35,
-        },
-      };
-
       const response = await fetch(streamUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
-        signal: controller.signal,
+        signal: streamController.signal,
       });
 
       if ((response.status === 400 || response.status === 401 || response.status === 403) && i === 0) {
@@ -747,137 +833,137 @@ async function askViaDirectGemini(
         const decoder = new TextDecoder();
         let accumulatedRaw = "";
         let sseBuffer = "";
+        let sawFinishReason = false;
 
-        while (true) {
-          if (externalSignal?.aborted) {
-            try {
-              reader.cancel();
-            } catch {}
-            throw new Error("Aborted");
+        const processSseLine = (line: string) => {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) return;
+          const jsonStr = trimmed.replace(/^data:\s*/, "").trim();
+          if (!jsonStr || jsonStr === "[DONE]") {
+            sawFinishReason = true;
+            return;
           }
-          const { done, value } = await reader.read();
-          if (done) break;
-          sseBuffer += decoder.decode(value, { stream: true });
-          const lines = sseBuffer.split("\n");
-          sseBuffer = lines.pop() || "";
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
-            const jsonStr = trimmed.replace(/^data:\s*/, "").trim();
-            if (!jsonStr || jsonStr === "[DONE]") continue;
-            try {
-              const parsed = JSON.parse(jsonStr);
-              const parts = parsed?.candidates?.[0]?.content?.parts || [];
-              for (const part of parts) {
-                if (typeof part?.text === "string" && part.text) {
-                  accumulatedRaw += part.text;
-                }
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const candidate = parsed?.candidates?.[0];
+            const parts = candidate?.content?.parts || [];
+            for (const part of parts) {
+              if (typeof part?.text === "string" && part.text) {
+                accumulatedRaw += part.text;
               }
-              if (onChunk && accumulatedRaw) {
-                const cleanDisplay = accumulatedRaw
-                  .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-                  .replace(/<thought>[\s\S]*$/g, "")
-                  .replace(/```action[\s\S]*?```/g, "")
-                  .replace(/```action[\s\S]*$/g, "")
-                  .trim();
-                if (cleanDisplay) {
-                  onChunk(cleanDisplay);
-                }
-              }
-            } catch {}
-          }
-        }
-
-        clearTimeout(timeoutId);
-        externalSignal?.removeEventListener("abort", onExternalAbort);
-
-        if (accumulatedRaw.trim()) {
-          let rawAction: any = null;
-          const actionMatch = accumulatedRaw.match(/```action\s*([\s\S]*?)\s*```/);
-          if (actionMatch && actionMatch[1]) {
-            try {
-              rawAction = JSON.parse(actionMatch[1]);
-            } catch {}
-          }
-          let extractedThought = "";
-          const thMatch = accumulatedRaw.match(/<thought>\s*([\s\S]*?)\s*<\/thought>/);
-          if (thMatch && thMatch[1]) {
-            extractedThought = thMatch[1].trim();
-          }
-
-          const cleanReply = accumulatedRaw
-            .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-            .replace(/```action[\s\S]*?```/g, "")
-            .trim();
-
-          if (cleanReply) {
-            const validatedAction =
-              validateClientAction(rawAction, prompt, cleanReply, compactedContext) ||
-              localActionCandidate ||
-              null;
-            if (onChunk) {
-              onChunk(cleanReply);
             }
-            return {
-              reply: cleanReply,
-              action: validatedAction,
-              thought: extractedThought || generateDynamicThought(prompt, cleanReply, compactedContext),
-              rawText: accumulatedRaw,
-            };
+            if (candidate?.finishReason) {
+              sawFinishReason = true;
+            }
+            if (onChunk && accumulatedRaw) {
+              const cleanDisplay = accumulatedRaw
+                .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+                .replace(/<thought>[\s\S]*$/g, "")
+                .replace(/```action[\s\S]*?```/g, "")
+                .replace(/```action[\s\S]*$/g, "")
+                .trim();
+              if (cleanDisplay) {
+                onChunk(cleanDisplay);
+              }
+            }
+          } catch {}
+        };
+
+        try {
+          while (true) {
+            if (externalSignal?.aborted) {
+              try {
+                reader.cancel();
+              } catch {}
+              throw new Error("Aborted");
+            }
+            const { done, value } = await reader.read();
+            if (done) {
+              sseBuffer += decoder.decode();
+              if (sseBuffer.trim()) {
+                for (const leftoverLine of sseBuffer.split("\n")) {
+                  processSseLine(leftoverLine);
+                }
+              }
+              break;
+            }
+            sseBuffer += decoder.decode(value, { stream: true });
+            const lines = sseBuffer.split("\n");
+            sseBuffer = lines.pop() || "";
+
+            for (const line of lines) {
+              processSseLine(line);
+            }
+
+            if (sawFinishReason && accumulatedRaw.trim()) {
+              if (sseBuffer.trim()) {
+                processSseLine(sseBuffer);
+                sseBuffer = "";
+              }
+              try {
+                reader.cancel();
+              } catch {}
+              break;
+            }
+          }
+        } catch (streamReadErr: any) {
+          if (externalSignal?.aborted) {
+            throw streamReadErr;
           }
         }
-      }
 
-      // Non-stream fallback for WebViews that buffer ReadableStream
+        clearTimeout(streamTimeoutId);
+        externalSignal?.removeEventListener("abort", onExternalStreamAbort);
+
+        const finalizedStream = finalizeRawModelOutput(accumulatedRaw);
+        if (finalizedStream) {
+          return finalizedStream;
+        }
+      } else {
+        clearTimeout(streamTimeoutId);
+        externalSignal?.removeEventListener("abort", onExternalStreamAbort);
+      }
+    } catch (streamErr: any) {
+      clearTimeout(streamTimeoutId);
+      externalSignal?.removeEventListener("abort", onExternalStreamAbort);
+      lastErr = streamErr;
+    }
+
+    if (externalSignal?.aborted) {
+      throw new Error("Aborted");
+    }
+
+    // 2. Non-stream unary fallback with its own fresh AbortController (6.0s timeout)
+    const unaryController = new AbortController();
+    const unaryTimeoutId = setTimeout(() => unaryController.abort(), 6000);
+    const onExternalUnaryAbort = () => unaryController.abort();
+    externalSignal?.addEventListener("abort", onExternalUnaryAbort, { once: true });
+
+    try {
       const unaryUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
       const unaryRes = await fetch(unaryUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
-        signal: controller.signal,
+        signal: unaryController.signal,
       });
 
-      clearTimeout(timeoutId);
-      externalSignal?.removeEventListener("abort", onExternalAbort);
+      clearTimeout(unaryTimeoutId);
+      externalSignal?.removeEventListener("abort", onExternalUnaryAbort);
 
       if (unaryRes.ok) {
         const unaryData = await unaryRes.json();
         const parts = unaryData?.candidates?.[0]?.content?.parts || [];
         const rawText = parts.map((p: any) => String(p?.text || "")).join("");
-        if (rawText.trim()) {
-          let rawAction: any = null;
-          const actionMatch = rawText.match(/```action\s*([\s\S]*?)\s*```/);
-          if (actionMatch && actionMatch[1]) {
-            try {
-              rawAction = JSON.parse(actionMatch[1]);
-            } catch {}
-          }
-          const cleanReply = rawText
-            .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-            .replace(/```action[\s\S]*?```/g, "")
-            .trim();
-          if (cleanReply) {
-            const validatedAction =
-              validateClientAction(rawAction, prompt, cleanReply, compactedContext) ||
-              localActionCandidate ||
-              null;
-            if (onChunk) {
-              onChunk(cleanReply);
-            }
-            return {
-              reply: cleanReply,
-              action: validatedAction,
-              thought: generateDynamicThought(prompt, cleanReply, compactedContext),
-              rawText,
-            };
-          }
+        const finalizedUnary = finalizeRawModelOutput(rawText);
+        if (finalizedUnary) {
+          return finalizedUnary;
         }
       }
-    } catch (err: any) {
-      clearTimeout(timeoutId);
-      externalSignal?.removeEventListener("abort", onExternalAbort);
-      lastErr = err;
+    } catch (unaryErr: any) {
+      clearTimeout(unaryTimeoutId);
+      externalSignal?.removeEventListener("abort", onExternalUnaryAbort);
+      lastErr = unaryErr;
     }
   }
 
@@ -1010,25 +1096,29 @@ async function askViaFirestoreBridge(
           refreshStreamTimer();
           onChunk(data.partialReply);
         }
-      } else if (data.status === "completed" && data.reply) {
+      } else if (data.status === "completed" && (data.reply || data.action)) {
         settled = true;
         clearTimeout(timer);
         const validatedAction = validateClientAction(
           data.action,
           prompt,
-          data.reply,
+          data.reply || "",
           compactedContext
         );
+        const finalReply =
+          String(data.reply || "").trim() ||
+          formatActionSummaryReply(validatedAction) ||
+          "Prepared your requested store update:";
         if (onChunk) {
-          onChunk(data.reply);
+          onChunk(finalReply);
         }
         cleanup();
         resolve({
-          reply: data.reply,
+          reply: finalReply,
           action: validatedAction,
           thought:
             data.thought ||
-            generateDynamicThought(prompt, data.reply, compactedContext),
+            generateDynamicThought(prompt, finalReply, compactedContext),
         });
       } else if (data.status === "error") {
         settled = true;
@@ -1089,6 +1179,7 @@ export function buildValidGeminiContents(
   for (const msg of compactedHistory || []) {
     const text = String(msg?.content || "").trim();
     if (!text) continue;
+    if (text === "*(Response stopped)*") continue;
     if (text.includes("I am **Buzz AI**, your intelligent retail store manager")) continue;
     rawTurns.push({
       role: msg.role === "assistant" ? "model" : "user",
@@ -1112,7 +1203,7 @@ export function buildValidGeminiContents(
   for (const turn of rawTurns) {
     const prev = contents[contents.length - 1];
     if (prev && prev.role === turn.role) {
-      prev.parts[0].text = `${prev.parts[0].text}\n\n${turn.text}`.slice(0, 1200);
+      prev.parts[0].text = `${prev.parts[0].text}\n\n${turn.text}`.slice(-1200);
     } else {
       contents.push({
         role: turn.role,
@@ -1123,7 +1214,7 @@ export function buildValidGeminiContents(
 
   const last = contents[contents.length - 1];
   if (last && last.role === "user") {
-    last.parts[0].text = `${last.parts[0].text}\n\n${cleanPrompt}`.slice(0, 1200);
+    last.parts[0].text = `${last.parts[0].text}\n\n${cleanPrompt}`.slice(-1200);
   } else {
     contents.push({
       role: "user",
@@ -1253,8 +1344,18 @@ export async function askGeminiAssistantStream(
 
   let completed = false;
   let userAborted = false;
+  let lastStreamedChunk = "";
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
   const controller = new AbortController();
   const bridgeAbortController = new AbortController();
+
+  const emitChunk = (chunkText: string) => {
+    if (completed || userAborted) return;
+    if (chunkText && chunkText.trim()) {
+      lastStreamedChunk = chunkText.trim();
+      onChunk(chunkText);
+    }
+  };
 
   if (externalSignal) {
     if (externalSignal.aborted) {
@@ -1265,9 +1366,16 @@ export async function askGeminiAssistantStream(
       () => {
         userAborted = true;
         completed = true;
-        clearTimeout(timeoutId);
-        controller.abort();
-        bridgeAbortController.abort();
+        if (timeoutId !== null) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        try {
+          controller.abort();
+        } catch {}
+        try {
+          bridgeAbortController.abort();
+        } catch {}
       },
       { once: true }
     );
@@ -1275,12 +1383,19 @@ export async function askGeminiAssistantStream(
 
   const safeComplete = (payload: AssistantResponse) => {
     if (completed || userAborted) return;
-    const cleanReply = String(payload.reply || "").trim();
+    const cleanReply = String(payload.reply || lastStreamedChunk || "").trim();
     if (!cleanReply) return;
     completed = true;
-    clearTimeout(timeoutId);
-    controller.abort();
-    bridgeAbortController.abort();
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+    try {
+      controller.abort();
+    } catch {}
+    try {
+      bridgeAbortController.abort();
+    } catch {}
     onComplete({
       ...payload,
       reply: cleanReply,
@@ -1297,9 +1412,7 @@ export async function askGeminiAssistantStream(
         compactedHistory,
         compactedContext,
         (partial) => {
-          if (!completed && !userAborted) {
-            onChunk(partial);
-          }
+          emitChunk(partial);
         },
         bridgeAbortController.signal
       );
@@ -1308,13 +1421,23 @@ export async function askGeminiAssistantStream(
         return;
       }
     } catch {
+      if (!completed && !userAborted && lastStreamedChunk) {
+        safeComplete({
+          reply: lastStreamedChunk,
+          action: validateClientAction(null, prompt, lastStreamedChunk, compactedContext) || localActionCandidate || null,
+          thought: generateDynamicThought(prompt, lastStreamedChunk, storeContext),
+        });
+        return;
+      }
       // Proceed to server stream / Firestore bridge fallbacks
     }
   }
 
-  let timeoutId = setTimeout(() => {
+  timeoutId = setTimeout(() => {
     if (completed || userAborted) return;
-    controller.abort();
+    try {
+      controller.abort();
+    } catch {}
   }, useDirectMobilePath ? 4500 : 8000);
 
   if (!shouldPreferFirestoreBridge()) {
@@ -1341,10 +1464,14 @@ export async function askGeminiAssistantStream(
       }
 
       lastHttpFailureAt = 0;
-      clearTimeout(timeoutId);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
       timeoutId = setTimeout(() => {
         if (completed || userAborted) return;
-        controller.abort();
+        try {
+          controller.abort();
+        } catch {}
       }, 14000);
 
       const reader = response.body.getReader();
@@ -1386,7 +1513,7 @@ export async function askGeminiAssistantStream(
                 .replace(/```action[\s\S]*$/g, "")
                 .trim();
               if (cleanDisplay && !userAborted && !completed) {
-                onChunk(cleanDisplay);
+                emitChunk(cleanDisplay);
               }
             }
             if (parsed.done) {
@@ -1455,10 +1582,14 @@ export async function askGeminiAssistantStream(
       }
     } catch {
       lastHttpFailureAt = Date.now();
-      clearTimeout(timeoutId);
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
     }
-  } else {
+  } else if (timeoutId !== null) {
     clearTimeout(timeoutId);
+    timeoutId = null;
   }
 
   if (userAborted || completed || externalSignal?.aborted) return;
@@ -1471,9 +1602,7 @@ export async function askGeminiAssistantStream(
         compactedHistory,
         compactedContext,
         (partial) => {
-          if (!completed && !userAborted) {
-            onChunk(partial);
-          }
+          emitChunk(partial);
         },
         externalSignal
       );
@@ -1492,7 +1621,7 @@ export async function askGeminiAssistantStream(
       prompt,
       compactedHistory,
       compactedContext,
-      onChunk,
+      emitChunk,
       externalSignal
     );
     if (!userAborted && !completed && !externalSignal?.aborted && String(bridgeRes.reply || "").trim()) {
@@ -1500,7 +1629,7 @@ export async function askGeminiAssistantStream(
         validateClientAction(bridgeRes.action, prompt, bridgeRes.reply, compactedContext) ||
         localActionCandidate ||
         null;
-      onChunk(bridgeRes.reply);
+      emitChunk(bridgeRes.reply);
       safeComplete({
         ...bridgeRes,
         action: validatedAction,
@@ -1538,7 +1667,7 @@ export async function askGeminiAssistantStream(
             validateClientAction(data.action, prompt, replyStr, compactedContext) ||
             localActionCandidate ||
             null;
-          onChunk(replyStr);
+          emitChunk(replyStr);
           safeComplete({
             reply: replyStr,
             action: validatedAction,
@@ -1554,9 +1683,17 @@ export async function askGeminiAssistantStream(
 
   // Final deterministic local store response so Buzz AI never fails even when offline
   if (!userAborted && !completed && !externalSignal?.aborted) {
-    const localFallback = buildFallbackStoreReply(prompt, compactedContext, compactedHistory);
-    onChunk(localFallback.reply);
-    safeComplete(localFallback);
+    if (lastStreamedChunk) {
+      safeComplete({
+        reply: lastStreamedChunk,
+        action: validateClientAction(null, prompt, lastStreamedChunk, compactedContext) || localActionCandidate || null,
+        thought: generateDynamicThought(prompt, lastStreamedChunk, storeContext),
+      });
+    } else {
+      const localFallback = buildFallbackStoreReply(prompt, compactedContext, compactedHistory);
+      emitChunk(localFallback.reply);
+      safeComplete(localFallback);
+    }
   }
 }
 
@@ -2887,7 +3024,7 @@ async function transcribeViaDirectGemini(
   if (!apiKey) {
     throw new Error("Direct Gemini bridge token unavailable");
   }
-  const models = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"];
+  const models = ["gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview"];
   for (const model of models) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 6500);

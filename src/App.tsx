@@ -151,6 +151,7 @@ function AppContent() {
     passedThisSession,
     passUpdateThisTime,
     refreshVersionCheck,
+    downloadState,
   } = useAppVersionCheck();
   const [performanceMode, setPerformanceMode] = useState<boolean>(() =>
     isPerformanceModeEnabled(user?.uid)
@@ -1651,65 +1652,22 @@ function AppContent() {
         )}
       </AnimatePresence>
 
-      {/* App Update In-App Notification & 3-Day Grace / Mandatory Lock Screen */}
+      {/* App Update In-App Modal & 3-Day Grace / Mandatory Lock Screen */}
       <AnimatePresence>
         {isOutdated && latestRelease && (!passedThisSession || !canPassUpdate) && (
-          <div className="fixed inset-0 z-[10000] flex flex-col items-center justify-between p-4 sm:p-6 select-none overflow-y-auto">
+          <div className="fixed inset-0 z-[10000] flex flex-col items-center justify-center p-4 sm:p-6 select-none overflow-y-auto">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => {
-                if (canPassUpdate) {
+                if (canPassUpdate && !downloadState.isDownloading) {
                   triggerHaptic("light");
                   passUpdateThisTime();
                 }
               }}
               className="fixed inset-0 bg-slate-950/85 dark:bg-[#06080f]/92 backdrop-blur-xl pointer-events-auto"
             />
-
-            {/* Top In-App Notification Banner */}
-            <motion.div
-              initial={{ opacity: 0, y: -16, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: -12, scale: 0.96 }}
-              className={`relative z-10 w-full max-w-sm mt-2 sm:mt-4 rounded-2xl px-4 py-3 flex items-center gap-3 shadow-lg border ${
-                canPassUpdate
-                  ? "bg-amber-500/15 dark:bg-amber-500/15 border-amber-500/35"
-                  : "bg-rose-500/15 dark:bg-rose-500/15 border-rose-500/35"
-              }`}
-            >
-              <span className="relative flex h-2.5 w-2.5 shrink-0">
-                <span
-                  className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                    canPassUpdate ? "bg-amber-400" : "bg-rose-400"
-                  }`}
-                />
-                <span
-                  className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                    canPassUpdate ? "bg-amber-500" : "bg-rose-500"
-                  }`}
-                />
-              </span>
-              <div className="min-w-0 flex-1 text-left">
-                <p
-                  className={`text-[11px] font-extrabold uppercase tracking-wider leading-tight ${
-                    canPassUpdate
-                      ? "text-amber-600 dark:text-amber-300"
-                      : "text-rose-600 dark:text-rose-300"
-                  }`}
-                >
-                  {canPassUpdate
-                    ? `App Outdated • ${graceDaysLeft} ${graceDaysLeft === 1 ? "Day" : "Days"} Grace Left`
-                    : "App Outdated • Update Required"}
-                </p>
-                <p className="text-xs font-medium text-slate-700 dark:text-slate-300 truncate mt-0.5">
-                  {canPassUpdate
-                    ? `Update to v${latestRelease.version} within ${graceDaysLeft} ${graceDaysLeft === 1 ? "day" : "days"}`
-                    : `3-day grace ended — v${latestRelease.version} required to continue`}
-                </p>
-              </div>
-            </motion.div>
 
             {/* Center Update Card */}
             <motion.div
@@ -1720,14 +1678,18 @@ function AppContent() {
               className="relative z-10 w-full max-w-sm my-auto bg-white dark:bg-[#131722] border border-slate-200/90 dark:border-white/[0.09] rounded-[2rem] p-6 shadow-2xl text-center"
             >
               <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-indigo-500/12 dark:bg-indigo-500/20 border border-indigo-500/25 flex items-center justify-center text-indigo-600 dark:text-indigo-400 shadow-inner">
-                <Download size={30} strokeWidth={2.25} />
+                <Download
+                  size={30}
+                  strokeWidth={2.25}
+                  className={downloadState.isDownloading ? "animate-bounce" : ""}
+                />
               </div>
 
               <span
                 className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full border text-[10px] font-extrabold uppercase tracking-widest mb-2.5 ${
                   canPassUpdate
-                    ? "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25"
-                    : "bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/25"
+                    ? "bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 border-indigo-500/25"
+                    : "bg-rose-500/12 text-rose-600 dark:text-rose-400 border-rose-500/25"
                 }`}
               >
                 {canPassUpdate
@@ -1783,27 +1745,87 @@ function AppContent() {
                 )}
               </div>
 
+              {/* In-App Download Progress Bar */}
+              {(downloadState.isDownloading ||
+                downloadState.status === "installing" ||
+                downloadState.status === "completed" ||
+                downloadState.status === "error") && (
+                <div className="rounded-2xl bg-indigo-500/8 dark:bg-indigo-500/12 border border-indigo-500/20 p-3.5 mb-4 text-left">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
+                      {downloadState.status === "error"
+                        ? "Download failed — tap below to retry"
+                        : downloadState.status === "installing"
+                        ? "Launching package installer..."
+                        : downloadState.status === "completed"
+                        ? "APK ready — tap Open/Install"
+                        : `Downloading Buzz v${latestRelease.version}...`}
+                    </span>
+                    <span className="font-mono text-xs font-extrabold text-indigo-600 dark:text-indigo-400 shrink-0">
+                      {downloadState.progress}%
+                    </span>
+                  </div>
+                  <div className="w-full h-2.5 rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-150 ${
+                        downloadState.status === "error"
+                          ? "bg-rose-500"
+                          : downloadState.progress >= 100
+                          ? "bg-emerald-500"
+                          : "bg-indigo-600 dark:bg-indigo-500"
+                      }`}
+                      style={{ width: `${Math.max(4, Math.min(100, downloadState.progress))}%` }}
+                    />
+                  </div>
+                  {downloadState.totalBytes > 0 && (
+                    <div className="flex items-center justify-between text-[10px] font-medium text-slate-500 dark:text-slate-400 mt-1.5">
+                      <span>
+                        {(downloadState.downloadedBytes / (1024 * 1024)).toFixed(1)} MB /{" "}
+                        {(downloadState.totalBytes / (1024 * 1024)).toFixed(1)} MB
+                      </span>
+                      <span>Auto-deletes APK after install</span>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div className="space-y-2.5">
                 <button
                   type="button"
+                  disabled={downloadState.isDownloading}
                   onClick={() => {
                     triggerHaptic("heavy");
-                    triggerInstantApkDownload(latestRelease.downloadUrl);
+                    triggerInstantApkDownload(
+                      latestRelease.downloadUrl,
+                      latestRelease.version,
+                      latestRelease.sizeBytes
+                    );
                   }}
-                  className="w-full py-3.5 px-4 bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] text-white font-extrabold rounded-2xl text-sm shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full py-3.5 px-4 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-75 active:scale-[0.98] text-white font-extrabold rounded-2xl text-sm shadow-lg shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  <Download size={17} strokeWidth={2.5} />
-                  <span>Update Now (Download APK)</span>
+                  <Download
+                    size={17}
+                    strokeWidth={2.5}
+                    className={downloadState.isDownloading ? "animate-bounce" : ""}
+                  />
+                  <span>
+                    {downloadState.isDownloading
+                      ? `Downloading in App... ${downloadState.progress}%`
+                      : downloadState.status === "installing"
+                      ? "Installing Update..."
+                      : "Update Now (In-App Download)"}
+                  </span>
                 </button>
 
                 {canPassUpdate ? (
                   <button
                     type="button"
+                    disabled={downloadState.isDownloading}
                     onClick={() => {
                       triggerHaptic("light");
                       passUpdateThisTime();
                     }}
-                    className="w-full py-3 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/90 dark:hover:bg-slate-800 active:scale-[0.98] text-slate-700 dark:text-slate-200 font-bold rounded-2xl text-xs border border-slate-200/80 dark:border-white/[0.07] transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="w-full py-3 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/90 dark:hover:bg-slate-800 disabled:opacity-50 active:scale-[0.98] text-slate-700 dark:text-slate-200 font-bold rounded-2xl text-xs border border-slate-200/80 dark:border-white/[0.07] transition-all flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <span>
                       Pass This Time ({graceDaysLeft} {graceDaysLeft === 1 ? "day" : "days"} left)
@@ -1812,7 +1834,7 @@ function AppContent() {
                 ) : (
                   <button
                     type="button"
-                    disabled={checkingVersion}
+                    disabled={checkingVersion || downloadState.isDownloading}
                     onClick={() => {
                       triggerHaptic("light");
                       refreshVersionCheck();
@@ -1825,8 +1847,6 @@ function AppContent() {
                 )}
               </div>
             </motion.div>
-
-            <div className="h-4 shrink-0" />
           </div>
         )}
       </AnimatePresence>

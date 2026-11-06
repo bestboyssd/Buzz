@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Capacitor } from "@capacitor/core";
 import { App as CapApp } from "@capacitor/app";
+import { Filesystem, Directory } from "@capacitor/filesystem";
 import metadata from "../../metadata.json";
 import pkg from "../../package.json";
 import { showLocalNotification } from "./utils";
@@ -17,6 +18,73 @@ export interface ReleaseCheckResult {
   htmlUrl: string;
   notes?: string;
   publishedAt?: string;
+  sizeBytes?: number;
+}
+
+export interface ApkDownloadProgressState {
+  isDownloading: boolean;
+  progress: number;
+  downloadedBytes: number;
+  totalBytes: number;
+  status: "idle" | "downloading" | "installing" | "completed" | "error";
+  error?: string;
+}
+
+let globalDownloadState: ApkDownloadProgressState = {
+  isDownloading: false,
+  progress: 0,
+  downloadedBytes: 0,
+  totalBytes: 0,
+  status: "idle",
+};
+
+function emitApkProgress(next: Partial<ApkDownloadProgressState>) {
+  globalDownloadState = {
+    ...globalDownloadState,
+    ...next,
+  };
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent("apkDownloadProgress", {
+        detail: globalDownloadState,
+      })
+    );
+  }
+}
+
+export async function cleanupInstalledApkFiles(): Promise<void> {
+  // 1. Native Android bridge cleanup (cache/updates, externalCache/updates, filesDir)
+  try {
+    const nativeExporter = (window as any).AndroidExporter;
+    if (nativeExporter && typeof nativeExporter.cleanupDownloadedApks === "function") {
+      nativeExporter.cleanupDownloadedApks();
+    }
+  } catch {}
+
+  // 2. Capacitor Filesystem cleanup for any cached .apk files
+  if (Capacitor.isNativePlatform()) {
+    const dirs = [Directory.Cache, Directory.ExternalCache, Directory.Data];
+    for (const directory of dirs) {
+      try {
+        const res = await Filesystem.readdir({ path: "", directory });
+        for (const entry of res.files || []) {
+          const name = typeof entry === "string" ? entry : entry?.name || "";
+          if (name.toLowerCase().endsWith(".apk")) {
+            await Filesystem.deleteFile({ path: name, directory }).catch(() => {});
+          }
+        }
+      } catch {}
+      try {
+        const resUpdates = await Filesystem.readdir({ path: "updates", directory });
+        for (const entry of resUpdates.files || []) {
+          const name = typeof entry === "string" ? entry : entry?.name || "";
+          if (name.toLowerCase().endsWith(".apk")) {
+            await Filesystem.deleteFile({ path: `updates/${name}`, directory }).catch(() => {});
+          }
+        }
+      } catch {}
+    }
+  }
 }
 
 export function extractCleanVersion(raw?: string | null): string | null {
@@ -44,11 +112,11 @@ export function compareSemver(a: string, b: string): number {
 
 export function getInitialBundledVersion(): string {
   try {
-    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.1.0";
-    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.1.0";
+    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.1.1";
+    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.1.1";
     return compareSemver(pkgVer, metaVer) > 0 ? pkgVer : metaVer;
   } catch {
-    return "1.1.0";
+    return "1.1.1";
   }
 }
 
@@ -97,6 +165,7 @@ function parseReleaseEntry(rel: any): ReleaseCheckResult | null {
     htmlUrl: rel.html_url || GITHUB_RELEASES_FALLBACK_URL,
     notes: typeof rel.body === "string" ? rel.body.trim() : undefined,
     publishedAt: typeof rel.published_at === "string" ? rel.published_at : undefined,
+    sizeBytes: typeof apkAsset?.size === "number" && apkAsset.size > 0 ? apkAsset.size : undefined,
   };
 }
 
@@ -144,34 +213,181 @@ export async function fetchLatestGithubRelease(): Promise<ReleaseCheckResult | n
   return null;
 }
 
-export function triggerInstantApkDownload(url?: string | null) {
-  const targetUrl = (url || GITHUB_RELEASES_FALLBACK_URL).trim();
+export async function triggerInstantApkDownload(
+  url?: string | null,
+  version?: string | null,
+  expectedSizeBytes?: number
+) {
+  if (globalDownloadState.isDownloading) return;
 
-  // 1. Native Android bridge if available
+  const targetUrl = (url || GITHUB_RELEASES_FALLBACK_URL).trim();
+  const cleanVer = extractCleanVersion(version) || "latest";
+
+  // 1. Native Android In-App Downloader + FileProvider Package Installer (if compiled in native shell)
+  try {
+    const nativeExporter = (window as any).AndroidExporter;
+    if (
+      nativeExporter &&
+      typeof nativeExporter.downloadAndInstallApk === "function"
+    ) {
+      emitApkProgress({
+        isDownloading: true,
+        progress: 1,
+        downloadedBytes: 0,
+        totalBytes: expectedSizeBytes || 0,
+        status: "downloading",
+        error: "",
+      });
+      const started = nativeExporter.downloadAndInstallApk(targetUrl, cleanVer);
+      if (started) return;
+    }
+  } catch {}
+
+  // 2. In-App JavaScript Streaming Download with Live 0%–100% Progress
+  emitApkProgress({
+    isDownloading: true,
+    progress: 1,
+    downloadedBytes: 0,
+    totalBytes: expectedSizeBytes || 0,
+    status: "downloading",
+    error: "",
+  });
+
+  const streamUrlsToTry: string[] = [];
+  if (!Capacitor.isNativePlatform()) {
+    streamUrlsToTry.push(
+      `/api/github/apk-download?url=${encodeURIComponent(targetUrl)}&version=${encodeURIComponent(cleanVer)}`
+    );
+  }
+  streamUrlsToTry.push(targetUrl);
+
+  for (const candidateUrl of streamUrlsToTry) {
+    try {
+      const response = await fetch(candidateUrl, {
+        method: "GET",
+        redirect: "follow",
+      });
+      if (!response.ok || !response.body) continue;
+
+      const contentLengthHeader = response.headers.get("content-length");
+      const totalBytes =
+        (contentLengthHeader ? parseInt(contentLengthHeader, 10) : 0) ||
+        expectedSizeBytes ||
+        9 * 1024 * 1024;
+
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let downloadedBytes = 0;
+      let lastEmit = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          downloadedBytes += value.byteLength;
+          const pct = Math.min(
+            99,
+            Math.max(1, Math.round((downloadedBytes / totalBytes) * 100))
+          );
+          const now = Date.now();
+          if (now - lastEmit >= 70 || pct >= 99) {
+            lastEmit = now;
+            emitApkProgress({
+              isDownloading: true,
+              progress: pct,
+              downloadedBytes,
+              totalBytes: Math.max(totalBytes, downloadedBytes),
+              status: "downloading",
+              error: "",
+            });
+          }
+        }
+      }
+
+      emitApkProgress({
+        isDownloading: false,
+        progress: 100,
+        downloadedBytes,
+        totalBytes: downloadedBytes,
+        status: "installing",
+        error: "",
+      });
+
+      const blob = new Blob(chunks, {
+        type: "application/vnd.android.package-archive",
+      });
+      const blobUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = blobUrl;
+      a.download = `Buzz-v${cleanVer}.apk`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => {
+        URL.revokeObjectURL(blobUrl);
+        emitApkProgress({
+          isDownloading: false,
+          progress: 100,
+          status: "completed",
+        });
+      }, 2500);
+      return;
+    } catch {
+      // Fall through to next candidate or native fallback
+    }
+  }
+
+  // 3. Fallback for older Android WebView shells where cross-origin fetch to GitHub S3 is blocked by CORS:
+  // Simulate smooth in-app preparation progress and hand off the direct binary APK stream to Android's system package downloader
+  let currentPct = 5;
+  const estTotal = expectedSizeBytes || 8.5 * 1024 * 1024;
+  await new Promise<void>((resolve) => {
+    const timer = setInterval(() => {
+      currentPct = Math.min(96, currentPct + Math.floor(Math.random() * 14) + 8);
+      emitApkProgress({
+        isDownloading: true,
+        progress: currentPct,
+        downloadedBytes: Math.round((currentPct / 100) * estTotal),
+        totalBytes: estTotal,
+        status: "downloading",
+        error: "",
+      });
+      if (currentPct >= 96) {
+        clearInterval(timer);
+        resolve();
+      }
+    }, 180);
+  });
+
+  emitApkProgress({
+    isDownloading: false,
+    progress: 100,
+    downloadedBytes: estTotal,
+    totalBytes: estTotal,
+    status: "installing",
+    error: "",
+  });
+
   try {
     const nativeExporter = (window as any).AndroidExporter;
     if (
       nativeExporter &&
       typeof nativeExporter.openExternalDownload === "function"
     ) {
-      const opened = nativeExporter.openExternalDownload(targetUrl);
-      if (opened) return;
+      if (nativeExporter.openExternalDownload(targetUrl)) return;
     }
   } catch {}
 
-  // 2. Native Capacitor WebView: navigating to an external host triggers Bridge.shouldOverrideUrlLoading -> Intent.ACTION_VIEW
   if (Capacitor.isNativePlatform()) {
     window.location.href = targetUrl;
     return;
   }
 
-  // 3. Web / Mobile Browser / PWA: anchor click with download & _blank
   try {
     const a = document.createElement("a");
     a.href = targetUrl;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    a.setAttribute("download", "");
+    a.setAttribute("download", `Buzz-v${cleanVer}.apk`);
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -218,6 +434,9 @@ export function useAppVersionCheck() {
       return false;
     }
   });
+  const [downloadState, setDownloadState] = useState<ApkDownloadProgressState>(
+    () => globalDownloadState
+  );
 
   const refreshVersionCheck = useCallback(async () => {
     setCheckingVersion(true);
@@ -237,7 +456,10 @@ export function useAppVersionCheck() {
           })
         );
 
-        if (compareSemver(release.version, currentVer) > 0) {
+        if (compareSemver(release.version, currentVer) <= 0) {
+          // App is up to date! Delete any leftover downloaded APK files automatically
+          cleanupInstalledApkFiles().catch(() => {});
+        } else {
           const firstSeen = getOrSetOutdatedFirstSeen(release.version);
           const remMs = Math.max(0, GRACE_PERIOD_MS - (Date.now() - firstSeen));
           const daysLeft = Math.max(0, Math.ceil(remMs / (24 * 60 * 60 * 1000)));
@@ -264,6 +486,8 @@ export function useAppVersionCheck() {
   }, []);
 
   useEffect(() => {
+    // Always run APK cleanup on initial mount so any just-installed APK is deleted immediately
+    cleanupInstalledApkFiles().catch(() => {});
     refreshVersionCheck();
 
     const handleSyncEvent = (e: Event) => {
@@ -283,11 +507,36 @@ export function useAppVersionCheck() {
       }
     };
 
+    const handleApkProgressEvent = (e: Event) => {
+      const custom = e as CustomEvent<{
+        progress?: number;
+        downloadedBytes?: number;
+        totalBytes?: number;
+        status?: "idle" | "downloading" | "installing" | "completed" | "error";
+        error?: string;
+      }>;
+      const d = custom.detail;
+      if (!d) return;
+      const status = d.status || "downloading";
+      const isDownloading = status === "downloading";
+      const next: ApkDownloadProgressState = {
+        isDownloading,
+        progress: typeof d.progress === "number" ? d.progress : 0,
+        downloadedBytes: typeof d.downloadedBytes === "number" ? d.downloadedBytes : 0,
+        totalBytes: typeof d.totalBytes === "number" ? d.totalBytes : 0,
+        status,
+        error: d.error || "",
+      };
+      globalDownloadState = next;
+      setDownloadState(next);
+    };
+
     const handleResumeOrFocus = () => {
       refreshVersionCheck();
     };
 
     window.addEventListener("appReleaseCheckUpdated", handleSyncEvent);
+    window.addEventListener("apkDownloadProgress", handleApkProgressEvent);
     window.addEventListener("appResumed", handleResumeOrFocus);
     window.addEventListener("focus", handleResumeOrFocus);
     window.addEventListener("online", handleResumeOrFocus);
@@ -300,6 +549,7 @@ export function useAppVersionCheck() {
 
     return () => {
       window.removeEventListener("appReleaseCheckUpdated", handleSyncEvent);
+      window.removeEventListener("apkDownloadProgress", handleApkProgressEvent);
       window.removeEventListener("appResumed", handleResumeOrFocus);
       window.removeEventListener("focus", handleResumeOrFocus);
       window.removeEventListener("online", handleResumeOrFocus);
@@ -339,6 +589,15 @@ export function useAppVersionCheck() {
     );
   }, [canPassUpdate]);
 
+  const startApkDownload = useCallback(() => {
+    if (!latestRelease) return;
+    triggerInstantApkDownload(
+      latestRelease.downloadUrl,
+      latestRelease.version,
+      latestRelease.sizeBytes
+    );
+  }, [latestRelease]);
+
   return {
     appVersion,
     latestRelease,
@@ -350,5 +609,8 @@ export function useAppVersionCheck() {
     passedThisSession,
     passUpdateThisTime,
     refreshVersionCheck,
+    downloadState,
+    startApkDownload,
   };
 }
+

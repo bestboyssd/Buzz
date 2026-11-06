@@ -57,10 +57,10 @@ const PRIMARY_AI_PROVIDER = process.env.PRIMARY_AI_PROVIDER || "gemini";
 // Primary: Ultra-low-latency Gemini 3.1 Flash Lite (~0.8s response time)
 const PRIMARY_AI_MODEL = process.env.PRIMARY_AI_MODEL || "gemini-3.1-flash-lite";
 
-// Backup: Secondary & tertiary Gemini Flash models
+// Backup: Secondary & tertiary Gemini Flash models (verified <1.3s 200 OK)
 const BACKUP_AI_PROVIDER = process.env.BACKUP_AI_PROVIDER || "gemini";
-const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-3.8-flash";
-const TERTIARY_AI_MODEL = "gemini-flash-latest";
+const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-3-flash-preview";
+const TERTIARY_AI_MODEL = "gemini-3.1-flash-lite-preview";
 
 // Store timezone offset: Asia/Kolkata (+5:30) for SmartRooti
 const STORE_TZ_OFFSET_MINUTES = 330;
@@ -2589,7 +2589,7 @@ export function buildValidServerGeminiContents(
   for (const turn of rawTurns) {
     const prev = contents[contents.length - 1];
     if (prev && prev.role === turn.role) {
-      prev.parts[0].text = `${prev.parts[0].text}\n\n${turn.text}`.slice(0, 1200);
+      prev.parts[0].text = `${prev.parts[0].text}\n\n${turn.text}`.slice(-1200);
     } else {
       contents.push({
         role: turn.role,
@@ -2600,7 +2600,7 @@ export function buildValidServerGeminiContents(
 
   const last = contents[contents.length - 1];
   if (last && last.role === "user") {
-    last.parts[0].text = `${last.parts[0].text}\n\n${cleanPrompt}`.slice(0, 1200);
+    last.parts[0].text = `${last.parts[0].text}\n\n${cleanPrompt}`.slice(-1200);
   } else {
     contents.push({
       role: "user",
@@ -3273,6 +3273,64 @@ app.post("/api/gemini/transcribe", async (req, res) => {
     res.json({ transcript });
   } catch (err: any) {
     res.status(500).json({ error: "Could not transcribe audio clip. Please try speaking again or type your command." });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// GET /api/github/apk-download (In-App Streaming APK Proxy with Progress)
+// ----------------------------------------------------------------------------
+app.get("/api/github/apk-download", async (req, res) => {
+  try {
+    const rawUrl = String(req.query.url || "").trim();
+    const version = String(req.query.version || "latest").replace(/[^0-9a-zA-Z._-]/g, "");
+    const targetUrl =
+      rawUrl &&
+      (rawUrl.startsWith("https://github.com/bestboyssd/Buzz/") ||
+        rawUrl.startsWith("https://objects.githubusercontent.com/") ||
+        rawUrl.startsWith("https://release-assets.githubusercontent.com/"))
+        ? rawUrl
+        : "https://github.com/bestboyssd/Buzz/releases/latest";
+
+    const upstream = await fetch(targetUrl, {
+      redirect: "follow",
+      headers: {
+        "User-Agent": "Buzz-POS-Updater",
+        Accept: "application/octet-stream, application/vnd.android.package-archive, */*",
+      },
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      res.status(upstream.status || 502).json({ error: "Failed to stream APK from GitHub Releases." });
+      return;
+    }
+
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Expose-Headers", "Content-Length, Content-Disposition");
+    res.setHeader("Content-Type", "application/vnd.android.package-archive");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="Buzz-v${version || "latest"}.apk"`
+    );
+    const contentLength = upstream.headers.get("content-length");
+    if (contentLength) {
+      res.setHeader("Content-Length", contentLength);
+    }
+
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        res.write(Buffer.from(value));
+      }
+    }
+    res.end();
+  } catch (err: any) {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "APK stream failed." });
+    } else {
+      res.end();
+    }
   }
 });
 

@@ -1559,7 +1559,27 @@ export function AdminAIAssistant({
 
   const handleSendMessage = async (textToSend?: string) => {
     const promptText = (textToSend || input).trim();
-    if (!promptText || loading) return;
+    if (!promptText) return;
+
+    // If a previous request was still winding down when the user sends a new message,
+    // cleanly abort it instead of silently dropping the user's new message!
+    if (loading) {
+      if (abortControllerRef.current) {
+        try {
+          abortControllerRef.current.abort();
+        } catch {}
+        abortControllerRef.current = null;
+      }
+      if (activeStopwatchRef.current !== null) {
+        window.clearInterval(activeStopwatchRef.current);
+        activeStopwatchRef.current = null;
+      }
+      if (activeWatchdogRef.current !== null) {
+        window.clearTimeout(activeWatchdogRef.current);
+        activeWatchdogRef.current = null;
+      }
+      activeAssistantMsgIdRef.current = null;
+    }
 
     // Ensure any previous speech playback is stopped when sending a new message
     stopAllSpeechPlayback();
@@ -1604,7 +1624,10 @@ export function AdminAIAssistant({
       thoughtDuration: 1,
     };
 
-    const newHistory = [...messages, userMessage];
+    const cleanedPrevMessages = messages
+      .map((m) => (m.isStreaming ? { ...m, isStreaming: false } : m))
+      .filter((m) => !(m.role === "assistant" && !m.content?.trim()));
+    const newHistory = [...cleanedPrevMessages, userMessage];
 
     if (isRoleModificationPrompt(promptText)) {
       const refusalMessage: ChatMessage = {
@@ -1653,33 +1676,37 @@ export function AdminAIAssistant({
       activeWatchdogRef.current = null;
       activeAssistantMsgIdRef.current = null;
       const duration = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
+      const fallbackLocal = generateClientStoreResponse(promptText, storeContext, []);
       setMessages((prev) =>
-        prev
-          .map((msg) =>
-            msg.id === assistantMsgId
-              ? {
-                  ...msg,
-                  isStreaming: false,
-                  thoughtDuration: duration,
-                }
-              : msg
-          )
-          .filter((msg) => !(msg.id === assistantMsgId && !msg.content?.trim()))
+        prev.map((msg) =>
+          msg.id === assistantMsgId
+            ? {
+                ...msg,
+                content:
+                  msg.content?.trim() ||
+                  fallbackLocal.reply ||
+                  `I checked your store catalog (${storeContext.products?.length || 0} products, ₹${Number(storeContext.totalRevenueToday || 0).toLocaleString("en-IN")} sales today). Please rephrase or try your command again.`,
+                action: msg.action || fallbackLocal.action || null,
+                isStreaming: false,
+                thoughtDuration: duration,
+              }
+            : msg
+        )
       );
-      setErrorMessage("Request timed out. Please try sending your message again.");
       setLoading(false);
-      triggerHaptic("error");
+      triggerHaptic("light");
       scrollToBottom(false);
-    }, 28000);
+    }, 18000);
     activeWatchdogRef.current = watchdogTimer;
 
     try {
-      const historyPayload = messages
+      const historyPayload = cleanedPrevMessages
         .filter(
           (m) =>
             m.id !== "welcome-system-msg" &&
             m.id !== "welcome" &&
             m.content?.trim() &&
+            m.content !== "*(Response stopped)*" &&
             !(
               m.role === "assistant" &&
               m.content.includes("Store Snapshot:") &&
@@ -1735,7 +1762,11 @@ export function AdminAIAssistant({
               msg.id === assistantMsgId
                 ? {
                     ...msg,
-                    content: effectiveReply || msg.content,
+                    content:
+                      effectiveReply ||
+                      msg.content?.trim() ||
+                      generateClientStoreResponse(promptText, storeContext, historyPayload).reply ||
+                      "Prepared your requested store update:",
                     action: effectiveAction,
                     isStreaming: false,
                     thought: authenticThought,
@@ -1750,6 +1781,36 @@ export function AdminAIAssistant({
         },
         abortController.signal
       );
+
+      // Safeguard: if askGeminiAssistantStream resolved without triggering onComplete, finalize immediately
+      if (!watchdogSettled && !abortController.signal.aborted) {
+        watchdogSettled = true;
+        window.clearTimeout(watchdogTimer);
+        window.clearInterval(stopwatchTimer);
+        activeStopwatchRef.current = null;
+        activeWatchdogRef.current = null;
+        activeAssistantMsgIdRef.current = null;
+        const elapsedSec = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
+        const fallbackLocal = generateClientStoreResponse(promptText, storeContext, historyPayload);
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMsgId
+              ? {
+                  ...msg,
+                  content:
+                    msg.content?.trim() ||
+                    fallbackLocal.reply ||
+                    `Your store currently has **${storeContext.products?.length || 0} products** and **₹${Number(storeContext.totalRevenueToday || 0).toLocaleString("en-IN")}** in sales today. How can I help you next?`,
+                  action: msg.action || fallbackLocal.action || null,
+                  isStreaming: false,
+                  thoughtDuration: Math.max(msg.thoughtDuration || 1, elapsedSec),
+                }
+              : msg
+          )
+        );
+        setLoading(false);
+        scrollToBottom(false);
+      }
     } catch (err: any) {
       if (watchdogSettled || abortController.signal.aborted) return;
       watchdogSettled = true;

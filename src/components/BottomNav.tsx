@@ -3,12 +3,14 @@ import { Package, Receipt, Activity, ShoppingCart } from 'lucide-react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { triggerHaptic } from '../lib/haptics';
 import { useCart } from '../lib/CartContext';
+import { isPerformanceModeEnabled } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 
 export function BottomNav() {
   const { cart } = useCart();
   const quantityInCart = cart.reduce((sum, item) => sum + item.quantity, 0);
   const [isKeyboardOpen, setIsKeyboardOpen] = React.useState(false);
+  const [perfMode, setPerfMode] = React.useState(() => isPerformanceModeEnabled());
   const location = useLocation();
   const [isAdmin, setIsAdmin] = React.useState(() => sessionStorage.getItem('adminAuth') === 'true');
 
@@ -16,8 +18,15 @@ export function BottomNav() {
     const handleAdminChange = () => {
       setIsAdmin(sessionStorage.getItem('adminAuth') === 'true');
     };
+    const handlePerfChange = () => {
+      setPerfMode(isPerformanceModeEnabled());
+    };
     window.addEventListener('adminAuthChanged', handleAdminChange);
-    return () => window.removeEventListener('adminAuthChanged', handleAdminChange);
+    window.addEventListener('performanceModeChanged', handlePerfChange);
+    return () => {
+      window.removeEventListener('adminAuthChanged', handleAdminChange);
+      window.removeEventListener('performanceModeChanged', handlePerfChange);
+    };
   }, []);
 
   React.useEffect(() => {
@@ -57,21 +66,22 @@ export function BottomNav() {
       onContextMenu={(e) => e.preventDefault()}
     >
       <motion.nav
-        initial={{ y: 24, opacity: 0, scale: 0.95 }}
+        initial={perfMode ? false : { y: 24, opacity: 0, scale: 0.95 }}
         animate={{ y: 0, opacity: 1, scale: 1 }}
-        transition={{ type: "spring", stiffness: 460, damping: 30, mass: 0.72 }}
-        className="bg-[#f3edf7]/95 dark:bg-[#191c26]/95 backdrop-blur-2xl border border-slate-200/80 dark:border-white/[0.08] shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.65)] p-1.5 flex items-center justify-center gap-1 rounded-full pointer-events-auto select-none [-webkit-touch-callout:none] transform-gpu"
+        transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 30, mass: 0.72 }}
+        style={{ opacity: 1 }}
+        className="bg-[#f3edf7] dark:bg-[#191c26] backdrop-blur-2xl border border-slate-200/90 dark:border-white/[0.1] shadow-[0_12px_32px_-8px_rgba(15,23,42,0.18)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.65)] p-1.5 flex items-center justify-center gap-1 rounded-full pointer-events-auto select-none [-webkit-touch-callout:none] transform-gpu"
       >
-        <NavItem to="/" icon={<Receipt size={20} />} label="POS" />
-        <NavItem to="/checkout" icon={<ShoppingCart size={20} />} label="Checkout" badge={quantityInCart} />
-        <NavItem to="/history" icon={<Activity size={20} />} label="Activity" />
-        <NavItem to="/products" icon={<Package size={20} />} label="Stock" />
+        <NavItem to="/" icon={<Receipt size={20} />} label="POS" perfMode={perfMode} />
+        <NavItem to="/checkout" icon={<ShoppingCart size={20} />} label="Checkout" badge={quantityInCart} perfMode={perfMode} />
+        <NavItem to="/history" icon={<Activity size={20} />} label="Activity" perfMode={perfMode} />
+        <NavItem to="/products" icon={<Package size={20} />} label="Stock" perfMode={perfMode} />
       </motion.nav>
     </div>
   );
 }
 
-function NavItem({ to, icon, label, badge }: { to: string; icon: React.ReactNode; label: string; badge?: number }) {
+function NavItem({ to, icon, label, badge, perfMode }: { to: string; icon: React.ReactNode; label: string; badge?: number; perfMode: boolean }) {
   const location = useLocation();
   const navigate = useNavigate();
   const isActive = location.pathname === to;
@@ -79,8 +89,8 @@ function NavItem({ to, icon, label, badge }: { to: string; icon: React.ReactNode
   return (
     <motion.button
       type="button"
-      whileTap={{ scale: 0.91 }}
-      transition={{ type: "spring", stiffness: 520, damping: 26 }}
+      whileTap={perfMode ? undefined : { scale: 0.91 }}
+      transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 520, damping: 26 }}
       onClick={() => {
         triggerHaptic(isActive ? 'soft' : 'selection');
         if (!isActive) {
@@ -96,16 +106,20 @@ function NavItem({ to, icon, label, badge }: { to: string; icon: React.ReactNode
       }`}
     >
       {isActive && (
-        <motion.div
-          layoutId="active-pill"
-          className="absolute inset-0 bg-[#e0e7ff] dark:bg-indigo-500/25 rounded-full -z-10 border border-indigo-200/70 dark:border-indigo-400/30 shadow-2xs"
-          transition={{ type: "spring", stiffness: 460, damping: 30, mass: 0.65 }}
-        />
+        perfMode ? (
+          <div className="absolute inset-0 bg-[#e0e7ff] dark:bg-[#2a3158] rounded-full -z-10 border border-indigo-200/80 dark:border-indigo-400/35 shadow-2xs" />
+        ) : (
+          <motion.div
+            layoutId="active-pill"
+            className="absolute inset-0 bg-[#e0e7ff] dark:bg-[#2a3158] rounded-full -z-10 border border-indigo-200/80 dark:border-indigo-400/35 shadow-2xs"
+            transition={{ type: "spring", stiffness: 460, damping: 30, mass: 0.65 }}
+          />
+        )
       )}
       <div className="relative flex items-center justify-center">
         <motion.div
           animate={{ scale: isActive ? 1.1 : 1, y: isActive ? -1.5 : 0 }}
-          transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65 }}
+          transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 28, mass: 0.65 }}
         >
           {icon}
         </motion.div>
@@ -113,10 +127,10 @@ function NavItem({ to, icon, label, badge }: { to: string; icon: React.ReactNode
           {badge !== undefined && badge > 0 && (
             <motion.div
               key={`nav-badge-${badge}`}
-              initial={{ scale: 0, opacity: 0 }}
+              initial={perfMode ? false : { scale: 0, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0, opacity: 0 }}
-              transition={{ type: "spring", stiffness: 540, damping: 22, mass: 0.55 }}
+              exit={perfMode ? undefined : { scale: 0, opacity: 0 }}
+              transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 540, damping: 22, mass: 0.55 }}
               className="absolute -top-1.5 -right-3 bg-indigo-600 dark:bg-indigo-500 text-white text-[10px] min-w-[18px] h-[18px] px-1 rounded-full flex items-center justify-center font-bold font-mono tabular-nums shadow-sm ring-2 ring-[#f3edf7] dark:ring-[#191c26]"
             >
               {badge}

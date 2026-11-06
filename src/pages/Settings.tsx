@@ -48,12 +48,18 @@ export function Settings() {
     isOutdated,
     isUpdated,
     refreshVersionCheck,
+    downloadState,
   } = useAppVersionCheck();
 
   const handleAppVersionClick = async () => {
+    if (downloadState.isDownloading) return;
     if (isOutdated && latestRelease) {
       triggerHaptic("heavy");
-      triggerInstantApkDownload(latestRelease.downloadUrl);
+      triggerInstantApkDownload(
+        latestRelease.downloadUrl,
+        latestRelease.version,
+        latestRelease.sizeBytes
+      );
       return;
     }
 
@@ -64,7 +70,11 @@ export function Settings() {
       compareSemver(result.release.version, result.currentVer) > 0
     ) {
       triggerHaptic("heavy");
-      triggerInstantApkDownload(result.release.downloadUrl);
+      triggerInstantApkDownload(
+        result.release.downloadUrl,
+        result.release.version,
+        result.release.sizeBytes
+      );
     }
   };
 
@@ -433,7 +443,11 @@ export function Settings() {
               icon={<Smartphone size={20} className="text-slate-500" />}
               label="App Version"
               badge={
-                isOutdated ? (
+                downloadState.isDownloading ? (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 border-indigo-500/25">
+                    {downloadState.progress}%
+                  </span>
+                ) : isOutdated ? (
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/25">
                     Outdated
                   </span>
@@ -448,13 +462,50 @@ export function Settings() {
                 ) : null
               }
               description={
-                isOutdated && latestRelease
-                  ? `${appVersion} · v${latestRelease.version} available (Tap to download)`
-                  : appVersion
+                downloadState.isDownloading ? (
+                  <div className="mt-1 space-y-1">
+                    <div className="flex items-center justify-between text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
+                      <span>
+                        Downloading v{latestRelease?.version || "latest"}...
+                      </span>
+                      <span className="font-mono">{downloadState.progress}%</span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-indigo-600 dark:bg-indigo-500 transition-all duration-150"
+                        style={{
+                          width: `${Math.max(4, Math.min(100, downloadState.progress))}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                ) : isOutdated && latestRelease ? (
+                  <span className="inline-flex items-center flex-wrap gap-y-0.5">
+                    <span className="font-mono font-semibold text-slate-500 dark:text-slate-400">
+                      v{appVersion}
+                    </span>
+                    <span className="mx-2 text-slate-400 dark:text-slate-500 font-bold">
+                      →
+                    </span>
+                    <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                      v{latestRelease.version} available
+                    </span>
+                    <span className="ml-2.5 text-rose-500 dark:text-rose-400 font-semibold">
+                      (Tap to download)
+                    </span>
+                  </span>
+                ) : (
+                  <span className="font-mono">v{appVersion}</span>
+                )
               }
               action={
                 isOutdated ? (
-                  <Download size={18} className="text-rose-500 dark:text-rose-400" />
+                  <Download
+                    size={18}
+                    className={`text-rose-500 dark:text-rose-400 ${
+                      downloadState.isDownloading ? "animate-bounce text-indigo-500 dark:text-indigo-400" : ""
+                    }`}
+                  />
                 ) : undefined
               }
               onClick={handleAppVersionClick}
@@ -486,7 +537,7 @@ function SettingItem({
   icon: React.ReactNode;
   label: string;
   badge?: React.ReactNode;
-  description?: string;
+  description?: React.ReactNode;
   action?: React.ReactNode;
   onClick?: () => void;
 }) {
@@ -513,9 +564,9 @@ function SettingItem({
             {badge}
           </div>
           {description && (
-            <p className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 leading-snug break-words mt-0.5">
+            <div className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 leading-snug break-words mt-0.5">
               {description}
-            </p>
+            </div>
           )}
         </div>
       </div>
