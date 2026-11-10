@@ -329,16 +329,34 @@ export function OtherCosts() {
             </header>
 
             {/* Total Summary Card */}
-            <div className="glass-card p-6 mb-6 flex justify-between items-center bg-gradient-to-tr from-rose-500/20 via-rose-500/5 to-transparent border-rose-500/10">
+            <motion.div
+                initial={{ opacity: 0, y: 12, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                whileHover={{ y: -2 }}
+                transition={{ type: 'spring', stiffness: 460, damping: 32, mass: 0.7 }}
+                className="glass-card p-6 mb-6 flex justify-between items-center bg-gradient-to-tr from-rose-500/20 via-rose-500/5 to-transparent border-rose-500/10"
+            >
                 <div>
                     <h3 className="text-xs font-black uppercase tracking-widest text-slate-400 dark:text-slate-500 mb-1">Total Costs (to deduct)</h3>
-                    <p className="text-3xl font-black tracking-tight text-rose-600 dark:text-rose-400">₹{formatPrice(grandTotal)}</p>
+                    <motion.p
+                        key={grandTotal}
+                        initial={{ opacity: 0, y: 5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                        className="text-3xl font-black tracking-tight text-rose-600 dark:text-rose-400"
+                    >
+                        ₹{formatPrice(grandTotal)}
+                    </motion.p>
                     <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium mt-1">This amount will be auto-deducted from Analytics revenue</p>
                 </div>
-                <div className="p-3 bg-rose-50 dark:bg-rose-500/15 rounded-2xl flex items-center justify-center text-rose-500">
+                <motion.div
+                    whileHover={{ scale: 1.08, rotate: -6 }}
+                    transition={{ type: 'spring', stiffness: 480, damping: 24 }}
+                    className="p-3 bg-rose-50 dark:bg-rose-500/15 rounded-2xl flex items-center justify-center text-rose-500"
+                >
                     <TrendingDown size={28} />
-                </div>
-            </div>
+                </motion.div>
+            </motion.div>
 
             {/* Slide Down Form overlay */}
             <AnimatePresence initial={false}>

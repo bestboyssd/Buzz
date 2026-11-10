@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Send,
@@ -28,6 +29,14 @@ import {
   RotateCcw,
   Receipt,
   Square,
+  Film,
+  Image as ImageIcon,
+  Paperclip,
+  Plus,
+  Maximize2,
+  ChevronLeft,
+  ChevronRight,
+  Quote,
 } from "lucide-react";
 import { triggerHaptic } from "../lib/haptics";
 import { useAuth } from "../lib/AuthContext";
@@ -67,6 +76,13 @@ import {
   normalizeProductCategory,
   isRoleModificationPrompt,
   ROLE_MODIFICATION_REFUSAL_REPLY,
+  blobToBase64Chunked,
+  compressImageFileForChat,
+  purgeChatMediaFromDatabase,
+  wakeUpBuzzServer,
+  sanitizeLatexAndMathFormatting,
+  ConversationTurnInput,
+  ChatAttachment,
   ChatMessage,
   AssistantAction,
   StoreContext,
@@ -106,7 +122,7 @@ function renderInlineTokens(text: string): React.ReactNode[] {
       return (
         <strong
           key={index}
-          className="font-bold text-slate-900 dark:text-white tracking-wide break-words [overflow-wrap:break-word]"
+          className="font-bold text-slate-900 dark:text-white tracking-wide break-words [overflow-wrap:anywhere] [word-break:break-word]"
         >
           {boldContent}
         </strong>
@@ -119,7 +135,7 @@ function renderInlineTokens(text: string): React.ReactNode[] {
       return (
         <code
           key={index}
-          className="px-1.5 py-0.5 mx-0.5 rounded-md text-[11px] font-mono font-bold bg-indigo-50 dark:bg-white/[0.06] text-indigo-700 dark:text-indigo-300 border border-indigo-200/80 dark:border-white/10 break-words [overflow-wrap:break-word]"
+          className="px-1.5 py-0.5 mx-0.5 rounded-md text-[11px] font-mono font-bold bg-indigo-50 dark:bg-white/[0.06] text-indigo-700 dark:text-indigo-300 border border-indigo-200/80 dark:border-white/10 break-words [overflow-wrap:anywhere] [word-break:break-word]"
         >
           {codeContent}
         </code>
@@ -130,7 +146,7 @@ function renderInlineTokens(text: string): React.ReactNode[] {
     if (part.startsWith("*") && part.endsWith("*") && part.length >= 2) {
       const italicContent = part.slice(1, -1);
       return (
-        <em key={index} className="italic text-slate-600 dark:text-slate-300 break-words [overflow-wrap:break-word]">
+        <em key={index} className="italic text-slate-600 dark:text-slate-300 break-words [overflow-wrap:anywhere] [word-break:break-word]">
           {italicContent}
         </em>
       );
@@ -138,7 +154,7 @@ function renderInlineTokens(text: string): React.ReactNode[] {
 
     // Regular plain text
     return (
-      <span key={index} className="break-words [overflow-wrap:break-word]">
+      <span key={index} className="break-words [overflow-wrap:anywhere] [word-break:break-word]">
         {part}
       </span>
     );
@@ -156,13 +172,15 @@ function MarkdownContent({
     return null;
   }
 
-  // Pre-clean action blocks and thoughts from visible text stream
-  const cleanText = text
-    .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-    .replace(/<thought>[\s\S]*$/g, "")
-    .replace(/```action[\s\S]*?```/g, "")
-    .replace(/```action[\s\S]*$/g, "")
-    .trim();
+  // Pre-clean action blocks, thoughts, and any raw LaTeX ($...$, \pi, etc.) from visible text stream
+  const cleanText = sanitizeLatexAndMathFormatting(
+    text
+      .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+      .replace(/<thought>[\s\S]*$/g, "")
+      .replace(/```action[\s\S]*?```/g, "")
+      .replace(/```action[\s\S]*$/g, "")
+      .trim()
+  );
 
   if (!cleanText) {
     return null;
@@ -368,7 +386,7 @@ function MarkdownContent({
     renderedElements.push(
       <p
         key={`p-${idx}`}
-        className="text-xs sm:text-sm leading-relaxed text-slate-700 dark:text-slate-200 my-1 break-words [overflow-wrap:break-word]"
+        className="text-xs sm:text-sm leading-relaxed text-slate-700 dark:text-slate-200 my-1 break-words [overflow-wrap:anywhere] [word-break:break-word]"
       >
         {renderInlineTokens(line)}
         {isLastLine && isStreaming && (
@@ -381,7 +399,7 @@ function MarkdownContent({
   flushList(lines.length);
   flushTable(lines.length);
 
-  return <div className="space-y-1 break-words [overflow-wrap:break-word] min-w-0 w-full">{renderedElements}</div>;
+  return <div className="space-y-1 break-words [overflow-wrap:anywhere] [word-break:break-word] min-w-0 max-w-full w-full">{renderedElements}</div>;
 }
 
 // -------------------------------------------------------------
@@ -446,16 +464,46 @@ export function AdminAIAssistant({
     for (let i = 0; i < rawList.length; i++) {
       const m = rawList[i];
       const text = String(m?.content || "").trim();
-      // Drop any legacy preset "Store Snapshot:" fallback messages from cached history
+      // Drop any legacy preset "Store Snapshot:" or timeout fallback messages from cached history
       if (
         m?.role === "assistant" &&
-        text.includes("Store Snapshot:") &&
-        text.includes("How can I help with your store?")
+        ((text.includes("Store Snapshot:") && text.includes("How can I help with your store?")) ||
+          (text.includes("I checked your store catalog (") &&
+            text.includes("Please rephrase or try your command again.")))
       ) {
         continue;
       }
+      const rawAtts = Array.isArray(m?.attachments) ? m.attachments : undefined;
+      const validAtts = rawAtts
+        ? rawAtts
+            .map((a: any) => {
+              let b64 = String(a?.dataBase64 || "");
+              const mime = String(a?.mimeType || "image/jpeg");
+              let previewUrl = String(a?.previewUrl || "");
+              if (!b64 && previewUrl.startsWith("data:") && previewUrl.includes(",")) {
+                b64 = previewUrl.slice(previewUrl.indexOf(",") + 1);
+              }
+              // Reconstruct persistent data: URL if cached previewUrl was a session-only blob: URL
+              if ((!previewUrl || previewUrl.startsWith("blob:")) && b64) {
+                previewUrl = `data:${mime};base64,${b64}`;
+              }
+              return {
+                ...a,
+                mimeType: mime,
+                dataBase64: b64,
+                previewUrl,
+              };
+            })
+            .filter((a: any) => a.previewUrl && !a.previewUrl.startsWith("blob:"))
+        : undefined;
+
+      if (!text && (!validAtts || validAtts.length === 0)) {
+        continue;
+      }
+
       filtered.push({
         ...m,
+        ...(validAtts && validAtts.length > 0 ? { attachments: validAtts } : { attachments: undefined }),
         action: m.action ? validateClientAction(m.action, "", text) : null,
       });
     }
@@ -491,13 +539,57 @@ export function AdminAIAssistant({
     setMessages([]);
   }, [currentAccountKey]);
 
-  // Persist non-streaming messages to localStorage (capped at last 40 turns)
+  // Persist non-streaming messages to localStorage (keeping compressed media on recent turns so images stay clickable & in AI memory)
   useEffect(() => {
     if (!currentAccountKey) return;
     try {
-      const nonStreaming = messages.filter((m) => !m.isStreaming).slice(-40);
+      const nonStreaming = messages.filter((m) => !m.isStreaming).slice(-30);
       if (nonStreaming.length > 0) {
-        localStorage.setItem(currentAccountKey, JSON.stringify(nonStreaming));
+        // Keep base64/dataUrl on the most recent 4 messages with attachments; strip heavy buffers on older ones
+        let mediaMsgsKept = 0;
+        const keepIds = new Set<string>();
+        for (let i = nonStreaming.length - 1; i >= 0; i--) {
+          if (nonStreaming[i].attachments && nonStreaming[i].attachments!.length > 0) {
+            if (mediaMsgsKept < 4) {
+              keepIds.add(nonStreaming[i].id);
+              mediaMsgsKept++;
+            }
+          }
+        }
+        const forStorage = nonStreaming.map((m) => {
+          if (!m.attachments || m.attachments.length === 0) return m;
+          if (keepIds.has(m.id)) {
+            return {
+              ...m,
+              attachments: m.attachments.map((a) => ({
+                ...a,
+                // Avoid storing duplicate base64 when previewUrl is already a data: URL
+                dataBase64: a.previewUrl?.startsWith("data:") ? "" : a.dataBase64,
+              })),
+            };
+          }
+          return {
+            ...m,
+            attachments: m.attachments.map((a) => ({
+              ...a,
+              dataBase64: "",
+            })),
+          };
+        });
+        try {
+          localStorage.setItem(currentAccountKey, JSON.stringify(forStorage));
+        } catch {
+          // Quota fallback: strip base64 from storage copy if browser storage is nearly full
+          const lightCopy = nonStreaming.map((m) =>
+            m.attachments
+              ? {
+                  ...m,
+                  attachments: m.attachments.map((a) => ({ ...a, dataBase64: "" })),
+                }
+              : m
+          );
+          localStorage.setItem(currentAccountKey, JSON.stringify(lightCopy));
+        }
       } else {
         localStorage.removeItem(currentAccountKey);
       }
@@ -512,13 +604,39 @@ export function AdminAIAssistant({
   const [synthesizingId, setSynthesizingId] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [previewLightbox, setPreviewLightbox] = useState<{
+    attachments: ChatAttachment[];
+    index: number;
+  } | null>(null);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [executingActionId, setExecutingActionId] = useState<string | null>(null);
   const [expandedThoughts, setExpandedThoughts] = useState<Record<string, boolean>>({});
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
 
+  // Multi-image & multi-video inline composer attachments
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
+  const [isPreparingAttachments, setIsPreparingAttachments] = useState(false);
+  const mediaFileInputRef = useRef<HTMLInputElement>(null);
+
+  const isAiBusy = useMemo(
+    () =>
+      loading ||
+      isTranscribing ||
+      isPreparingAttachments ||
+      messages.some((m) => Boolean(m.isStreaming)),
+    [loading, isTranscribing, isPreparingAttachments, messages]
+  );
+
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setPreviewLightbox(null);
+      return;
+    }
+    wakeUpBuzzServer();
+    const keepWarmInterval = window.setInterval(() => {
+      wakeUpBuzzServer();
+    }, 25000);
+
     const baselineHeight = window.screen?.height
       ? Math.min(window.innerHeight, window.screen.height)
       : window.innerHeight;
@@ -540,10 +658,43 @@ export function AdminAIAssistant({
     window.visualViewport?.addEventListener("resize", handleViewportResize);
     window.addEventListener("nativeKeyboardStateChanged", handleNativeKeyboard);
     return () => {
+      window.clearInterval(keepWarmInterval);
       window.visualViewport?.removeEventListener("resize", handleViewportResize);
       window.removeEventListener("nativeKeyboardStateChanged", handleNativeKeyboard);
     };
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!previewLightbox) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setPreviewLightbox(null);
+      } else if (e.key === "ArrowLeft" && previewLightbox.attachments.length > 1) {
+        e.preventDefault();
+        setPreviewLightbox((prev) =>
+          prev
+            ? {
+                ...prev,
+                index: (prev.index - 1 + prev.attachments.length) % prev.attachments.length,
+              }
+            : null
+        );
+      } else if (e.key === "ArrowRight" && previewLightbox.attachments.length > 1) {
+        e.preventDefault();
+        setPreviewLightbox((prev) =>
+          prev
+            ? {
+                ...prev,
+                index: (prev.index + 1) % prev.attachments.length,
+              }
+            : null
+        );
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [previewLightbox]);
 
   const toggleThought = (id: string) => {
     triggerHaptic("light");
@@ -553,7 +704,217 @@ export function AdminAIAssistant({
     }));
   };
 
+  const [expandedMessages, setExpandedMessages] = useState<Record<string, boolean>>({});
+  const toggleExpandMessage = (id: string) => {
+    triggerHaptic("light");
+    setExpandedMessages((prev) => ({
+      ...prev,
+      [id]: !prev[id],
+    }));
+  };
+
+  const [quotedText, setQuotedText] = useState<string>("");
+  const [selectionPopup, setSelectionPopup] = useState<{
+    text: string;
+    x: number;
+    y: number;
+    placement: "top" | "bottom";
+    copied?: boolean;
+  } | null>(null);
+  const selectionToolbarRef = useRef<HTMLDivElement | null>(null);
+
   const chatContainerRef = useRef<HTMLDivElement>(null);
+
+  // Detect text selection inside chat messages to offer "Quote" and "Copy" options
+  useEffect(() => {
+    if (!isOpen) {
+      setSelectionPopup(null);
+      return;
+    }
+
+    let isPointerDown = false;
+    let settleTimer: number | null = null;
+
+    const clearSettleTimer = () => {
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+        settleTimer = null;
+      }
+    };
+
+    const evaluateSelection = () => {
+      if (typeof window === "undefined" || isPointerDown) return;
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
+        setSelectionPopup((prev) => (prev?.copied ? prev : null));
+        return;
+      }
+
+      const rawText = sel.toString().trim();
+      if (!rawText) {
+        setSelectionPopup((prev) => (prev?.copied ? prev : null));
+        return;
+      }
+
+      const container = chatContainerRef.current;
+      if (!container) return;
+
+      const anchorNode = sel.anchorNode;
+      const focusNode = sel.focusNode;
+      if (
+        !anchorNode ||
+        !focusNode ||
+        !container.contains(anchorNode) ||
+        !container.contains(focusNode)
+      ) {
+        setSelectionPopup(null);
+        return;
+      }
+
+      try {
+        const range = sel.getRangeAt(0);
+        const rect = range.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return;
+
+        const containerRect = container.getBoundingClientRect();
+        const vw = window.innerWidth || 360;
+        const toolbarHalfWidth = 88;
+        const minX = Math.max(toolbarHalfWidth + 8, containerRect.left + toolbarHalfWidth + 6);
+        const maxX = Math.min(vw - toolbarHalfWidth - 8, containerRect.right - toolbarHalfWidth - 6);
+        const rawCenterX = rect.left + rect.width / 2;
+        const clampedX = minX <= maxX ? Math.max(minX, Math.min(maxX, rawCenterX)) : vw / 2;
+
+        const showAbove = rect.top - containerRect.top > 52 && rect.top > 68;
+        const posY = showAbove ? rect.top - 10 : rect.bottom + 10;
+
+        setSelectionPopup({
+          text: rawText.slice(0, 800),
+          x: clampedX,
+          y: posY,
+          placement: showAbove ? "top" : "bottom",
+          copied: false,
+        });
+      } catch {
+        // Ignore transient selection range errors
+      }
+    };
+
+    const isInsideToolbar = (target: EventTarget | null) =>
+      Boolean(
+        selectionToolbarRef.current &&
+          target instanceof Node &&
+          selectionToolbarRef.current.contains(target)
+      );
+
+    const handlePointerDown = (e: Event) => {
+      if (isInsideToolbar(e.target)) return;
+      isPointerDown = true;
+      clearSettleTimer();
+      setSelectionPopup(null);
+    };
+
+    const handlePointerUp = (e: Event) => {
+      if (isInsideToolbar(e.target)) return;
+      isPointerDown = false;
+      clearSettleTimer();
+      settleTimer = window.setTimeout(() => {
+        evaluateSelection();
+      }, 90);
+    };
+
+    const handleSelectionChange = () => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+        clearSettleTimer();
+        setSelectionPopup((prev) => (prev?.copied ? prev : null));
+        return;
+      }
+      // Never show or move the popup while the user is actively dragging/selecting
+      if (isPointerDown) {
+        setSelectionPopup(null);
+        return;
+      }
+      // If selection handles are adjusted on touch after finger release, wait until stationary
+      clearSettleTimer();
+      settleTimer = window.setTimeout(() => {
+        if (!isPointerDown) {
+          evaluateSelection();
+        }
+      }, 360);
+    };
+
+    const handleScrollOrResize = () => {
+      clearSettleTimer();
+      setSelectionPopup(null);
+    };
+
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("mousedown", handlePointerDown, true);
+    document.addEventListener("touchstart", handlePointerDown, { passive: true, capture: true });
+    document.addEventListener("pointerup", handlePointerUp, true);
+    document.addEventListener("mouseup", handlePointerUp, true);
+    document.addEventListener("touchend", handlePointerUp, { passive: true, capture: true });
+    document.addEventListener("touchcancel", handlePointerUp, { passive: true, capture: true });
+    document.addEventListener("selectionchange", handleSelectionChange);
+    const scrollEl = chatContainerRef.current;
+    scrollEl?.addEventListener("scroll", handleScrollOrResize, { passive: true });
+    window.addEventListener("resize", handleScrollOrResize);
+
+    return () => {
+      clearSettleTimer();
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("mousedown", handlePointerDown, true);
+      document.removeEventListener("touchstart", handlePointerDown, true);
+      document.removeEventListener("pointerup", handlePointerUp, true);
+      document.removeEventListener("mouseup", handlePointerUp, true);
+      document.removeEventListener("touchend", handlePointerUp, true);
+      document.removeEventListener("touchcancel", handlePointerUp, true);
+      document.removeEventListener("selectionchange", handleSelectionChange);
+      scrollEl?.removeEventListener("scroll", handleScrollOrResize);
+      window.removeEventListener("resize", handleScrollOrResize);
+    };
+  }, [isOpen]);
+
+  const handleQuoteSelection = () => {
+    if (!selectionPopup?.text) return;
+    triggerHaptic("light");
+    const picked = selectionPopup.text.trim();
+    setQuotedText(picked);
+    setSelectionPopup(null);
+    try {
+      window.getSelection()?.removeAllRanges();
+    } catch {}
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 30);
+  };
+
+  const handleCopySelection = async () => {
+    if (!selectionPopup?.text) return;
+    triggerHaptic("light");
+    const textToCopy = selectionPopup.text;
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(textToCopy);
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = textToCopy;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+    } catch {}
+    setSelectionPopup((prev) => (prev ? { ...prev, copied: true } : null));
+    setTimeout(() => {
+      setSelectionPopup(null);
+      try {
+        window.getSelection()?.removeAllRanges();
+      } catch {}
+    }, 550);
+  };
   const isNearBottomRef = useRef<boolean>(true);
   const isUserScrollingRef = useRef<boolean>(false);
   const scrollTimeoutRef = useRef<any>(null);
@@ -597,7 +958,7 @@ export function AdminAIAssistant({
     }
   };
 
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recognitionRef = useRef<any>(null);
   const baseInputRef = useRef("");
@@ -1116,6 +1477,13 @@ export function AdminAIAssistant({
       clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = null;
     }
+    const hadActiveMediaRecorder =
+      Boolean(mediaRecorderRef.current) &&
+      mediaRecorderRef.current?.state !== "inactive";
+    if (hadActiveMediaRecorder && !recordingCancelledRef.current) {
+      // Lock composer into transcribing state BEFORE setting isRecording=false so there is zero frame gap
+      setIsTranscribing(true);
+    }
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       try {
         if (mediaRecorderRef.current.state === "recording") {
@@ -1138,14 +1506,17 @@ export function AdminAIAssistant({
     recordingCancelledRef.current = true;
     latestSpokenTextRef.current = "";
     audioChunksRef.current = [];
+    setIsTranscribing(false);
     setInput(baseInputRef.current || "");
     stopRecording();
   };
 
   // Toggle voice recording using Web Speech API with MediaRecorder fallback
   const toggleListening = async () => {
+    if (isAiBusy && !isRecording) return;
     triggerHaptic("medium");
     setErrorMessage("");
+    inputRef.current?.blur();
 
     // If currently recording, stop it immediately
     if (isRecording) {
@@ -1241,9 +1612,11 @@ export function AdminAIAssistant({
             streamRef.current.getTracks().forEach((track) => track.stop());
             streamRef.current = null;
           }
-          setIsRecording(false);
           if (event.error !== "no-speech" && event.error !== "aborted") {
+            // Keep isRecording true while transitioning to MediaRecorder fallback
             startMediaRecorderFallback();
+          } else {
+            setIsRecording(false);
           }
         };
 
@@ -1267,12 +1640,12 @@ export function AdminAIAssistant({
           const spoken = latestSpokenTextRef.current.trim();
           latestSpokenTextRef.current = "";
           if (spoken) {
+            inputRef.current?.blur();
             handleSendMessage(spoken);
-          } else {
-            inputRef.current?.focus();
           }
         };
 
+        setIsRecording(true);
         recognition.start();
         return;
       } catch (err: any) {
@@ -1329,6 +1702,7 @@ export function AdminAIAssistant({
         if (recordingCancelledRef.current) {
           recordingCancelledRef.current = false;
           audioChunksRef.current = [];
+          setIsTranscribing(false);
           return;
         }
         const audioBlob = new Blob(audioChunksRef.current, {
@@ -1336,6 +1710,7 @@ export function AdminAIAssistant({
         });
 
         if (audioBlob.size < 100) {
+          setIsTranscribing(false);
           setErrorMessage("Voice note was too short. Please hold or tap the mic and speak clearly.");
           return;
         }
@@ -1353,11 +1728,14 @@ export function AdminAIAssistant({
               : transcript.trim();
             baseInputRef.current = "";
             setInput("");
-            handleSendMessage(combined);
+            setIsTranscribing(false);
+            await handleSendMessage(combined);
           } else {
+            setIsTranscribing(false);
             setErrorMessage("Could not hear speech clearly. Please try speaking again.");
           }
         } catch (err: any) {
+          setIsTranscribing(false);
           console.warn("Transcription fallback notice:", err);
           const rawMsg = String(err?.message || "");
           const friendlyMsg =
@@ -1366,8 +1744,6 @@ export function AdminAIAssistant({
               : rawMsg || "Could not transcribe voice note. Please try again.";
           setErrorMessage(friendlyMsg);
           triggerHaptic("heavy");
-        } finally {
-          setIsTranscribing(false);
         }
       };
 
@@ -1434,21 +1810,38 @@ export function AdminAIAssistant({
     try {
       window.speechSynthesis.cancel();
       const utterance = new SpeechSynthesisUtterance(speechReadyText);
+      const hasBengali = /[\u0980-\u09FF]/.test(speechReadyText);
+      const hasHindi = /[\u0900-\u097F]/.test(speechReadyText);
       const voices = window.speechSynthesis.getVoices();
-      const preferredVoice =
-        voices.find(
-          (v) =>
-            v.lang.startsWith("en") &&
-            (v.name.includes("Natural") ||
-              v.name.includes("Online") ||
-              v.name.includes("Google UK English Female") ||
-              v.name.includes("Google US English") ||
-              v.name.includes("Samantha") ||
-              v.name.includes("Aria") ||
-              v.name.includes("Zira"))
-        ) ||
-        voices.find((v) => v.lang.startsWith("en-IN") || v.lang.startsWith("en-GB") || v.lang.startsWith("en-US")) ||
-        voices.find((v) => v.lang.startsWith("en"));
+
+      let preferredVoice: SpeechSynthesisVoice | undefined;
+      if (hasBengali) {
+        utterance.lang = "bn-IN";
+        preferredVoice =
+          voices.find((v) => v.lang.toLowerCase().startsWith("bn") && (v.name.includes("Natural") || v.name.includes("Google"))) ||
+          voices.find((v) => v.lang.toLowerCase().startsWith("bn"));
+      } else if (hasHindi) {
+        utterance.lang = "hi-IN";
+        preferredVoice =
+          voices.find((v) => v.lang.toLowerCase().startsWith("hi") && (v.name.includes("Natural") || v.name.includes("Google"))) ||
+          voices.find((v) => v.lang.toLowerCase().startsWith("hi"));
+      } else {
+        utterance.lang = "en-IN";
+        preferredVoice =
+          voices.find(
+            (v) =>
+              v.lang.startsWith("en") &&
+              (v.name.includes("Natural") ||
+                v.name.includes("Online") ||
+                v.name.includes("Google UK English Female") ||
+                v.name.includes("Google US English") ||
+                v.name.includes("Samantha") ||
+                v.name.includes("Aria") ||
+                v.name.includes("Zira"))
+          ) ||
+          voices.find((v) => v.lang.startsWith("en-IN") || v.lang.startsWith("en-GB") || v.lang.startsWith("en-US")) ||
+          voices.find((v) => v.lang.startsWith("en"));
+      }
 
       if (preferredVoice) {
         utterance.voice = preferredVoice;
@@ -1557,9 +1950,192 @@ export function AdminAIAssistant({
     setLoading(false);
   };
 
+  const handleMediaFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files: File[] = Array.from(fileList);
+    // Reset input so selecting the same file(s) again still triggers onChange
+    e.target.value = "";
+
+    setErrorMessage("");
+    setIsPreparingAttachments(true);
+    triggerHaptic("light");
+
+    try {
+      const added: ChatAttachment[] = [];
+      for (const file of files) {
+        const rawMime = (file.type || "").trim().toLowerCase();
+        const ext = (file.name.split(".").pop() || "").toLowerCase();
+        let mimeType = rawMime;
+        if (!mimeType) {
+          if (["mp4", "m4v"].includes(ext)) mimeType = "video/mp4";
+          else if (ext === "webm") mimeType = "video/webm";
+          else if (ext === "mov") mimeType = "video/quicktime";
+          else if (ext === "png") mimeType = "image/png";
+          else if (ext === "webp") mimeType = "image/webp";
+          else if (["jpg", "jpeg"].includes(ext)) mimeType = "image/jpeg";
+        }
+
+        const isVideo = mimeType.startsWith("video/");
+        const isImage = mimeType.startsWith("image/");
+        if (!isVideo && !isImage) {
+          setErrorMessage(`Unsupported file "${file.name}". Please select images or videos.`);
+          continue;
+        }
+
+        if (file.size > 32 * 1024 * 1024) {
+          setErrorMessage(`"${file.name}" exceeds the 32 MB limit.`);
+          continue;
+        }
+
+        if (isImage) {
+          let compressed = await compressImageFileForChat(
+            file,
+            files.length > 1 ? 600 : 720,
+            0.7
+          );
+          if (compressed.dataBase64.length > 140000) {
+            compressed = await compressImageFileForChat(file, 520, 0.62);
+          }
+          added.push({
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: file.name,
+            mimeType: compressed.mimeType,
+            kind: "image",
+            dataBase64: compressed.dataBase64,
+            previewUrl: compressed.previewUrl,
+            size: file.size,
+          });
+        } else {
+          const dataBase64 = await blobToBase64Chunked(file);
+          const previewUrl = URL.createObjectURL(file);
+          added.push({
+            id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+            name: file.name,
+            mimeType,
+            kind: "video",
+            dataBase64,
+            previewUrl,
+            size: file.size,
+          });
+        }
+      }
+
+      if (added.length > 0) {
+        setPendingAttachments((prev) => [...prev, ...added].slice(0, 8));
+        triggerHaptic("success");
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || "Could not attach selected file(s).");
+    } finally {
+      setIsPreparingAttachments(false);
+    }
+  };
+
+  const handleRemovePendingAttachment = (attId: string) => {
+    triggerHaptic("light");
+    setPendingAttachments((prev) => prev.filter((a) => a.id !== attId));
+  };
+
+  const resolveUploadedImageForAction = (
+    rawAction: AssistantAction | null | undefined,
+    currentTurnAttachments: ChatAttachment[],
+    historyMessages: ChatMessage[],
+    rawUserPrompt: string
+  ): AssistantAction | null => {
+    if (!rawAction) return null;
+    const action: AssistantAction = { ...rawAction };
+
+    const toDataUrl = (att: ChatAttachment): string => {
+      if (att.previewUrl && att.previewUrl.startsWith("data:image/")) {
+        return att.previewUrl;
+      }
+      if (att.dataBase64) {
+        return `data:${att.mimeType || "image/jpeg"};base64,${att.dataBase64}`;
+      }
+      return att.previewUrl || "";
+    };
+
+    const currentImages = (currentTurnAttachments || [])
+      .filter((a) => a && a.kind === "image")
+      .map(toDataUrl)
+      .filter(Boolean);
+
+    const historyImages: string[] = [];
+    for (let i = historyMessages.length - 1; i >= 0; i--) {
+      const m = historyMessages[i];
+      if (m.role === "user" && Array.isArray(m.attachments) && m.attachments.length > 0) {
+        const imgs = m.attachments
+          .filter((a) => a && a.kind === "image")
+          .map(toDataUrl)
+          .filter(Boolean);
+        if (imgs.length > 0) {
+          historyImages.push(...imgs);
+          break;
+        }
+      }
+    }
+
+    const availableImages = currentImages.length > 0 ? currentImages : historyImages;
+    if (availableImages.length === 0) return action;
+
+    const requestedIdx =
+      typeof action.attachmentIndex === "number" && action.attachmentIndex >= 0
+        ? Math.min(action.attachmentIndex, availableImages.length - 1)
+        : 0;
+    const primaryImage = availableImages[requestedIdx] || availableImages[0];
+
+    if (action.type === "UPDATE_PRODUCT_IMAGE") {
+      action.image = action.image || primaryImage;
+      return action;
+    }
+
+    if (action.type === "ADD_PRODUCT") {
+      const shouldAttach =
+        Boolean(action.useAttachedImage) ||
+        currentImages.length > 0 ||
+        /\b(image|photo|picture|pic|uploaded|attached|use\s+this|use\s+it)\b/i.test(rawUserPrompt);
+
+      if (shouldAttach && primaryImage) {
+        action.useAttachedImage = true;
+        action.image = action.image || primaryImage;
+        if (Array.isArray(action.products) && action.products.length > 0) {
+          action.products = action.products.map((item, idx) => {
+            const itemImgIdx =
+              typeof item.attachmentIndex === "number" && item.attachmentIndex >= 0
+                ? Math.min(item.attachmentIndex, availableImages.length - 1)
+                : Math.min(idx, availableImages.length - 1);
+            return {
+              ...item,
+              image: item.image || availableImages[itemImgIdx] || primaryImage,
+            };
+          });
+        }
+      }
+    }
+
+    return action;
+  };
+
   const handleSendMessage = async (textToSend?: string) => {
-    const promptText = (textToSend || input).trim();
-    if (!promptText) return;
+    const rawPrompt = (textToSend !== undefined ? textToSend : input).trim();
+    const attachmentsToSend = textToSend !== undefined ? [] : [...pendingAttachments];
+    const activeQuote = textToSend !== undefined ? "" : quotedText.trim();
+    if (!rawPrompt && attachmentsToSend.length === 0 && !activeQuote) return;
+
+    const baseQuestion =
+      rawPrompt ||
+      (activeQuote
+        ? "What does this mean? Please explain clearly."
+        : `Analyze the attached ${
+            attachmentsToSend.length === 1
+              ? attachmentsToSend[0].kind
+              : `${attachmentsToSend.length} media files`
+          } and extract any text or details.`);
+
+    const promptText = activeQuote
+      ? `Regarding this quoted text from our chat: "${activeQuote}"\n\n${baseQuestion}`
+      : baseQuestion;
 
     // If a previous request was still winding down when the user sends a new message,
     // cleanly abort it instead of silently dropping the user's new message!
@@ -1584,32 +2160,62 @@ export function AdminAIAssistant({
     // Ensure any previous speech playback is stopped when sending a new message
     stopAllSpeechPlayback();
 
-    const lowerPrompt = promptText.toLowerCase();
+    const lowerPrompt = rawPrompt.toLowerCase();
     if (
-      lowerPrompt.includes("delete the whole context") ||
-      lowerPrompt.includes("delete whole context") ||
-      lowerPrompt.includes("delete context") ||
-      lowerPrompt.includes("clear context") ||
-      lowerPrompt.includes("clear chat") ||
-      lowerPrompt.includes("delete history") ||
-      lowerPrompt.includes("clear history") ||
-      lowerPrompt.includes("start a new chat") ||
-      lowerPrompt.includes("start new chat") ||
-      lowerPrompt.includes("reset chat")
+      attachmentsToSend.length === 0 &&
+      !activeQuote &&
+      (lowerPrompt.includes("delete the whole context") ||
+        lowerPrompt.includes("delete whole context") ||
+        lowerPrompt.includes("delete context") ||
+        lowerPrompt.includes("clear context") ||
+        lowerPrompt.includes("clear chat") ||
+        lowerPrompt.includes("delete history") ||
+        lowerPrompt.includes("clear history") ||
+        lowerPrompt.includes("start a new chat") ||
+        lowerPrompt.includes("start new chat") ||
+        lowerPrompt.includes("reset chat"))
     ) {
       handleClearHistory();
       return;
     }
 
     triggerHaptic("medium");
+    inputRef.current?.blur();
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
     setInput("");
+    if (activeQuote) {
+      setQuotedText("");
+    }
+    if (attachmentsToSend.length > 0) {
+      setPendingAttachments([]);
+    }
     setErrorMessage("");
+
+    // Preserve compressed base64 & persistent data URL on chat attachments so:
+    // 1. Clicking any uploaded image always opens the full-screen lightbox viewer
+    // 2. Follow-up questions ("what was in the image?") include the image in conversationHistory
+    const uiAttachments =
+      attachmentsToSend.length > 0
+        ? attachmentsToSend.map((a) => ({
+            ...a,
+            previewUrl:
+              a.previewUrl && !a.previewUrl.startsWith("blob:")
+                ? a.previewUrl
+                : a.dataBase64 && a.kind === "image"
+                ? `data:${a.mimeType || "image/jpeg"};base64,${a.dataBase64}`
+                : a.previewUrl,
+          }))
+        : undefined;
 
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: "user",
-      content: promptText,
+      content: rawPrompt || (activeQuote ? "What does this mean?" : ""),
       timestamp: Date.now(),
+      ...(activeQuote ? { quotedText: activeQuote } : {}),
+      ...(uiAttachments ? { attachments: uiAttachments } : {}),
     };
 
     const sendStartTime = Date.now();
@@ -1655,9 +2261,10 @@ export function AdminAIAssistant({
     setTimeout(() => scrollToBottom(true), 10);
 
     let watchdogSettled = false;
+    let firstTokenTime = 0;
     const stopwatchTimer = window.setInterval(() => {
-      if (watchdogSettled || abortController.signal.aborted) return;
-      const elapsedSec = Math.max(1, Math.floor((Date.now() - sendStartTime) / 1000) + 1);
+      if (watchdogSettled || firstTokenTime > 0 || abortController.signal.aborted) return;
+      const elapsedSec = Math.max(1, Math.floor((Date.now() - sendStartTime) / 1000));
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMsgId && msg.isStreaming
@@ -1665,59 +2272,113 @@ export function AdminAIAssistant({
             : msg
         )
       );
-    }, 1000);
+    }, 500);
     activeStopwatchRef.current = stopwatchTimer;
 
-    const watchdogTimer = window.setTimeout(() => {
+    const watchdogMs = 60000;
+    const handleWatchdogExpire = () => {
       if (watchdogSettled || abortController.signal.aborted) return;
       watchdogSettled = true;
       window.clearInterval(stopwatchTimer);
       activeStopwatchRef.current = null;
       activeWatchdogRef.current = null;
       activeAssistantMsgIdRef.current = null;
-      const duration = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
-      const fallbackLocal = generateClientStoreResponse(promptText, storeContext, []);
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === assistantMsgId
-            ? {
-                ...msg,
-                content:
-                  msg.content?.trim() ||
-                  fallbackLocal.reply ||
-                  `I checked your store catalog (${storeContext.products?.length || 0} products, ₹${Number(storeContext.totalRevenueToday || 0).toLocaleString("en-IN")} sales today). Please rephrase or try your command again.`,
-                action: msg.action || fallbackLocal.action || null,
-                isStreaming: false,
-                thoughtDuration: duration,
-              }
-            : msg
-        )
+      const duration = Math.max(
+        1,
+        Math.floor(((firstTokenTime || Date.now()) - sendStartTime) / 1000)
       );
+      let hadPartialContent = false;
+      setMessages((prev) => {
+        const target = prev.find((msg) => msg.id === assistantMsgId);
+        if (target?.content?.trim()) {
+          hadPartialContent = true;
+          return prev.map((msg) =>
+            msg.id === assistantMsgId
+              ? {
+                  ...msg,
+                  isStreaming: false,
+                  thoughtDuration: duration,
+                }
+              : msg
+          );
+        }
+        return prev.filter((msg) => msg.id !== assistantMsgId);
+      });
+      if (!hadPartialContent) {
+        setErrorMessage(
+          "Buzz AI is taking longer than expected to process this request. Please try again."
+        );
+        triggerHaptic("error");
+      }
       setLoading(false);
-      triggerHaptic("light");
       scrollToBottom(false);
-    }, 18000);
+    };
+    let watchdogTimer = window.setTimeout(handleWatchdogExpire, watchdogMs);
     activeWatchdogRef.current = watchdogTimer;
 
     try {
-      const historyPayload = cleanedPrevMessages
+      const historyPayload: ConversationTurnInput[] = cleanedPrevMessages
         .filter(
           (m) =>
             m.id !== "welcome-system-msg" &&
             m.id !== "welcome" &&
-            m.content?.trim() &&
+            (Boolean(m.content?.trim()) ||
+              (Array.isArray(m.attachments) && m.attachments.length > 0)) &&
             m.content !== "*(Response stopped)*" &&
             !(
               m.role === "assistant" &&
               m.content.includes("Store Snapshot:") &&
               m.content.includes("How can I help with your store?")
+            ) &&
+            !(
+              m.role === "assistant" &&
+              m.content.includes("I checked your store catalog (") &&
+              m.content.includes("Please rephrase or try your command again.")
             )
         )
-        .slice(-8)
-        .map((m) => ({
-          role: m.role,
-          content: m.content,
-        }));
+        .slice(-6)
+        .map((m, idx, arr) => {
+          const promptAsksAboutMedia =
+            attachmentsToSend.length === 0 &&
+            /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|product|use\s+this|use\s+it)\b/i.test(
+              promptText
+            );
+          const isRecentWithMedia =
+            promptAsksAboutMedia &&
+            m.role === "user" &&
+            Array.isArray(m.attachments) &&
+            m.attachments.length > 0 &&
+            arr.length - idx <= 3;
+          const turnAttachments = isRecentWithMedia
+            ? m.attachments!
+                .map((a) => {
+                  const b64 =
+                    a.dataBase64 ||
+                    (a.previewUrl?.startsWith("data:")
+                      ? a.previewUrl.slice(a.previewUrl.indexOf(",") + 1)
+                      : "");
+                  return {
+                    name: a.name,
+                    mimeType: a.mimeType || "image/jpeg",
+                    kind: a.kind,
+                    data: b64,
+                  };
+                })
+                .filter((a) => Boolean(a.data))
+            : undefined;
+
+          return {
+            role: m.role,
+            content:
+              m.content?.trim() ||
+              (m.attachments?.length
+                ? `[User attached ${m.attachments.length} ${m.attachments.map((a) => a.kind).join(", ")}]`
+                : ""),
+            ...(turnAttachments && turnAttachments.length > 0
+              ? { attachments: turnAttachments }
+              : {}),
+          };
+        });
 
       await askGeminiAssistantStream(
         promptText,
@@ -1725,7 +2386,17 @@ export function AdminAIAssistant({
         storeContext,
         (cleanChunkText) => {
           if (watchdogSettled || abortController.signal.aborted) return;
-          const elapsedSec = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
+          window.clearTimeout(watchdogTimer);
+          watchdogTimer = window.setTimeout(handleWatchdogExpire, watchdogMs);
+          activeWatchdogRef.current = watchdogTimer;
+          if (!firstTokenTime && cleanChunkText) {
+            firstTokenTime = Date.now();
+            window.clearInterval(stopwatchTimer);
+          }
+          const elapsedSec = Math.max(
+            1,
+            Math.floor(((firstTokenTime || Date.now()) - sendStartTime) / 1000)
+          );
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantMsgId
@@ -1733,7 +2404,7 @@ export function AdminAIAssistant({
                     ...msg,
                     content: cleanChunkText || msg.content,
                     isStreaming: true,
-                    thoughtDuration: Math.max(msg.thoughtDuration || 1, elapsedSec),
+                    thoughtDuration: elapsedSec,
                   }
                 : msg
             )
@@ -1743,6 +2414,9 @@ export function AdminAIAssistant({
         (finalPayload) => {
           if (watchdogSettled || abortController.signal.aborted) return;
           watchdogSettled = true;
+          if (!firstTokenTime) {
+            firstTokenTime = Date.now();
+          }
           window.clearTimeout(watchdogTimer);
           window.clearInterval(stopwatchTimer);
           activeStopwatchRef.current = null;
@@ -1750,9 +2424,17 @@ export function AdminAIAssistant({
           activeAssistantMsgIdRef.current = null;
 
           const effectiveReply = String(finalPayload.reply || "").trim();
-          const effectiveAction = finalPayload.action || null;
+          const effectiveAction = resolveUploadedImageForAction(
+            finalPayload.action || null,
+            attachmentsToSend,
+            newHistory,
+            rawPrompt
+          );
 
-          const elapsedSec = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
+          const elapsedSec = Math.max(
+            1,
+            Math.floor(((firstTokenTime || Date.now()) - sendStartTime) / 1000)
+          );
           const authenticThought =
             finalPayload.thought ||
             generateDynamicThought(promptText, effectiveReply, storeContext);
@@ -1765,8 +2447,7 @@ export function AdminAIAssistant({
                     content:
                       effectiveReply ||
                       msg.content?.trim() ||
-                      generateClientStoreResponse(promptText, storeContext, historyPayload).reply ||
-                      "Prepared your requested store update:",
+                      (effectiveAction ? "Prepared your requested store update:" : ""),
                     action: effectiveAction,
                     isStreaming: false,
                     thought: authenticThought,
@@ -1779,10 +2460,11 @@ export function AdminAIAssistant({
           triggerHaptic("light");
           scrollToBottom(false);
         },
-        abortController.signal
+        abortController.signal,
+        attachmentsToSend
       );
 
-      // Safeguard: if askGeminiAssistantStream resolved without triggering onComplete, finalize immediately
+      // Safeguard: if askGeminiAssistantStream resolved without triggering onComplete, finalize any streamed content
       if (!watchdogSettled && !abortController.signal.aborted) {
         watchdogSettled = true;
         window.clearTimeout(watchdogTimer);
@@ -1791,23 +2473,21 @@ export function AdminAIAssistant({
         activeWatchdogRef.current = null;
         activeAssistantMsgIdRef.current = null;
         const elapsedSec = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
-        const fallbackLocal = generateClientStoreResponse(promptText, storeContext, historyPayload);
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantMsgId
-              ? {
-                  ...msg,
-                  content:
-                    msg.content?.trim() ||
-                    fallbackLocal.reply ||
-                    `Your store currently has **${storeContext.products?.length || 0} products** and **₹${Number(storeContext.totalRevenueToday || 0).toLocaleString("en-IN")}** in sales today. How can I help you next?`,
-                  action: msg.action || fallbackLocal.action || null,
-                  isStreaming: false,
-                  thoughtDuration: Math.max(msg.thoughtDuration || 1, elapsedSec),
-                }
-              : msg
-          )
-        );
+        setMessages((prev) => {
+          const target = prev.find((msg) => msg.id === assistantMsgId);
+          if (target?.content?.trim()) {
+            return prev.map((msg) =>
+              msg.id === assistantMsgId
+                ? {
+                    ...msg,
+                    isStreaming: false,
+                    thoughtDuration: Math.max(msg.thoughtDuration || 1, elapsedSec),
+                  }
+                : msg
+            );
+          }
+          return prev.filter((msg) => msg.id !== assistantMsgId);
+        });
         setLoading(false);
         scrollToBottom(false);
       }
@@ -1963,6 +2643,59 @@ export function AdminAIAssistant({
 
         triggerHaptic("success");
         if (onProductUpdated) onProductUpdated();
+      } else if (action.type === "UPDATE_PRODUCT_IMAGE") {
+        let targetId = action.productId;
+        if (!targetId && action.productName) {
+          const s = action.productName.toLowerCase().trim();
+          const matched =
+            products.find((p) => p.name.toLowerCase().trim() === s) ||
+            products.find((p) => p.name.toLowerCase().includes(s));
+          if (matched) targetId = matched.id;
+        }
+
+        if (!targetId) {
+          throw new Error(
+            `Could not locate product "${action.productName || "Unknown"}" in catalog.`
+          );
+        }
+
+        let imageToSave = action.image;
+        if (!imageToSave) {
+          const resolved = resolveUploadedImageForAction(action, [], messages, "");
+          imageToSave = resolved?.image;
+        }
+        if (!imageToSave) {
+          throw new Error(
+            "No uploaded image found in this chat. Please attach an image first and try again."
+          );
+        }
+
+        updateProductOptimistic(targetId, { image: imageToSave });
+        await settleWriteFast(
+          updateDoc(doc(db, "products", targetId), {
+            image: imageToSave,
+            updatedAt: Date.now(),
+          })
+        );
+
+        if (user) {
+          logActivity(
+            "stock_modification",
+            `AI Assistant updated product photo for "${action.productName || targetId}" using uploaded image`,
+            user.uid,
+            user.displayName || "Admin",
+            user.email || ""
+          ).catch(() => {});
+        }
+
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === messageId ? { ...msg, actionApplied: true } : msg
+          )
+        );
+
+        triggerHaptic("success");
+        if (onProductUpdated) onProductUpdated();
       } else if (action.type === "ADD_PRODUCT") {
         const itemsToCreate =
           Array.isArray(action.products) && action.products.length > 0
@@ -1974,6 +2707,7 @@ export function AdminAIAssistant({
                   price: Number(action.price) || 0,
                   stock: Number(action.stock) || 0,
                   category: normalizeProductCategory(action.category, action.name),
+                  ...(action.image ? { image: action.image } : {}),
                 },
               ]
             : [];
@@ -1995,7 +2729,8 @@ export function AdminAIAssistant({
         for (const item of itemsToCreate) {
           const newDocRef = doc(collection(db, "products"));
           const cleanItemName = String(item.name).trim();
-          const newProdPayload = {
+          const itemImage = item.image || action.image;
+          const newProdPayload: Record<string, any> = {
             name: cleanItemName,
             price: Math.min(10000, Math.max(0, Number(item.price) || 0)),
             stock: Math.min(2000, Math.max(0, Number(item.stock) || 0)),
@@ -2005,9 +2740,10 @@ export function AdminAIAssistant({
             ),
             createdAt: Date.now(),
             soldCount: 0,
+            ...(itemImage ? { image: itemImage } : {}),
           };
 
-          addProductOptimistic({ ...newProdPayload, id: newDocRef.id });
+          addProductOptimistic({ ...(newProdPayload as any), id: newDocRef.id });
           writePromises.push(setDoc(newDocRef, newProdPayload));
         }
 
@@ -2350,15 +3086,78 @@ export function AdminAIAssistant({
   const handleClearHistory = () => {
     triggerHaptic("medium");
     stopAllSpeechPlayback();
+
+    if (abortControllerRef.current) {
+      try {
+        abortControllerRef.current.abort();
+      } catch {}
+      abortControllerRef.current = null;
+    }
+    if (activeStopwatchRef.current !== null) {
+      window.clearInterval(activeStopwatchRef.current);
+      activeStopwatchRef.current = null;
+    }
+    if (activeWatchdogRef.current !== null) {
+      window.clearTimeout(activeWatchdogRef.current);
+      activeWatchdogRef.current = null;
+    }
+    activeAssistantMsgIdRef.current = null;
+    setLoading(false);
+
+    // Revoke any in-memory blob URLs from messages and pending attachments
+    try {
+      for (const m of messages) {
+        for (const a of m.attachments || []) {
+          if (a.previewUrl && a.previewUrl.startsWith("blob:")) {
+            URL.revokeObjectURL(a.previewUrl);
+          }
+        }
+      }
+      for (const a of pendingAttachments) {
+        if (a.previewUrl && a.previewUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(a.previewUrl);
+        }
+      }
+    } catch {}
+
+    // Clear all localStorage keys for this chat & any cached media
     try {
       localStorage.removeItem(currentAccountKey);
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && (k.startsWith("buzz_ai_chat_") || k.startsWith("buzz_chat_media_"))) {
+          keysToRemove.push(k);
+        }
+      }
+      keysToRemove.forEach((k) => localStorage.removeItem(k));
     } catch (e) {}
+
+    // Delete any temporary AI RPC or media documents from Firestore settings collection & backend
+    getDocs(collection(db, "settings"))
+      .then((snap) => {
+        snap.forEach((docSnap) => {
+          const id = docSnap.id;
+          if (
+            id.startsWith("ai_rpc_req_") ||
+            id.startsWith("chat_media_") ||
+            id.startsWith("buzz_chat_")
+          ) {
+            deleteDoc(doc(db, "settings", id)).catch(() => {});
+          }
+        });
+      })
+      .catch(() => {});
+    purgeChatMediaFromDatabase().catch(() => {});
+
+    setPendingAttachments([]);
+    setPreviewLightbox(null);
     setMessages([]);
     setInput("");
     setErrorMessage("");
     triggerHaptic("success");
-    setClearToastMessage("New chat started");
-    setTimeout(() => setClearToastMessage(""), 2400);
+    setClearToastMessage("New chat started · Uploaded media deleted");
+    setTimeout(() => setClearToastMessage(""), 2600);
   };
 
   const handleCopyText = (id: string, text: string) => {
@@ -2409,6 +3208,14 @@ export function AdminAIAssistant({
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
+                <input
+                  ref={mediaFileInputRef}
+                  type="file"
+                  accept="image/*,video/*"
+                  multiple
+                  onChange={handleMediaFileSelect}
+                  className="hidden"
+                />
                 <motion.button
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.94 }}
@@ -2478,25 +3285,249 @@ export function AdminAIAssistant({
               const isUser = msg.role === "user";
 
               if (isUser) {
+                const hasMedia = Boolean(msg.attachments && msg.attachments.length > 0);
+                const hasText = Boolean(msg.content && msg.content.trim().length > 0);
+                const attCount = msg.attachments?.length || 0;
+                const formattedTime = new Date(msg.timestamp).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                });
+
                 return (
                   <motion.div
                     key={msg.id}
-                    initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                    initial={{ opacity: 0, y: 14, scale: 0.96 }}
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     transition={{ type: "spring", stiffness: 480, damping: 32, mass: 0.65 }}
-                    className="flex justify-end origin-bottom-right"
+                    className="flex flex-col items-end gap-1.5 origin-bottom-right"
                   >
-                    <div className="w-fit max-w-[85%] sm:max-w-[72%] rounded-2xl rounded-br-xs px-4 py-2.5 sm:px-4.5 sm:py-2.5 bg-gradient-to-r from-indigo-600 via-indigo-600 to-indigo-700 text-white shadow-md shadow-indigo-500/20 dark:shadow-lg dark:shadow-indigo-950/25 border border-indigo-400/30 break-words [overflow-wrap:break-word] min-w-0">
-                      <div className="text-xs sm:text-sm leading-relaxed whitespace-pre-wrap font-medium break-words [overflow-wrap:break-word]">
-                        {msg.content}
+                    {hasMedia && msg.attachments && (
+                      <div
+                        className={`relative group/collage overflow-hidden transition-all ${
+                          attCount === 1
+                            ? "max-w-[235px] sm:max-w-[275px] rounded-[22px] p-1 bg-white/90 dark:bg-slate-900/90 border border-slate-200/80 dark:border-white/12 shadow-lg shadow-indigo-950/15"
+                            : "w-[252px] sm:w-[292px] rounded-[22px] p-1.5 bg-white/90 dark:bg-slate-900/90 border border-slate-200/80 dark:border-white/12 shadow-lg shadow-indigo-950/15"
+                        }`}
+                      >
+                        <div
+                          className={`grid gap-1.5 ${
+                            attCount === 1 ? "grid-cols-1" : "grid-cols-2"
+                          }`}
+                        >
+                          {msg.attachments.map((att, attIdx) => {
+                            const isThreeHero = attCount === 3 && attIdx === 0;
+                            const resolvedSrc =
+                              att.previewUrl ||
+                              (att.dataBase64
+                                ? `data:${att.mimeType || "image/jpeg"};base64,${att.dataBase64}`
+                                : "");
+                            return (
+                              <motion.div
+                                key={att.id}
+                                role="button"
+                                tabIndex={0}
+                                whileHover={{ scale: 0.985 }}
+                                whileTap={{ scale: 0.95 }}
+                                transition={{ type: "spring", stiffness: 520, damping: 30 }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  triggerHaptic("light");
+                                  setPreviewLightbox({
+                                    attachments: (msg.attachments || []).map((item) => ({
+                                      ...item,
+                                      previewUrl:
+                                        item.previewUrl ||
+                                        (item.dataBase64
+                                          ? `data:${item.mimeType || "image/jpeg"};base64,${item.dataBase64}`
+                                          : ""),
+                                    })),
+                                    index: attIdx,
+                                  });
+                                }}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" || e.key === " ") {
+                                    e.preventDefault();
+                                    setPreviewLightbox({
+                                      attachments: (msg.attachments || []).map((item) => ({
+                                        ...item,
+                                        previewUrl:
+                                          item.previewUrl ||
+                                          (item.dataBase64
+                                            ? `data:${item.mimeType || "image/jpeg"};base64,${item.dataBase64}`
+                                            : ""),
+                                      })),
+                                      index: attIdx,
+                                    });
+                                  }
+                                }}
+                                className={`relative overflow-hidden rounded-[17px] bg-slate-900/95 ring-1 ring-black/5 dark:ring-white/10 cursor-pointer group/tile ${
+                                  attCount === 1
+                                    ? "max-h-[250px] min-h-[110px] w-full flex items-center justify-center"
+                                    : isThreeHero
+                                    ? "col-span-2 aspect-[16/9] w-full"
+                                    : "aspect-square w-full"
+                                }`}
+                              >
+                                {att.kind === "video" ? (
+                                  <div
+                                    className="relative w-full h-full flex items-center justify-center"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <video
+                                      src={resolvedSrc}
+                                      controls
+                                      playsInline
+                                      className={
+                                        attCount === 1
+                                          ? "max-h-[250px] w-full object-cover rounded-[17px]"
+                                          : "w-full h-full object-cover"
+                                      }
+                                    />
+                                    <div className="pointer-events-none absolute top-2 left-2 px-1.5 py-0.5 rounded-md bg-black/65 backdrop-blur-md text-[9px] font-bold text-white flex items-center gap-1 border border-white/15">
+                                      <Film size={9} />
+                                      <span>VIDEO</span>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <>
+                                    <img
+                                      src={resolvedSrc}
+                                      alt={att.name}
+                                      loading="lazy"
+                                      className={
+                                        attCount === 1
+                                          ? "max-h-[250px] w-full object-cover transition-transform duration-300 group-hover/tile:scale-105"
+                                          : "w-full h-full object-cover transition-transform duration-300 group-hover/tile:scale-105"
+                                      }
+                                    />
+                                    <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-black/10 opacity-85 group-hover/tile:opacity-100 transition-opacity duration-200 flex items-end justify-end p-2">
+                                      <div className="w-6 h-6 rounded-full bg-black/60 backdrop-blur-md text-white flex items-center justify-center border border-white/20 shadow-sm">
+                                        <Maximize2 size={11} />
+                                      </div>
+                                    </div>
+                                  </>
+                                )}
+                              </motion.div>
+                            );
+                          })}
+                        </div>
+
+                        {!hasText && (
+                          <div className="pointer-events-none absolute bottom-2.5 right-2.5 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md border border-white/15 shadow-sm">
+                            <span className="text-[9px] font-semibold text-white/95 font-mono">
+                              {formattedTime}
+                            </span>
+                          </div>
+                        )}
                       </div>
-                      <span className="text-[9px] font-medium block mt-1 text-right text-indigo-100/80 dark:text-indigo-200/70 font-mono">
-                        {new Date(msg.timestamp).toLocaleTimeString([], {
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </span>
-                    </div>
+                    )}
+
+                    {msg.quotedText && !hasText && (
+                      <div className="w-fit max-w-[86%] sm:max-w-[74%] rounded-[22px] rounded-br-xs p-1.5 bg-gradient-to-br from-indigo-600 via-indigo-600 to-violet-700 text-white shadow-lg shadow-indigo-600/25 dark:shadow-indigo-950/40 border border-indigo-400/35 break-words [overflow-wrap:anywhere] [word-break:break-word] overflow-hidden min-w-[150px]">
+                        <div className="relative overflow-hidden rounded-[16px] bg-slate-950/40 dark:bg-[#080c18]/75 border border-white/15 px-3 py-2 backdrop-blur-md shadow-inner">
+                          <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-amber-300 via-indigo-300 to-purple-400" />
+                          <div className="flex items-center justify-between gap-2 mb-1 pl-1.5">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="w-4 h-4 rounded-md bg-indigo-400/20 border border-indigo-300/30 flex items-center justify-center shrink-0">
+                                <Quote size={9} className="text-indigo-200 rotate-180" />
+                              </span>
+                              <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-200/95">
+                                Buzz AI
+                              </span>
+                              <span className="text-[9px] font-medium text-white/45">• Quoted</span>
+                            </div>
+                            <span className="text-[9px] font-medium text-indigo-100/75 font-mono shrink-0">
+                              {formattedTime}
+                            </span>
+                          </div>
+                          <p className="pl-1.5 text-[11px] sm:text-xs leading-relaxed text-indigo-50/95 line-clamp-3 font-normal italic break-words [overflow-wrap:anywhere] [word-break:break-word] text-left">
+                            "{msg.quotedText}"
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {hasText && (() => {
+                      const isLongUserMsg =
+                        msg.content.length > 140 ||
+                        msg.content.split("\n").length > 4 ||
+                        (/\S{28,}/.test(msg.content) && msg.content.length > 55);
+                      const isUserExpanded = Boolean(expandedMessages[msg.id]);
+                      const displayedUserText =
+                        isLongUserMsg && !isUserExpanded
+                          ? `${msg.content.slice(0, 110).trimEnd()}…`
+                          : msg.content;
+
+                      return (
+                        <div
+                          className={`w-fit max-w-[86%] sm:max-w-[74%] ${
+                            msg.quotedText
+                              ? "rounded-[22px] rounded-br-xs p-1.5 min-w-[165px]"
+                              : `${
+                                  hasMedia ? "rounded-2xl rounded-tr-md rounded-br-xs" : "rounded-2xl rounded-br-xs"
+                                } px-3.5 py-2 sm:px-4 sm:py-2.5`
+                          } bg-gradient-to-br from-indigo-600 via-indigo-600 to-violet-700 text-white shadow-lg shadow-indigo-600/20 dark:shadow-indigo-950/35 border border-indigo-400/35 break-words [overflow-wrap:anywhere] [word-break:break-word] overflow-hidden min-w-0`}
+                        >
+                          {msg.quotedText && (
+                            <div className="relative overflow-hidden rounded-[15px] bg-slate-950/40 dark:bg-[#080c18]/75 border border-white/15 px-3 py-2 mb-1 backdrop-blur-md shadow-inner">
+                              <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-amber-300 via-indigo-300 to-purple-400" />
+                              <div className="flex items-center gap-1.5 mb-0.5 pl-1.5">
+                                <span className="w-4 h-4 rounded-md bg-indigo-400/20 border border-indigo-300/30 flex items-center justify-center shrink-0">
+                                  <Quote size={9} className="text-indigo-200 rotate-180" />
+                                </span>
+                                <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-200/95">
+                                  Buzz AI
+                                </span>
+                                <span className="text-[9px] font-medium text-white/45">• Quoted</span>
+                              </div>
+                              <p className="pl-1.5 text-[11px] sm:text-xs leading-snug text-indigo-50/90 line-clamp-3 font-normal italic break-words [overflow-wrap:anywhere] [word-break:break-word] text-left">
+                                "{msg.quotedText}"
+                              </p>
+                            </div>
+                          )}
+                          <div
+                            className={`flex flex-col min-w-0 max-w-full ${
+                              msg.quotedText ? "px-2.5 pt-1 pb-1" : ""
+                            }`}
+                          >
+                            <div className="flex items-end gap-2.5 flex-wrap justify-between min-w-0 max-w-full">
+                              <div className="text-xs sm:text-sm leading-relaxed whitespace-pre-wrap font-semibold break-words [overflow-wrap:anywhere] [word-break:break-word] text-left min-w-0 max-w-full">
+                                {displayedUserText}
+                              </div>
+                              {!isLongUserMsg && (
+                                <span className="text-[9px] font-medium text-indigo-100/80 dark:text-indigo-200/75 font-mono shrink-0 translate-y-0.5 select-none ml-auto">
+                                  {formattedTime}
+                                </span>
+                              )}
+                            </div>
+                            {isLongUserMsg && (
+                              <div className="flex items-center justify-between gap-3 mt-1.5 pt-1 border-t border-white/15">
+                                <button
+                                  type="button"
+                                  onClick={() => toggleExpandMessage(msg.id)}
+                                  className="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-100 hover:text-white bg-white/10 hover:bg-white/20 px-2 py-0.5 rounded-full transition-colors cursor-pointer select-none"
+                                >
+                                  {isUserExpanded ? (
+                                    <>
+                                      <ChevronUp size={11} />
+                                      <span>See less</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ChevronDown size={11} />
+                                      <span>See more</span>
+                                    </>
+                                  )}
+                                </button>
+                                <span className="text-[9px] font-medium text-indigo-100/80 dark:text-indigo-200/75 font-mono shrink-0 select-none">
+                                  {formattedTime}
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </motion.div>
                 );
               }
@@ -2525,7 +3556,7 @@ export function AdminAIAssistant({
                     </span>
                   </div>
 
-                  <div className={`${msg.action ? "w-full sm:max-w-[430px]" : "w-fit max-w-[96%] sm:max-w-[88%]"} rounded-2xl rounded-tl-xs p-3.5 sm:p-4 bg-white/95 dark:bg-gradient-to-b dark:from-slate-900/95 dark:via-slate-900/90 dark:to-slate-950/95 border border-slate-200/90 dark:border-slate-700/70 text-slate-800 dark:text-slate-100 shadow-lg shadow-slate-900/[0.04] dark:shadow-xl dark:shadow-black/40 relative backdrop-blur-xl overflow-hidden break-words [overflow-wrap:break-word] min-w-0`}>
+                  <div className={`${msg.action ? "w-full sm:max-w-[430px]" : "w-fit max-w-[96%] sm:max-w-[88%]"} rounded-2xl rounded-tl-xs p-3.5 sm:p-4 bg-white/95 dark:bg-gradient-to-b dark:from-slate-900/95 dark:via-slate-900/90 dark:to-slate-950/95 border border-slate-200/90 dark:border-slate-700/70 text-slate-800 dark:text-slate-100 shadow-lg shadow-slate-900/[0.04] dark:shadow-xl dark:shadow-black/40 relative backdrop-blur-xl overflow-hidden break-words [overflow-wrap:anywhere] [word-break:break-word] min-w-0`}>
                     {/* While Streaming: Compact Thinking Indicator with Live Stopwatch */}
                     {msg.isStreaming && !msg.content && (
                       <div className="flex items-center gap-2.5 py-0.5 px-0.5">
@@ -2563,7 +3594,7 @@ export function AdminAIAssistant({
                     )}
 
                     {/* Formatted Markdown Content with progressive word-by-word streaming cursor */}
-                    <div className="text-xs sm:text-[13px] leading-relaxed break-words [overflow-wrap:break-word] min-w-0 w-full">
+                    <div className="text-xs sm:text-[13px] leading-relaxed break-words [overflow-wrap:anywhere] [word-break:break-word] min-w-0 max-w-full w-full">
                       <MarkdownContent
                         text={msg.content}
                         isStreaming={Boolean(msg.isStreaming)}
@@ -2801,6 +3832,96 @@ export function AdminAIAssistant({
                           );
                         })()}
 
+                        {/* 2B. UPDATE_PRODUCT_IMAGE */}
+                        {msg.action.type === "UPDATE_PRODUCT_IMAGE" && (() => {
+                          const previewImg =
+                            msg.action.image ||
+                            resolveUploadedImageForAction(msg.action, [], messages, "")?.image ||
+                            "";
+                          return (
+                            <div className="rounded-2xl bg-gradient-to-b from-violet-50/90 via-white to-violet-50/40 dark:from-violet-950/60 dark:via-slate-900/95 dark:to-slate-950 border border-violet-200/90 dark:border-violet-500/30 shadow-md shadow-violet-950/5 dark:shadow-violet-950/40 overflow-hidden">
+                              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-violet-500/[0.06] dark:bg-violet-500/[0.08] border-b border-violet-200/70 dark:border-violet-500/20">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-7 h-7 rounded-xl bg-violet-500/15 dark:bg-violet-500/25 flex items-center justify-center text-violet-600 dark:text-violet-300 shrink-0 border border-violet-400/30 shadow-2xs">
+                                    <ImageIcon size={14} />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                      Product Photo Update
+                                    </span>
+                                    <span className="text-[10px] font-medium text-violet-600/80 dark:text-violet-300/70 block leading-tight mt-0.5">
+                                      Catalog Media
+                                    </span>
+                                  </div>
+                                </div>
+                                {msg.actionApplied ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-md border border-emerald-500/30 shrink-0">
+                                    <CheckCircle2 size={10} />
+                                    Saved
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-violet-700 dark:text-violet-300 bg-violet-500/15 px-2 py-0.5 rounded-md border border-violet-500/30 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-violet-500 dark:bg-violet-400 animate-pulse" />
+                                    Ready
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="p-3 space-y-2.5">
+                                <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 p-3 flex items-center justify-between gap-3">
+                                  <div className="min-w-0 flex-1">
+                                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500 block">
+                                      Target Product
+                                    </span>
+                                    <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white block break-words mt-0.5">
+                                      {msg.action.productName || "Product"}
+                                    </span>
+                                    {msg.action.currentPrice !== undefined && (
+                                      <span className="text-[11px] font-mono text-slate-500 dark:text-slate-400 block mt-0.5">
+                                        ₹{msg.action.currentPrice} · {msg.action.currentStock ?? 0} units
+                                      </span>
+                                    )}
+                                  </div>
+                                  {previewImg && (
+                                    <div className="w-14 h-14 rounded-xl overflow-hidden border border-violet-400/35 bg-slate-900 shrink-0 shadow-sm">
+                                      <img
+                                        src={previewImg}
+                                        alt={msg.action.productName || "Product"}
+                                        className="w-full h-full object-cover"
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+
+                                {!msg.actionApplied ? (
+                                  <button
+                                    disabled={executingActionId === msg.id}
+                                    onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                    className="w-full py-2.5 px-3.5 bg-gradient-to-r from-violet-600 via-indigo-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-violet-600/25 transition-all cursor-pointer border border-violet-400/25"
+                                  >
+                                    {executingActionId === msg.id ? (
+                                      <>
+                                        <RefreshCw size={13} className="animate-spin shrink-0" />
+                                        <span>Saving Product Photo...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <CheckCircle2 size={14} className="shrink-0" />
+                                        <span>Confirm Product Photo</span>
+                                      </>
+                                    )}
+                                  </button>
+                                ) : (
+                                  <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-emerald-500/10 border border-emerald-500/25 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
+                                    <CheckCircle2 size={13} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                    <span>Product photo updated in store catalog</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+
                         {/* 3. ADD_PRODUCT */}
                         {msg.action.type === "ADD_PRODUCT" && (() => {
                           const batchItems =
@@ -2815,6 +3936,7 @@ export function AdminAIAssistant({
                                       msg.action.category,
                                       msg.action.name
                                     ),
+                                    image: msg.action.image,
                                   },
                                 ];
                           const isBatch = batchItems.length > 1;
@@ -2852,30 +3974,44 @@ export function AdminAIAssistant({
                               {/* Structured Data Rows */}
                               <div className="p-3 space-y-2.5">
                                 <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
-                                  {batchItems.map((item, idx) => (
-                                    <div
-                                      key={`${item.name}-${idx}`}
-                                      className="flex items-center justify-between gap-2.5 px-3 py-2.5"
-                                    >
-                                      <div className="min-w-0 flex-1">
-                                        <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white block break-words">
-                                          {item.name}
-                                        </span>
-                                        <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 block mt-0.5">
-                                          {item.category || "General"}
-                                        </span>
+                                  {batchItems.map((item, idx) => {
+                                    const itemPreviewImg = item.image || msg.action?.image;
+                                    return (
+                                      <div
+                                        key={`${item.name}-${idx}`}
+                                        className="flex items-center justify-between gap-2.5 px-3 py-2.5"
+                                      >
+                                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                          {itemPreviewImg && (
+                                            <div className="w-10 h-10 rounded-lg overflow-hidden border border-emerald-500/30 bg-slate-900 shrink-0">
+                                              <img
+                                                src={itemPreviewImg}
+                                                alt={item.name}
+                                                className="w-full h-full object-cover"
+                                              />
+                                            </div>
+                                          )}
+                                          <div className="min-w-0 flex-1">
+                                            <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white block break-words">
+                                              {item.name}
+                                            </span>
+                                            <span className="text-[10px] font-semibold text-slate-400 dark:text-slate-500 block mt-0.5">
+                                              {item.category || "fresh"}
+                                            </span>
+                                          </div>
+                                        </div>
+                                        <div className="flex items-center gap-1.5 shrink-0 font-mono tabular-nums text-xs">
+                                          <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 dark:bg-emerald-500/20 border border-emerald-500/25 font-black text-emerald-700 dark:text-emerald-300">
+                                            ₹{item.price}
+                                          </span>
+                                          <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 font-semibold text-slate-600 dark:text-slate-300">
+                                            {item.stock ?? 0}{" "}
+                                            <span className="text-[10px] font-sans opacity-80">units</span>
+                                          </span>
+                                        </div>
                                       </div>
-                                      <div className="flex items-center gap-1.5 shrink-0 font-mono tabular-nums text-xs">
-                                        <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 dark:bg-emerald-500/20 border border-emerald-500/25 font-black text-emerald-700 dark:text-emerald-300">
-                                          ₹{item.price}
-                                        </span>
-                                        <span className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 font-semibold text-slate-600 dark:text-slate-300">
-                                          {item.stock ?? 0}{" "}
-                                          <span className="text-[10px] font-sans opacity-80">units</span>
-                                        </span>
-                                      </div>
-                                    </div>
-                                  ))}
+                                    );
+                                  })}
                                 </div>
 
                                 {!msg.actionApplied ? (
@@ -3720,6 +4856,159 @@ export function AdminAIAssistant({
               </div>
             )}
 
+            {/* Quoted Text Banner above Composer */}
+            <AnimatePresence initial={false}>
+              {quotedText && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0, y: 8, scale: 0.98 }}
+                  animate={{ opacity: 1, height: "auto", y: 0, scale: 1 }}
+                  exit={{ opacity: 0, height: 0, y: 6, scale: 0.98 }}
+                  transition={{ type: "spring", stiffness: 500, damping: 34, mass: 0.55 }}
+                  className="mb-2.5 overflow-hidden"
+                >
+                  <div className="relative overflow-hidden pl-3.5 pr-2.5 py-2.5 rounded-2xl bg-gradient-to-r from-indigo-500/[0.1] via-slate-100/95 to-purple-500/[0.08] dark:from-indigo-500/[0.14] dark:via-[#0f1629]/95 dark:to-purple-500/[0.12] border border-indigo-500/30 dark:border-indigo-400/25 flex items-start justify-between gap-2.5 shadow-md backdrop-blur-xl">
+                    <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-amber-400 via-indigo-500 to-purple-500" />
+                    <div className="min-w-0 flex-1 pl-1">
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className="w-4 h-4 rounded-md bg-indigo-500/15 dark:bg-indigo-500/25 border border-indigo-500/30 text-indigo-600 dark:text-indigo-300 flex items-center justify-center shrink-0">
+                          <Quote size={9} className="rotate-180" />
+                        </span>
+                        <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-300">
+                          Replying to Buzz AI
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-700 dark:text-slate-200 line-clamp-2 italic font-medium leading-snug break-words min-w-0">
+                        "{quotedText}"
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        triggerHaptic("light");
+                        setQuotedText("");
+                      }}
+                      title="Remove quote"
+                      aria-label="Remove quote"
+                      className="w-6 h-6 rounded-full bg-slate-200/80 dark:bg-white/[0.08] hover:bg-rose-500/20 text-slate-500 dark:text-slate-300 hover:text-rose-500 dark:hover:text-rose-400 flex items-center justify-center shrink-0 transition-colors cursor-pointer border border-black/5 dark:border-white/10"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Pending Multi-Image / Multi-Video Attachments Preview Bar */}
+            <AnimatePresence initial={false}>
+              {pendingAttachments.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0, y: 8 }}
+                  animate={{ opacity: 1, height: "auto", y: 0 }}
+                  exit={{ opacity: 0, height: 0, y: 8 }}
+                  transition={{ type: "spring", stiffness: 460, damping: 32, mass: 0.65 }}
+                  className="mb-2.5 overflow-hidden"
+                >
+                  <div className="p-2 rounded-2xl bg-slate-100/90 dark:bg-white/[0.04] border border-slate-200/80 dark:border-white/10 shadow-inner">
+                    <div className="flex items-center justify-between px-1 mb-1.5">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5">
+                        <ImageIcon size={11} />
+                        {pendingAttachments.length}{" "}
+                        {pendingAttachments.length === 1 ? "media file ready" : "media files ready"}
+                      </span>
+                      {pendingAttachments.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            triggerHaptic("light");
+                            setPendingAttachments([]);
+                          }}
+                          className="text-[10px] font-bold text-slate-500 hover:text-rose-500 dark:text-slate-400 dark:hover:text-rose-400 transition-colors cursor-pointer"
+                        >
+                          Clear all
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 overflow-x-auto pb-0.5 pt-0.5 custom-scrollbar">
+                      <AnimatePresence mode="popLayout" initial={false}>
+                        {pendingAttachments.map((att, idx) => (
+                          <motion.div
+                            layout
+                            key={att.id}
+                            initial={{ opacity: 0, scale: 0.8, y: 6 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.75, y: 4 }}
+                            transition={{
+                              type: "spring",
+                              stiffness: 500,
+                              damping: 30,
+                              mass: 0.6,
+                              delay: idx * 0.025,
+                            }}
+                            onClick={() => {
+                              triggerHaptic("light");
+                              setPreviewLightbox({
+                                attachments: pendingAttachments,
+                                index: idx,
+                              });
+                            }}
+                            className="relative group w-16 h-16 sm:w-[70px] sm:h-[70px] rounded-[16px] overflow-hidden bg-slate-900 border border-indigo-500/35 shrink-0 shadow-md cursor-pointer"
+                          >
+                            {att.kind === "video" ? (
+                              <video
+                                src={att.previewUrl}
+                                muted
+                                playsInline
+                                className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                              />
+                            ) : (
+                              <img
+                                src={att.previewUrl}
+                                alt={att.name}
+                                className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                              />
+                            )}
+                            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/80 to-transparent" />
+                            <div className="pointer-events-none absolute bottom-1 left-1.5 flex items-center gap-1 text-[8px] font-extrabold text-white/95 tracking-wide">
+                              {att.kind === "video" ? <Film size={8} /> : <ImageIcon size={8} />}
+                              <span className="uppercase">{att.kind}</span>
+                            </div>
+                            <motion.button
+                              whileHover={{ scale: 1.12 }}
+                              whileTap={{ scale: 0.88 }}
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleRemovePendingAttachment(att.id);
+                              }}
+                              title="Remove attachment"
+                              className="absolute top-1 right-1 w-5 h-5 rounded-full bg-slate-950/85 hover:bg-rose-600 text-white flex items-center justify-center border border-white/20 shadow-sm transition-colors cursor-pointer"
+                            >
+                              <X size={10} />
+                            </motion.button>
+                          </motion.div>
+                        ))}
+                      </AnimatePresence>
+                      {pendingAttachments.length < 8 && (
+                        <motion.button
+                          layout
+                          whileHover={{ scale: 1.03 }}
+                          whileTap={{ scale: 0.94 }}
+                          type="button"
+                          disabled={isAiBusy}
+                          onClick={() => mediaFileInputRef.current?.click()}
+                          title="Add more images or videos"
+                          className="w-16 h-16 sm:w-[70px] sm:h-[70px] rounded-[16px] border border-dashed border-indigo-400/45 dark:border-indigo-400/30 hover:border-indigo-500 bg-white/75 dark:bg-white/[0.03] text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50/60 dark:hover:bg-indigo-500/10 flex flex-col items-center justify-center gap-1 shrink-0 transition-colors cursor-pointer"
+                        >
+                          <Plus size={16} />
+                          <span className="text-[9px] font-bold">Add</span>
+                        </motion.button>
+                      )}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             <form
               onSubmit={(e) => {
                 e.preventDefault();
@@ -3815,24 +5104,82 @@ export function AdminAIAssistant({
                     data-testid="buzz-ai-mic-btn"
                     type="button"
                     onClick={toggleListening}
-                    disabled={loading}
+                    disabled={isAiBusy}
                     title="Speak with Buzz AI"
-                    className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all cursor-pointer bg-white dark:bg-white/[0.05] text-slate-600 dark:text-slate-300 hover:bg-slate-200/80 dark:hover:bg-white/[0.1] hover:text-slate-900 dark:hover:text-white border border-slate-200/80 dark:border-transparent active:scale-95 disabled:opacity-40"
+                    className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all cursor-pointer bg-white dark:bg-white/[0.05] text-slate-600 dark:text-slate-300 hover:bg-slate-200/80 dark:hover:bg-white/[0.1] hover:text-slate-900 dark:hover:text-white border border-slate-200/80 dark:border-transparent active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     <Mic size={16} />
                   </button>
 
-                  <input
+                  <button
+                    id="buzz-ai-media-btn"
+                    data-testid="buzz-ai-media-btn"
+                    type="button"
+                    onClick={() => {
+                      if (isAiBusy || isRecording) return;
+                      triggerHaptic("light");
+                      mediaFileInputRef.current?.click();
+                    }}
+                    disabled={isAiBusy}
+                    title="Attach images or videos"
+                    aria-label="Attach images or videos"
+                    className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all cursor-pointer bg-white dark:bg-white/[0.05] text-slate-600 dark:text-slate-300 hover:bg-slate-200/80 dark:hover:bg-white/[0.1] hover:text-slate-900 dark:hover:text-white border border-slate-200/80 dark:border-transparent active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <Paperclip size={16} />
+                  </button>
+
+                  <textarea
                     ref={inputRef}
-                    type="text"
+                    rows={1}
                     value={input}
-                    onChange={(e) => setInput(e.target.value)}
-                    placeholder="Ask Buzz AI or speak a command..."
-                    disabled={loading}
-                    className="flex-1 min-w-0 px-2 py-2 text-xs sm:text-sm bg-transparent focus:outline-none text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 font-medium"
+                    onChange={(e) => {
+                      if (isAiBusy || isRecording) return;
+                      const val = e.target.value;
+                      setInput(val);
+                      if (!val) {
+                        e.target.style.height = "36px";
+                      } else {
+                        e.target.style.height = "auto";
+                        e.target.style.height = `${Math.min(Math.max(e.target.scrollHeight, 36), 96)}px`;
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        if (
+                          isAiBusy ||
+                          isRecording ||
+                          (!input.trim() && pendingAttachments.length === 0 && !quotedText.trim())
+                        )
+                          return;
+                        handleSendMessage();
+                      }
+                    }}
+                    autoComplete="on"
+                    autoCorrect="on"
+                    autoCapitalize="sentences"
+                    spellCheck={true}
+                    inputMode="text"
+                    enterKeyHint="send"
+                    placeholder={
+                      isAiBusy
+                        ? "Buzz AI is replying..."
+                        : quotedText
+                        ? "Ask what this quote means or anything else..."
+                        : pendingAttachments.length > 0
+                        ? "Add a caption..."
+                        : "Ask Buzz AI..."
+                    }
+                    disabled={isAiBusy}
+                    readOnly={isAiBusy}
+                    className={`flex-1 min-w-0 max-h-24 px-2 py-2 text-xs sm:text-sm bg-transparent focus:outline-none text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 font-medium resize-none leading-5 disabled:opacity-50 disabled:cursor-not-allowed ${
+                      !input
+                        ? "h-9 overflow-hidden text-ellipsis whitespace-nowrap"
+                        : "min-h-9 overflow-y-auto"
+                    }`}
                   />
 
-                  {loading ? (
+                  {isAiBusy ? (
                     <motion.button
                       whileHover={{ scale: 1.05 }}
                       whileTap={{ scale: 0.9 }}
@@ -3847,11 +5194,19 @@ export function AdminAIAssistant({
                     </motion.button>
                   ) : (
                     <motion.button
-                      whileHover={input.trim() ? { scale: 1.05 } : undefined}
-                      whileTap={input.trim() ? { scale: 0.92 } : undefined}
+                      whileHover={
+                        input.trim() || pendingAttachments.length > 0 || quotedText.trim()
+                          ? { scale: 1.05 }
+                          : undefined
+                      }
+                      whileTap={
+                        input.trim() || pendingAttachments.length > 0 || quotedText.trim()
+                          ? { scale: 0.92 }
+                          : undefined
+                      }
                       transition={{ type: "spring", stiffness: 520, damping: 28 }}
                       type="submit"
-                      disabled={!input.trim()}
+                      disabled={!input.trim() && pendingAttachments.length === 0 && !quotedText.trim()}
                       title="Send message"
                       aria-label="Send message"
                       className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-30 text-white flex items-center justify-center shadow-md shadow-indigo-600/25 transition-colors shrink-0 cursor-pointer disabled:cursor-not-allowed"
@@ -3865,6 +5220,208 @@ export function AdminAIAssistant({
           </div>
         </footer>
           </motion.div>
+
+          {/* Floating Text Selection Toolbar ("Quote" & "Copy") Portaled to document.body */}
+          {typeof document !== "undefined" &&
+            createPortal(
+              <AnimatePresence>
+                {selectionPopup && selectionPopup.text && (
+                  <div
+                    ref={selectionToolbarRef}
+                    style={{
+                      position: "fixed",
+                      left: `${selectionPopup.x}px`,
+                      top: `${selectionPopup.y}px`,
+                      transform:
+                        selectionPopup.placement === "top"
+                          ? "translate(-50%, -100%)"
+                          : "translate(-50%, 0%)",
+                      zIndex: 10000,
+                    }}
+                    onMouseDown={(e) => {
+                      // Prevent clearing selection before button click fires
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                  >
+                    <motion.div
+                      initial={{
+                        opacity: 0,
+                        scale: 0.9,
+                        y: selectionPopup.placement === "top" ? 5 : -5,
+                      }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.9 }}
+                      transition={{ type: "spring", stiffness: 540, damping: 32, mass: 0.5 }}
+                      className="relative flex items-center gap-1 p-1 rounded-2xl bg-[#0b1020]/95 text-white border border-indigo-400/30 shadow-[0_14px_34px_-6px_rgba(0,0,0,0.75)] ring-1 ring-white/10 backdrop-blur-xl select-none whitespace-nowrap"
+                    >
+                      <button
+                        type="button"
+                        onClick={handleQuoteSelection}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-500/20 hover:bg-indigo-600 border border-indigo-400/30 active:scale-95 transition-all cursor-pointer shadow-2xs"
+                      >
+                        <Quote size={11} className="text-indigo-300 rotate-180" />
+                        <span>Quote</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCopySelection}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-200 hover:text-white hover:bg-white/12 active:scale-95 transition-all cursor-pointer"
+                      >
+                        {selectionPopup.copied ? (
+                          <>
+                            <Check size={12} className="text-emerald-400" />
+                            <span className="text-emerald-400 font-bold">Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy size={12} className="text-slate-300" />
+                            <span>Copy</span>
+                          </>
+                        )}
+                      </button>
+                    </motion.div>
+                  </div>
+                )}
+              </AnimatePresence>,
+              document.body
+            )}
+
+          {/* Full-screen Lightbox Preview for Chat & Composer Media (Portaled to document.body) */}
+          {typeof document !== "undefined" &&
+            createPortal(
+              <AnimatePresence>
+                {previewLightbox && previewLightbox.attachments[previewLightbox.index] && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.18 }}
+                    onClick={() => setPreviewLightbox(null)}
+                    className="fixed inset-0 z-[9999] bg-black/92 backdrop-blur-xl flex flex-col items-center justify-center p-4 select-none"
+                  >
+                    <div
+                      className="w-full max-w-3xl flex items-center justify-between mb-3 px-2"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="px-2.5 py-1 rounded-full bg-white/10 border border-white/15 text-[11px] font-bold text-white shrink-0">
+                          {previewLightbox.index + 1} / {previewLightbox.attachments.length}
+                        </span>
+                      </div>
+                      <motion.button
+                        whileHover={{ scale: 1.08 }}
+                        whileTap={{ scale: 0.9 }}
+                        type="button"
+                        aria-label="Close image preview"
+                        onClick={() => setPreviewLightbox(null)}
+                        className="w-9 h-9 rounded-full bg-white/12 hover:bg-white/25 text-white flex items-center justify-center border border-white/20 cursor-pointer"
+                      >
+                        <X size={18} />
+                      </motion.button>
+                    </div>
+
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="relative max-w-3xl w-full max-h-[78vh] flex items-center justify-center rounded-3xl overflow-hidden bg-slate-950/90 border border-white/15 shadow-2xl"
+                    >
+                      <motion.div
+                        key={
+                          previewLightbox.attachments[previewLightbox.index].id ||
+                          `lightbox-item-${previewLightbox.index}`
+                        }
+                        initial={{ opacity: 0, scale: 0.96 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        transition={{ type: "spring", stiffness: 460, damping: 32, mass: 0.65 }}
+                        className="w-full h-full flex items-center justify-center"
+                      >
+                        {previewLightbox.attachments[previewLightbox.index].kind === "video" ? (
+                          <video
+                            src={
+                              previewLightbox.attachments[previewLightbox.index].previewUrl ||
+                              (previewLightbox.attachments[previewLightbox.index].dataBase64
+                                ? `data:${
+                                    previewLightbox.attachments[previewLightbox.index].mimeType ||
+                                    "video/mp4"
+                                  };base64,${
+                                    previewLightbox.attachments[previewLightbox.index].dataBase64
+                                  }`
+                                : "")
+                            }
+                            controls
+                            autoPlay
+                            playsInline
+                            className="max-h-[76vh] w-auto max-w-full object-contain"
+                          />
+                        ) : (
+                          <img
+                            src={
+                              previewLightbox.attachments[previewLightbox.index].previewUrl ||
+                              (previewLightbox.attachments[previewLightbox.index].dataBase64
+                                ? `data:${
+                                    previewLightbox.attachments[previewLightbox.index].mimeType ||
+                                    "image/jpeg"
+                                  };base64,${
+                                    previewLightbox.attachments[previewLightbox.index].dataBase64
+                                  }`
+                                : "")
+                            }
+                            alt="Attachment preview"
+                            className="max-h-[76vh] w-auto max-w-full object-contain select-none"
+                          />
+                        )}
+                      </motion.div>
+
+                      {previewLightbox.attachments.length > 1 && (
+                        <>
+                          <motion.button
+                            whileHover={{ scale: 1.08 }}
+                            whileTap={{ scale: 0.9 }}
+                            type="button"
+                            aria-label="Previous image"
+                            onClick={() =>
+                              setPreviewLightbox((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      index:
+                                        (prev.index - 1 + prev.attachments.length) %
+                                        prev.attachments.length,
+                                    }
+                                  : null
+                              )
+                            }
+                            className="absolute left-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-black/65 hover:bg-black/85 text-white flex items-center justify-center border border-white/20 shadow-lg cursor-pointer"
+                          >
+                            <ChevronLeft size={20} />
+                          </motion.button>
+                          <motion.button
+                            whileHover={{ scale: 1.08 }}
+                            whileTap={{ scale: 0.9 }}
+                            type="button"
+                            aria-label="Next image"
+                            onClick={() =>
+                              setPreviewLightbox((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      index: (prev.index + 1) % prev.attachments.length,
+                                    }
+                                  : null
+                              )
+                            }
+                            className="absolute right-3 top-1/2 -translate-y-1/2 z-10 w-10 h-10 rounded-full bg-black/65 hover:bg-black/85 text-white flex items-center justify-center border border-white/20 shadow-lg cursor-pointer"
+                          >
+                            <ChevronRight size={20} />
+                          </motion.button>
+                        </>
+                      )}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>,
+              document.body
+            )}
         </div>
       )}
     </AnimatePresence>

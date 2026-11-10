@@ -437,7 +437,31 @@ public class MainActivity extends BridgeActivity {
             try {
                 if (text == null || text.trim().isEmpty()) return false;
                 if (nativeTts != null && ttsReady) {
-                    nativeTts.speak(text.trim(), TextToSpeech.QUEUE_FLUSH, null, "buzz_tts_" + System.currentTimeMillis());
+                    String trimmed = text.trim();
+                    boolean hasBengali = false;
+                    boolean hasHindi = false;
+                    for (int i = 0; i < trimmed.length(); i++) {
+                        char c = trimmed.charAt(i);
+                        if (c >= '\u0980' && c <= '\u09FF') {
+                            hasBengali = true;
+                            break;
+                        } else if (c >= '\u0900' && c <= '\u097F') {
+                            hasHindi = true;
+                        }
+                    }
+                    Locale targetLocale = hasBengali
+                        ? new Locale("bn", "IN")
+                        : (hasHindi ? new Locale("hi", "IN") : new Locale("en", "IN"));
+                    int res = nativeTts.setLanguage(targetLocale);
+                    if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        if (hasBengali) {
+                            res = nativeTts.setLanguage(new Locale("bn", "BD"));
+                        }
+                        if (res == TextToSpeech.LANG_MISSING_DATA || res == TextToSpeech.LANG_NOT_SUPPORTED) {
+                            nativeTts.setLanguage(new Locale("en", "IN"));
+                        }
+                    }
+                    nativeTts.speak(trimmed, TextToSpeech.QUEUE_FLUSH, null, "buzz_tts_" + System.currentTimeMillis());
                     return true;
                 }
                 return false;
@@ -687,6 +711,9 @@ public class MainActivity extends BridgeActivity {
             webView.setHorizontalScrollBarEnabled(false);
             webView.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
             webView.setHapticFeedbackEnabled(true);
+            webView.setFocusable(true);
+            webView.setFocusableInTouchMode(true);
+            getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
 
             if (!exporterAttached) {
                 try {

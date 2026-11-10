@@ -551,11 +551,12 @@ export function Checkout() {
                               <ProductImagePlaceholder
                                 category={item.product.category}
                                 name={item.product.name}
-                                size={22}
+                                size={16}
                                 className="w-full h-full"
                                 rounded="rounded-xl"
                                 showBorder={false}
                                 showShadow={false}
+                                monogramSize="bottom-0 right-[2px] text-[24px] sm:text-[27px] font-black"
                               />
                             )}
                           </div>

@@ -8,12 +8,15 @@ export interface BatchProductItem {
   price: number;
   stock: number;
   category?: string;
+  image?: string;
+  attachmentIndex?: number;
 }
 
 export interface AssistantAction {
   type:
     | "UPDATE_STOCK"
     | "UPDATE_PRICE"
+    | "UPDATE_PRODUCT_IMAGE"
     | "ADD_PRODUCT"
     | "DELETE_PRODUCT"
     | "UPDATE_BILL"
@@ -37,6 +40,9 @@ export interface AssistantAction {
   price?: number;
   stock?: number;
   category?: string;
+  image?: string;
+  attachmentIndex?: number;
+  useAttachedImage?: boolean;
   products?: BatchProductItem[];
   billId?: string;
   oldTotal?: number;
@@ -59,16 +65,41 @@ export interface AssistantAction {
   billDate?: number;
 }
 
+export interface MediaAnalysisResult {
+  summary: string;
+  transcribedText: string;
+  detectedLanguage: string;
+  keyHighlights: string[];
+  mediaKind: "video" | "image";
+  fileName: string;
+  mimeType: string;
+  fileSize?: number;
+  previewUrl?: string;
+}
+
+export interface ChatAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  kind: "image" | "video";
+  dataBase64: string;
+  previewUrl: string;
+  size?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
   timestamp: number;
+  quotedText?: string;
   action?: AssistantAction | null;
   actionApplied?: boolean;
   isStreaming?: boolean;
   thought?: string;
   thoughtDuration?: number;
+  mediaAnalysis?: MediaAnalysisResult | null;
+  attachments?: ChatAttachment[];
 }
 
 export interface CurrentUserIdentity {
@@ -115,13 +146,8 @@ function shouldPreferFirestoreBridge(): boolean {
   if (Capacitor.isNativePlatform()) {
     const customHost = localStorage.getItem("buzz_api_server_url");
     if (!customHost) {
-      // Native Android WebView (https://localhost) cannot pass AI Studio Cloud Run proxy auth cookies;
-      // route directly through the real-time server-side Firestore RPC bridge for 1-second responses.
       return true;
     }
-  }
-  if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 30000) {
-    return true;
   }
   return false;
 }
@@ -148,6 +174,231 @@ function getCandidateApiBaseUrls(): string[] {
   urls.push("https://ais-pre-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app");
   urls.push("https://ais-dev-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app");
   return Array.from(new Set(urls));
+}
+
+export function wakeUpBuzzServer(): void {
+  for (const baseUrl of getCandidateApiBaseUrls()) {
+    fetch(`${baseUrl}/api/health`, { method: "GET", mode: "no-cors", cache: "no-store" }).catch(() => {});
+  }
+}
+
+const CLIENT_LATEX_SYMBOL_MAP: Record<string, string> = {
+  pi: "π",
+  Pi: "Π",
+  alpha: "α",
+  beta: "β",
+  gamma: "γ",
+  Gamma: "Γ",
+  delta: "δ",
+  Delta: "Δ",
+  epsilon: "ε",
+  varepsilon: "ε",
+  zeta: "ζ",
+  eta: "η",
+  theta: "θ",
+  Theta: "Θ",
+  vartheta: "ϑ",
+  iota: "ι",
+  kappa: "κ",
+  lambda: "λ",
+  Lambda: "Λ",
+  mu: "μ",
+  nu: "ν",
+  xi: "ξ",
+  Xi: "Ξ",
+  rho: "ρ",
+  sigma: "σ",
+  Sigma: "Σ",
+  tau: "τ",
+  upsilon: "υ",
+  phi: "φ",
+  Phi: "Φ",
+  varphi: "ϕ",
+  chi: "χ",
+  psi: "ψ",
+  Psi: "Ψ",
+  omega: "ω",
+  Omega: "Ω",
+  times: "×",
+  div: "÷",
+  cdot: "·",
+  pm: "±",
+  mp: "∓",
+  approx: "≈",
+  sim: "∼",
+  simeq: "≃",
+  cong: "≅",
+  equiv: "≡",
+  neq: "≠",
+  ne: "≠",
+  leq: "≤",
+  le: "≤",
+  geq: "≥",
+  ge: "≥",
+  ll: "≪",
+  gg: "≫",
+  propto: "∝",
+  infty: "∞",
+  partial: "∂",
+  nabla: "∇",
+  forall: "∀",
+  exists: "∃",
+  nexists: "∄",
+  in: "∈",
+  notin: "∉",
+  ni: "∋",
+  subset: "⊂",
+  supset: "⊃",
+  subseteq: "⊆",
+  supseteq: "⊇",
+  cup: "∪",
+  cap: "∩",
+  emptyset: "∅",
+  varnothing: "∅",
+  rightarrow: "→",
+  to: "→",
+  leftarrow: "←",
+  leftrightarrow: "↔",
+  Rightarrow: "⇒",
+  Leftarrow: "⇐",
+  Leftrightarrow: "⇔",
+  iff: "⇔",
+  mapsto: "↦",
+  sum: "∑",
+  prod: "∏",
+  int: "∫",
+  oint: "∮",
+  therefore: "∴",
+  because: "∵",
+  angle: "∠",
+  perp: "⊥",
+  parallel: "∥",
+  triangle: "△",
+  degree: "°",
+  circ: "°",
+  ldots: "…",
+  cdots: "⋯",
+  dots: "…",
+  quad: " ",
+  qquad: "  ",
+};
+
+const CLIENT_SUPERSCRIPT_MAP: Record<string, string> = {
+  "0": "⁰",
+  "1": "¹",
+  "2": "²",
+  "3": "³",
+  "4": "⁴",
+  "5": "⁵",
+  "6": "⁶",
+  "7": "⁷",
+  "8": "⁸",
+  "9": "⁹",
+  "+": "⁺",
+  "-": "⁻",
+  "=": "⁼",
+  "(": "⁽",
+  ")": "⁾",
+  n: "ⁿ",
+  i: "ⁱ",
+  "°": "°",
+};
+
+const CLIENT_SUBSCRIPT_MAP: Record<string, string> = {
+  "0": "₀",
+  "1": "₁",
+  "2": "₂",
+  "3": "₃",
+  "4": "₄",
+  "5": "₅",
+  "6": "₆",
+  "7": "₇",
+  "8": "₈",
+  "9": "⁹",
+  "+": "₊",
+  "-": "₋",
+  "=": "₌",
+  "(": "₍",
+  ")": "₎",
+  a: "ₐ",
+  e: "ₑ",
+  i: "ᵢ",
+  o: "ₒ",
+  r: "ᵣ",
+  u: "ᵤ",
+  v: "ᵥ",
+  x: "ₓ",
+};
+
+function convertClientLatexSegment(rawSeg: string): string {
+  let s = rawSeg;
+  s = s.replace(/\\(?:text|textbf|textit|mathrm|mathbf|mathit|mathcal|mathbb|operatorname)\s*\{([^{}]*)\}/g, "$1");
+  s = s.replace(/\\left\s*([([\]{}|.])/g, "$1").replace(/\\right\s*([([\]{}|.])/g, "$1");
+  for (let pass = 0; pass < 2; pass++) {
+    s = s.replace(/\\(?:d|t)?frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, (_m, num, den) => {
+      const n = String(num).trim();
+      const d = String(den).trim();
+      const nClean = /^[a-zA-Z0-9π]+$/.test(n) ? n : `(${n})`;
+      const dClean = /^[a-zA-Z0-9π]+$/.test(d) ? d : `(${d})`;
+      return `${nClean}/${dClean}`;
+    });
+  }
+  s = s.replace(/\\sqrt\s*\[([^\]]+)\]\s*\{([^{}]+)\}/g, (_m, root, arg) => {
+    const rSup = String(root)
+      .trim()
+      .split("")
+      .map((c) => CLIENT_SUPERSCRIPT_MAP[c] || c)
+      .join("");
+    const a = String(arg).trim();
+    return /^[a-zA-Z0-9π]+$/.test(a) ? `${rSup}√${a}` : `${rSup}√(${a})`;
+  });
+  s = s.replace(/\\sqrt\s*\{([^{}]+)\}/g, (_m, arg) => {
+    const a = String(arg).trim();
+    return /^[a-zA-Z0-9π]+$/.test(a) ? `√${a}` : `√(${a})`;
+  });
+  s = s.replace(/\\([a-zA-Z]+)(?![a-zA-Z])/g, (full, cmd) => {
+    return CLIENT_LATEX_SYMBOL_MAP[cmd] !== undefined ? CLIENT_LATEX_SYMBOL_MAP[cmd] : full;
+  });
+  s = s.replace(/\^\{([^{}]+)\}/g, (_full, exp) => {
+    const chars = String(exp).trim().split("");
+    if (chars.every((c) => CLIENT_SUPERSCRIPT_MAP[c] !== undefined)) {
+      return chars.map((c) => CLIENT_SUPERSCRIPT_MAP[c]).join("");
+    }
+    return `^(${exp})`;
+  });
+  s = s.replace(/\^([0-9+\-ni°])/g, (_full, ch) => CLIENT_SUPERSCRIPT_MAP[ch] || `^${ch}`);
+  s = s.replace(/_\{([^{}]+)\}/g, (_full, sub) => {
+    const chars = String(sub).trim().split("");
+    if (chars.every((c) => CLIENT_SUBSCRIPT_MAP[c] !== undefined)) {
+      return chars.map((c) => CLIENT_SUBSCRIPT_MAP[c]).join("");
+    }
+    return `_${sub}`;
+  });
+  s = s.replace(/_([0-9])/g, (_full, ch) => CLIENT_SUBSCRIPT_MAP[ch] || `_${ch}`);
+  s = s.replace(/\\([%$&_{}])/g, "$1");
+  s = s.replace(/\\[,;:!]/g, " ");
+  return s;
+}
+
+export function sanitizeLatexAndMathFormatting(raw: string): string {
+  if (!raw) return "";
+  let out = raw;
+  out = out.replace(/\$\$([\s\S]*?)\$\$/g, (_m, inner) => convertClientLatexSegment(String(inner).trim()));
+  out = out.replace(/\\\[([\s\S]*?)\\\]/g, (_m, inner) => convertClientLatexSegment(String(inner).trim()));
+  out = out.replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner) => convertClientLatexSegment(String(inner).trim()));
+  out = out.replace(/\$([^$\n]{1,120})\$/g, (full, inner) => {
+    const trimmed = String(inner).trim();
+    if (!trimmed) return full;
+    if (/^\d+(?:\.\d+)?\s+(?:and|or|to|per|each|for|in|at|of|from)\b/i.test(trimmed)) {
+      return full;
+    }
+    return convertClientLatexSegment(trimmed);
+  });
+  out = out.replace(/\$(?=\s*\\[a-zA-Z]+)/g, "");
+  if (out.includes("\\") || out.includes("^") || out.includes("_")) {
+    out = convertClientLatexSegment(out);
+  }
+  return out;
 }
 
 function buildClientSystemPrompt(ctx: StoreContext): string {
@@ -210,8 +461,9 @@ CRITICAL CONVERSATIONAL & ACTION CARD RULES:
    - ADD_PRODUCT:
      * VALID CATEGORIES ONLY: The store ONLY has 3 product categories: \`"fresh"\`, \`"frozen"\`, and \`"cold drinks"\`. NEVER use \`"General"\` or invent any other category!
      * Automatically infer the best category from the product name if not specified: beverages/sodas/juices/water/cans (e.g. Pepsi, Coke, Sprite, Maaza, Water) -> \`"cold drinks"\`; ice cream/frozen snacks/peas -> \`"frozen"\`; all other grocery/bakery/fresh items -> \`"fresh"\`.
-     * For a single product: name, price (positive ₹), stock (default 0), category (\`"fresh"\` | \`"frozen"\` | \`"cold drinks"\`).
+     * For a single product: name, price (positive ₹), stock (default 0), category (\`"fresh"\` | \`"frozen"\` | \`"cold drinks"\`). If the user uploaded an image or asked to use the uploaded image for this new product, also include \`"useAttachedImage": true, "attachmentIndex": 0\`.
      * For multiple products in one command (e.g., "add product atta, maida with the price 20, 30 and stock 50 for both"): include a \`products\` array of \`{ "name": "...", "price": 20, "stock": 50, "category": "fresh" | "frozen" | "cold drinks" }\` along with \`name\` (comma-separated names), \`price\` (first price), and \`stock\` (first stock).
+   - UPDATE_PRODUCT_IMAGE: Use when the user uploads an image (or refers to an uploaded image in chat) and asks to set, use, update, or change a store product's photo/image (e.g. "use this image for roti", "set this photo for pepsi"). Required: productId, productName (from CURRENT CATALOG SNAPSHOT), attachmentIndex (0-based index of the uploaded image, default 0).
    - UPDATE_STOCK: productId, productName, currentStock, newStock, quantityChange.
    - UPDATE_PRICE: productId, productName, currentPrice, newPrice.
    - DELETE_PRODUCT: productId, productName, currentPrice, currentStock.
@@ -227,7 +479,9 @@ CRITICAL CONVERSATIONAL & ACTION CARD RULES:
 \`\`\`
 4. Keep answers concise, warm, factual, and formatted in Indian Rupees (₹).
 5. STRICT CATALOG GROUNDING: When asked what to buy next, restock, or recommend for the shop, ONLY recommend products that ALREADY EXIST in CURRENT CATALOG SNAPSHOT. NEVER suggest or invent products that do not exist in the user's products list.
-6. STRICT ADMIN ROLE SECURITY: NEVER emit an UPDATE_ROLE action or allow making yourself, the current user, or any other user an Admin, or demoting/revoking an Admin via Buzz AI. If asked to promote or demote an admin or change user roles, refuse politely and state that Administrator roles can only be modified by a permanent Administrator in the User Accounts panel.`;
+6. STRICT ADMIN ROLE SECURITY: NEVER emit an UPDATE_ROLE action or allow making yourself, the current user, or any other user an Admin, or demoting/revoking an Admin via Buzz AI. If asked to promote or demote an admin or change user roles, refuse politely and state that Administrator roles can only be modified by a permanent Administrator in the User Accounts panel.
+7. STRICT LANGUAGE MATCHING RULE: Always reply in the EXACT SAME LANGUAGE as the user's LATEST message. If the user's latest message is in English, reply 100% in English even if earlier messages in the conversation were in Bengali or Hindi.
+8. QUOTED TEXT EXPLANATION: When the user quotes a line or word from the chat (indicated by \`Regarding this quoted text from our chat: "..."\`), directly explain what it means or answer their question about it clearly.`;
 }
 
 export function isRoleModificationPrompt(rawPrompt: string): boolean {
@@ -482,6 +736,8 @@ export function validateClientAction(
               price: itemPrice,
               stock: itemStock,
               category: itemCat,
+              ...(typeof item?.attachmentIndex === "number" ? { attachmentIndex: item.attachmentIndex } : {}),
+              ...(typeof item?.image === "string" && item.image ? { image: item.image } : {}),
             });
           }
         }
@@ -513,6 +769,8 @@ export function validateClientAction(
           price: action.price,
           stock: action.stock,
           category: action.category,
+          ...(typeof action.attachmentIndex === "number" ? { attachmentIndex: action.attachmentIndex } : {}),
+          ...(typeof action.image === "string" && action.image ? { image: action.image } : {}),
         },
       ];
       return action;
@@ -554,6 +812,28 @@ export function validateClientAction(
       const newPrice = Number(action.newPrice ?? action.price);
       if (isNaN(newPrice) || newPrice <= 0) return null;
       action.newPrice = Math.min(MAX_BILL_AMOUNT, newPrice);
+      return action;
+    }
+    case "UPDATE_PRODUCT_IMAGE": {
+      const searchName = String(action.productName || action.name || "").toLowerCase().trim();
+      let matched = products.find((p: any) => p.id && p.id === action.productId);
+      if (!matched && searchName && products.length > 0) {
+        matched =
+          products.find((p: any) => p.name?.toLowerCase().trim() === searchName) ||
+          products.find((p: any) => p.name?.toLowerCase().includes(searchName)) ||
+          products.find((p: any) => searchName.includes(p.name?.toLowerCase().trim()));
+      }
+      if (matched) {
+        action.productId = matched.id;
+        action.productName = matched.name;
+        action.currentPrice = Number(matched.price) || 0;
+        action.currentStock = Number(matched.stock) || 0;
+      }
+      if (!action.productId && !action.productName) return null;
+      action.attachmentIndex =
+        typeof action.attachmentIndex === "number" && action.attachmentIndex >= 0
+          ? Math.floor(action.attachmentIndex)
+          : 0;
       return action;
     }
     case "DELETE_PRODUCT": {
@@ -605,74 +885,64 @@ export function validateClientAction(
   }
 }
 
+export interface ConversationTurnInput {
+  role: "user" | "assistant";
+  content: string;
+  attachments?: Array<{
+    name?: string;
+    mimeType: string;
+    kind?: "image" | "video";
+    data: string;
+  }>;
+}
+
 function compactConversationHistory(
-  history: { role: "user" | "assistant"; content: string }[]
-): { role: "user" | "assistant"; content: string }[] {
-  return (history || []).slice(-10).map((turn) => ({
-    role: turn.role,
-    content: String(turn.content || "")
+  history: ConversationTurnInput[],
+  currentPrompt: string = ""
+): ConversationTurnInput[] {
+  const sliced = (history || []).slice(-10);
+  const promptNeedsHistoryMedia =
+    /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|product|use\s+this|use\s+it)\b/i.test(
+      currentPrompt
+    );
+  let mediaTurnsKept = 0;
+  const keepMediaIndices = new Set<number>();
+  if (promptNeedsHistoryMedia) {
+    for (let i = sliced.length - 1; i >= 0; i--) {
+      const turn = sliced[i];
+      if (Array.isArray(turn?.attachments) && turn.attachments.some((a) => a?.data)) {
+        if (mediaTurnsKept < 2) {
+          keepMediaIndices.add(i);
+          mediaTurnsKept++;
+        }
+      }
+    }
+  }
+
+  return sliced.map((turn, idx) => {
+    const cleanText = String(turn.content || "")
       .replace(/<thought>[\s\S]*?<\/thought>/g, "")
       .replace(/```action[\s\S]*?```/g, "")
       .trim()
-      .slice(0, 800),
-  }));
-}
-
-let cachedBridgeToken: string | null = null;
-let bridgeTokenFetchPromise: Promise<string | null> | null = null;
-
-async function getDirectBridgeToken(forceRefresh: boolean = false): Promise<string | null> {
-  if (!forceRefresh && cachedBridgeToken) {
-    return cachedBridgeToken;
-  }
-  if (!forceRefresh && typeof localStorage !== "undefined") {
-    try {
-      const saved = localStorage.getItem("buzz_ai_bridge_token");
-      if (saved && saved.length > 15) {
-        cachedBridgeToken = saved;
-        return saved;
-      }
-    } catch {}
-  }
-  if (bridgeTokenFetchPromise && !forceRefresh) {
-    return bridgeTokenFetchPromise;
-  }
-
-  bridgeTokenFetchPromise = (async () => {
-    try {
-      const cfgRef = doc(db, "settings", "ai_bridge_config");
-      const snap = await getDoc(cfgRef).catch(() => getDocFromServer(cfgRef));
-      const finalSnap = snap && snap.exists() ? snap : await getDocFromServer(cfgRef).catch(() => null);
-      if (finalSnap && finalSnap.exists()) {
-        const data = finalSnap.data();
-        const encoded = String(data?.token || "").trim();
-        if (encoded) {
-          const decoded = atob(encoded).trim();
-          if (decoded.length > 15) {
-            cachedBridgeToken = decoded;
-            try {
-              localStorage.setItem("buzz_ai_bridge_token", decoded);
-            } catch {}
-            return decoded;
-          }
-        }
-      }
-    } catch {}
-    return cachedBridgeToken;
-  })();
-
-  try {
-    return await bridgeTokenFetchPromise;
-  } finally {
-    bridgeTokenFetchPromise = null;
-  }
-}
-
-// Pre-warm bridge token in background so mobile requests have zero token lookup latency
-if (typeof window !== "undefined") {
-  setTimeout(() => {
-    getDirectBridgeToken().catch(() => {});
-  }, 400);
+      .slice(0, 800);
+    const validAtts =
+      keepMediaIndices.has(idx) && Array.isArray(turn.attachments)
+        ? turn.attachments
+            .filter((a) => a && typeof a.mimeType === "string" && typeof a.data === "string" && a.data.length > 0)
+            .slice(0, 4)
+            .map((a) => ({
+              name: a.name || "media",
+              mimeType: a.mimeType,
+              kind: a.kind || (a.mimeType.startsWith("video/") ? "video" : "image"),
+              data: a.data,
+            }))
+        : undefined;
+    return {
+      role: turn.role,
+      content: cleanText,
+      ...(validAtts && validAtts.length > 0 ? { attachments: validAtts } : {}),
+    };
+  });
 }
 
 function formatActionSummaryReply(action: AssistantAction | null): string {
@@ -689,6 +959,8 @@ function formatActionSummaryReply(action: AssistantAction | null): string {
       return `Prepared stock update for **${action.productName || "product"}** (${action.currentStock ?? 0} ➔ **${action.newStock ?? 0} units**). Confirm below to apply:`;
     case "UPDATE_PRICE":
       return `Prepared price update for **${action.productName || "product"}** (₹${action.currentPrice ?? 0} ➔ **₹${action.newPrice ?? 0}**). Confirm below to apply:`;
+    case "UPDATE_PRODUCT_IMAGE":
+      return `Prepared product photo update for **${action.productName || "product"}** using your uploaded image. Confirm below to save:`;
     case "DELETE_PRODUCT":
       return `Prepared product removal for **${action.productName || "product"}**. Confirm below to delete it from your catalog:`;
     case "ADD_EXPENSE":
@@ -704,270 +976,6 @@ function formatActionSummaryReply(action: AssistantAction | null): string {
     default:
       return "Prepared your requested store action below. Tap confirm to apply:";
   }
-}
-
-async function askViaDirectGemini(
-  prompt: string,
-  compactedHistory: { role: "user" | "assistant"; content: string }[],
-  compactedContext: StoreContext,
-  onChunk?: (cleanText: string) => void,
-  externalSignal?: AbortSignal
-): Promise<AssistantResponse> {
-  let apiKey = await getDirectBridgeToken(false);
-  if (!apiKey) {
-    apiKey = await getDirectBridgeToken(true);
-  }
-  if (!apiKey) {
-    throw new Error("Direct Gemini bridge token unavailable");
-  }
-
-  const systemInstruction = buildClientSystemPrompt(compactedContext);
-  const contents = buildValidGeminiContents(compactedHistory, prompt);
-  const localCandidateRes = generateClientStoreResponse(
-    prompt,
-    compactedContext,
-    compactedHistory
-  );
-  const localActionCandidate = localCandidateRes.action;
-
-  // Verified fast models (<1.3s 200 OK); avoids gemini-3.8-flash (503) and gemini-flash-latest (headers timeout)
-  const candidateModels = [
-    "gemini-3.1-flash-lite",
-    "gemini-3.1-flash-lite",
-    "gemini-3-flash-preview",
-    "gemini-3.1-flash-lite-preview",
-  ];
-
-  let lastErr: any = null;
-  const requestBody = {
-    systemInstruction: {
-      parts: [{ text: systemInstruction }],
-    },
-    contents,
-    generationConfig: {
-      temperature: 0.35,
-    },
-  };
-
-  const finalizeRawModelOutput = (rawOutput: string): AssistantResponse | null => {
-    if (!rawOutput || !rawOutput.trim()) return null;
-    let rawAction: any = null;
-    const actionMatch = rawOutput.match(/```action\s*([\s\S]*?)\s*```/);
-    if (actionMatch && actionMatch[1]) {
-      try {
-        rawAction = JSON.parse(actionMatch[1]);
-      } catch {}
-    }
-    let extractedThought = "";
-    const thMatch = rawOutput.match(/<thought>\s*([\s\S]*?)\s*<\/thought>/);
-    if (thMatch && thMatch[1]) {
-      extractedThought = thMatch[1].trim();
-    }
-
-    let cleanReply = rawOutput
-      .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-      .replace(/<thought>[\s\S]*$/g, "")
-      .replace(/```action[\s\S]*?```/g, "")
-      .replace(/```action[\s\S]*$/g, "")
-      .trim();
-
-    const validatedAction =
-      validateClientAction(rawAction, prompt, cleanReply || rawOutput, compactedContext) ||
-      localActionCandidate ||
-      null;
-
-    // Crucial multi-turn fix: if the model emitted ONLY an ```action``` block (or thought + action)
-    // on a follow-up turn without prose outside the block, synthesize a natural summary instead of discarding!
-    if (!cleanReply && validatedAction) {
-      cleanReply = formatActionSummaryReply(validatedAction);
-    }
-    if (!cleanReply && localCandidateRes.reply) {
-      cleanReply = localCandidateRes.reply;
-    }
-    if (!cleanReply && extractedThought) {
-      cleanReply = extractedThought;
-    }
-    if (!cleanReply) return null;
-
-    if (onChunk) {
-      onChunk(cleanReply);
-    }
-    return {
-      reply: cleanReply,
-      action: validatedAction,
-      thought: extractedThought || generateDynamicThought(prompt, cleanReply, compactedContext),
-      rawText: rawOutput,
-    };
-  };
-
-  for (let i = 0; i < candidateModels.length; i++) {
-    if (externalSignal?.aborted) {
-      throw new Error("Aborted");
-    }
-    const model = candidateModels[i];
-
-    // 1. Try SSE streaming with its own dedicated AbortController (6.5s timeout)
-    const streamController = new AbortController();
-    const streamTimeoutId = setTimeout(() => streamController.abort(), 6500);
-    const onExternalStreamAbort = () => streamController.abort();
-    externalSignal?.addEventListener("abort", onExternalStreamAbort, { once: true });
-
-    try {
-      const streamUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
-      const response = await fetch(streamUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-        signal: streamController.signal,
-      });
-
-      if ((response.status === 400 || response.status === 401 || response.status === 403) && i === 0) {
-        const refreshed = await getDirectBridgeToken(true);
-        if (refreshed && refreshed !== apiKey) {
-          apiKey = refreshed;
-        }
-      }
-
-      if (response.ok && response.body) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let accumulatedRaw = "";
-        let sseBuffer = "";
-        let sawFinishReason = false;
-
-        const processSseLine = (line: string) => {
-          const trimmed = line.trim();
-          if (!trimmed.startsWith("data:")) return;
-          const jsonStr = trimmed.replace(/^data:\s*/, "").trim();
-          if (!jsonStr || jsonStr === "[DONE]") {
-            sawFinishReason = true;
-            return;
-          }
-          try {
-            const parsed = JSON.parse(jsonStr);
-            const candidate = parsed?.candidates?.[0];
-            const parts = candidate?.content?.parts || [];
-            for (const part of parts) {
-              if (typeof part?.text === "string" && part.text) {
-                accumulatedRaw += part.text;
-              }
-            }
-            if (candidate?.finishReason) {
-              sawFinishReason = true;
-            }
-            if (onChunk && accumulatedRaw) {
-              const cleanDisplay = accumulatedRaw
-                .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-                .replace(/<thought>[\s\S]*$/g, "")
-                .replace(/```action[\s\S]*?```/g, "")
-                .replace(/```action[\s\S]*$/g, "")
-                .trim();
-              if (cleanDisplay) {
-                onChunk(cleanDisplay);
-              }
-            }
-          } catch {}
-        };
-
-        try {
-          while (true) {
-            if (externalSignal?.aborted) {
-              try {
-                reader.cancel();
-              } catch {}
-              throw new Error("Aborted");
-            }
-            const { done, value } = await reader.read();
-            if (done) {
-              sseBuffer += decoder.decode();
-              if (sseBuffer.trim()) {
-                for (const leftoverLine of sseBuffer.split("\n")) {
-                  processSseLine(leftoverLine);
-                }
-              }
-              break;
-            }
-            sseBuffer += decoder.decode(value, { stream: true });
-            const lines = sseBuffer.split("\n");
-            sseBuffer = lines.pop() || "";
-
-            for (const line of lines) {
-              processSseLine(line);
-            }
-
-            if (sawFinishReason && accumulatedRaw.trim()) {
-              if (sseBuffer.trim()) {
-                processSseLine(sseBuffer);
-                sseBuffer = "";
-              }
-              try {
-                reader.cancel();
-              } catch {}
-              break;
-            }
-          }
-        } catch (streamReadErr: any) {
-          if (externalSignal?.aborted) {
-            throw streamReadErr;
-          }
-        }
-
-        clearTimeout(streamTimeoutId);
-        externalSignal?.removeEventListener("abort", onExternalStreamAbort);
-
-        const finalizedStream = finalizeRawModelOutput(accumulatedRaw);
-        if (finalizedStream) {
-          return finalizedStream;
-        }
-      } else {
-        clearTimeout(streamTimeoutId);
-        externalSignal?.removeEventListener("abort", onExternalStreamAbort);
-      }
-    } catch (streamErr: any) {
-      clearTimeout(streamTimeoutId);
-      externalSignal?.removeEventListener("abort", onExternalStreamAbort);
-      lastErr = streamErr;
-    }
-
-    if (externalSignal?.aborted) {
-      throw new Error("Aborted");
-    }
-
-    // 2. Non-stream unary fallback with its own fresh AbortController (6.0s timeout)
-    const unaryController = new AbortController();
-    const unaryTimeoutId = setTimeout(() => unaryController.abort(), 6000);
-    const onExternalUnaryAbort = () => unaryController.abort();
-    externalSignal?.addEventListener("abort", onExternalUnaryAbort, { once: true });
-
-    try {
-      const unaryUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const unaryRes = await fetch(unaryUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-        signal: unaryController.signal,
-      });
-
-      clearTimeout(unaryTimeoutId);
-      externalSignal?.removeEventListener("abort", onExternalUnaryAbort);
-
-      if (unaryRes.ok) {
-        const unaryData = await unaryRes.json();
-        const parts = unaryData?.candidates?.[0]?.content?.parts || [];
-        const rawText = parts.map((p: any) => String(p?.text || "")).join("");
-        const finalizedUnary = finalizeRawModelOutput(rawText);
-        if (finalizedUnary) {
-          return finalizedUnary;
-        }
-      }
-    } catch (unaryErr: any) {
-      clearTimeout(unaryTimeoutId);
-      externalSignal?.removeEventListener("abort", onExternalUnaryAbort);
-      lastErr = unaryErr;
-    }
-  }
-
-  throw lastErr || new Error("Direct Gemini request failed");
 }
 
 function buildFallbackStoreReply(
@@ -996,10 +1004,17 @@ async function askViaFirestoreBridge(
   compactedHistory: { role: "user" | "assistant"; content: string }[],
   compactedContext: StoreContext,
   onChunk?: (cleanText: string) => void,
-  externalSignal?: AbortSignal
+  externalSignal?: AbortSignal,
+  attachments?: ChatAttachment[]
 ): Promise<AssistantResponse> {
   const reqId = `ai_rpc_req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const reqRef = doc(db, "settings", reqId);
+  const serializedAttachments = (attachments || []).map((a) => ({
+    name: a.name,
+    mimeType: a.mimeType,
+    kind: a.kind,
+    data: a.dataBase64,
+  }));
 
   return new Promise<AssistantResponse>((resolve, reject) => {
     let settled = false;
@@ -1047,24 +1062,20 @@ async function askViaFirestoreBridge(
       );
     }
 
-    // Fast 2.8s check: if server.ts is hibernating (next day when AI Studio container is asleep),
-    // fail over immediately instead of waiting 15 seconds
-    ackTimer = setTimeout(() => {
-      if (!settled && !serverAcknowledged) {
-        settled = true;
-        clearTimeout(timer);
-        cleanup();
-        reject(new Error("Firestore AI bridge server hibernating"));
-      }
-    }, 2800);
-
-    let timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        cleanup();
-        reject(new Error("Firestore AI bridge timed out"));
-      }
-    }, 10000);
+    const hasHistoryMedia = (compactedHistory || []).some(
+      (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
+    );
+    const hasMedia = serializedAttachments.length > 0 || hasHistoryMedia;
+    let timer = setTimeout(
+      () => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          reject(new Error("Firestore AI bridge timed out"));
+        }
+      },
+      hasMedia ? 38000 : 28000
+    );
 
     const refreshStreamTimer = () => {
       clearTimeout(timer);
@@ -1074,7 +1085,7 @@ async function askViaFirestoreBridge(
           cleanup();
           reject(new Error("Firestore AI bridge stream timed out"));
         }
-      }, 8000);
+      }, 20000);
     };
 
     const handleDocData = (data: any) => {
@@ -1145,27 +1156,51 @@ async function askViaFirestoreBridge(
           handleDocData(snap.data());
         }
       } catch {}
-    }, 1200);
+    }, 220);
 
-    const safePayload = JSON.parse(
-      JSON.stringify({
-        type: "chat",
-        status: "pending",
-        prompt: prompt.trim().slice(0, 1200),
-        conversationHistory: compactedHistory || [],
-        storeContext: compactedContext || {},
-        createdAt: Date.now(),
-      })
-    );
+    const rawPayloadObj: any = {
+      type: "chat",
+      status: "pending",
+      prompt: prompt.trim().slice(0, 1600),
+      conversationHistory: JSON.parse(JSON.stringify(compactedHistory || [])),
+      storeContext: compactedContext || {},
+      ...(serializedAttachments.length > 0 ? { attachments: serializedAttachments } : {}),
+      createdAt: Date.now(),
+    };
 
-    setDoc(reqRef, safePayload).catch((err) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(timer);
-        cleanup();
-        reject(err);
+    // Ensure Firestore document stays safely under the 1,048,576-byte (1 MB) limit
+    let serializedJson = JSON.stringify(rawPayloadObj);
+    if (serializedJson.length > 850000 && Array.isArray(rawPayloadObj.conversationHistory)) {
+      for (let i = 0; i < rawPayloadObj.conversationHistory.length && serializedJson.length > 850000; i++) {
+        if (rawPayloadObj.conversationHistory[i]?.attachments) {
+          delete rawPayloadObj.conversationHistory[i].attachments;
+          serializedJson = JSON.stringify(rawPayloadObj);
+        }
       }
-    });
+    }
+    const safePayload = JSON.parse(serializedJson);
+
+    wakeUpBuzzServer();
+    setDoc(reqRef, safePayload)
+      .then(() => {
+        if (settled || serverAcknowledged) return;
+        ackTimer = setTimeout(() => {
+          if (!settled && !serverAcknowledged) {
+            settled = true;
+            clearTimeout(timer);
+            cleanup();
+            reject(new Error("Firestore AI bridge server hibernating"));
+          }
+        }, 16000);
+      })
+      .catch((err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          cleanup();
+          reject(err);
+        }
+      });
   });
 }
 
@@ -1227,8 +1262,9 @@ export function buildValidGeminiContents(
 
 export async function askGeminiAssistant(
   prompt: string,
-  conversationHistory: { role: "user" | "assistant"; content: string }[],
-  storeContext: StoreContext
+  conversationHistory: ConversationTurnInput[],
+  storeContext: StoreContext,
+  attachments?: ChatAttachment[]
 ): Promise<AssistantResponse> {
   if (isRoleModificationPrompt(prompt)) {
     return {
@@ -1239,25 +1275,30 @@ export async function askGeminiAssistant(
     };
   }
   const compactedContext = compactStoreContext(storeContext);
-  const compactedHistory = compactConversationHistory(conversationHistory);
+  const compactedHistory = compactConversationHistory(conversationHistory, prompt);
   const localActionCandidate = generateClientStoreResponse(
     prompt,
     compactedContext,
     compactedHistory
   ).action;
+  const serializedAttachments = (attachments || []).map((a) => ({
+    name: a.name,
+    mimeType: a.mimeType,
+    kind: a.kind,
+    data: a.dataBase64,
+  }));
+  const hasAttachments = serializedAttachments.length > 0;
 
-  // 1. Direct Gemini HTTPS call (works 24/7 on mobile APK and web even when server.ts hibernates)
-  if (shouldPreferFirestoreBridge() || isMobileClientDevice()) {
-    try {
-      return await askViaDirectGemini(prompt, compactedHistory, compactedContext);
-    } catch {}
-  }
+  const hasHistoryMedia = (compactedHistory || []).some(
+    (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
+  );
+  const hasAnyMedia = hasAttachments || hasHistoryMedia;
 
   const tryHttpChat = async (): Promise<AssistantResponse | null> => {
     for (const baseUrl of getCandidateApiBaseUrls()) {
       const endpoint = `${baseUrl}/api/gemini/chat`;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 6500);
+      const timer = setTimeout(() => controller.abort(), hasAnyMedia ? 120000 : 60000);
 
       try {
         const response = await fetch(endpoint, {
@@ -1266,9 +1307,10 @@ export async function askGeminiAssistant(
             "Content-Type": "application/json",
           },
           body: JSON.stringify({
-            prompt: prompt.trim().slice(0, 1200),
+            prompt: prompt.trim().slice(0, 1600),
             conversationHistory: compactedHistory,
             storeContext: compactedContext,
+            ...(hasAttachments ? { attachments: serializedAttachments } : {}),
           }),
           signal: controller.signal,
         });
@@ -1298,31 +1340,38 @@ export async function askGeminiAssistant(
     return null;
   };
 
-  if (!shouldPreferFirestoreBridge() && !isMobileClientDevice()) {
+  if (!shouldPreferFirestoreBridge()) {
     const httpRes = await tryHttpChat();
     if (httpRes) return httpRes;
   }
 
   try {
-    return await askViaDirectGemini(prompt, compactedHistory, compactedContext);
-  } catch {}
-
-  try {
-    return await askViaFirestoreBridge(prompt, compactedHistory, compactedContext);
-  } catch {
+    return await askViaFirestoreBridge(
+      prompt,
+      compactedHistory,
+      compactedContext,
+      undefined,
+      undefined,
+      attachments
+    );
+  } catch (bridgeErr: any) {
     const retryHttp = await tryHttpChat();
     if (retryHttp) return retryHttp;
-    return buildFallbackStoreReply(prompt, compactedContext, compactedHistory);
+    throw new Error(
+      bridgeErr?.message ||
+        "Could not get a response from Buzz AI right now. Please try again."
+    );
   }
 }
 
 export async function askGeminiAssistantStream(
   prompt: string,
-  conversationHistory: { role: "user" | "assistant"; content: string }[],
+  conversationHistory: ConversationTurnInput[],
   storeContext: StoreContext,
   onChunk: (accumulatedCleanText: string) => void,
   onComplete: (data: AssistantResponse) => void,
-  externalSignal?: AbortSignal
+  externalSignal?: AbortSignal,
+  attachments?: ChatAttachment[]
 ): Promise<void> {
   if (isRoleModificationPrompt(prompt)) {
     onChunk(ROLE_MODIFICATION_REFUSAL_REPLY);
@@ -1335,12 +1384,19 @@ export async function askGeminiAssistantStream(
     return;
   }
   const compactedContext = compactStoreContext(storeContext);
-  const compactedHistory = compactConversationHistory(conversationHistory);
+  const compactedHistory = compactConversationHistory(conversationHistory, prompt);
   const localActionCandidate = generateClientStoreResponse(
     prompt,
     compactedContext,
     compactedHistory
   ).action;
+  const serializedAttachments = (attachments || []).map((a) => ({
+    name: a.name,
+    mimeType: a.mimeType,
+    kind: a.kind,
+    data: a.dataBase64,
+  }));
+  const hasAttachments = serializedAttachments.length > 0;
 
   let completed = false;
   let userAborted = false;
@@ -1351,9 +1407,10 @@ export async function askGeminiAssistantStream(
 
   const emitChunk = (chunkText: string) => {
     if (completed || userAborted) return;
-    if (chunkText && chunkText.trim()) {
-      lastStreamedChunk = chunkText.trim();
-      onChunk(chunkText);
+    const sanitized = sanitizeLatexAndMathFormatting(chunkText);
+    if (sanitized && sanitized.trim()) {
+      lastStreamedChunk = sanitized.trim();
+      onChunk(sanitized);
     }
   };
 
@@ -1383,7 +1440,9 @@ export async function askGeminiAssistantStream(
 
   const safeComplete = (payload: AssistantResponse) => {
     if (completed || userAborted) return;
-    const cleanReply = String(payload.reply || lastStreamedChunk || "").trim();
+    const cleanReply = sanitizeLatexAndMathFormatting(
+      String(payload.reply || lastStreamedChunk || "").trim()
+    );
     if (!cleanReply) return;
     completed = true;
     if (timeoutId !== null) {
@@ -1402,45 +1461,26 @@ export async function askGeminiAssistantStream(
     });
   };
 
-  // 1. On mobile APK / mobile browsers or when direct HTTP is unavailable, call Direct Gemini HTTPS first.
-  // This works 24/7/365 even when the AI Studio dev container hibernates the next day!
-  const useDirectMobilePath = shouldPreferFirestoreBridge() || isMobileClientDevice();
-  if (useDirectMobilePath) {
-    try {
-      const directRes = await askViaDirectGemini(
-        prompt,
-        compactedHistory,
-        compactedContext,
-        (partial) => {
-          emitChunk(partial);
-        },
-        bridgeAbortController.signal
-      );
-      if (!completed && !userAborted && String(directRes.reply || "").trim()) {
-        safeComplete(directRes);
-        return;
-      }
-    } catch {
-      if (!completed && !userAborted && lastStreamedChunk) {
-        safeComplete({
-          reply: lastStreamedChunk,
-          action: validateClientAction(null, prompt, lastStreamedChunk, compactedContext) || localActionCandidate || null,
-          thought: generateDynamicThought(prompt, lastStreamedChunk, storeContext),
-        });
-        return;
-      }
-      // Proceed to server stream / Firestore bridge fallbacks
-    }
-  }
+  const hasHistoryMedia = (compactedHistory || []).some(
+    (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
+  );
+  const hasAnyMedia = hasAttachments || hasHistoryMedia;
+  const tierTimeoutMs = hasAnyMedia ? 28000 : 20000;
 
-  timeoutId = setTimeout(() => {
-    if (completed || userAborted) return;
-    try {
-      controller.abort();
-    } catch {}
-  }, useDirectMobilePath ? 4500 : 8000);
+  const refreshStreamTimeout = (ms: number = tierTimeoutMs) => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+    timeoutId = setTimeout(() => {
+      if (completed || userAborted) return;
+      try {
+        controller.abort();
+      } catch {}
+    }, ms);
+  };
 
   if (!shouldPreferFirestoreBridge()) {
+    refreshStreamTimeout(tierTimeoutMs);
     try {
       const baseUrl = getApiBaseUrl();
       const endpoint = `${baseUrl}/api/gemini/chat-stream`;
@@ -1450,9 +1490,10 @@ export async function askGeminiAssistantStream(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          prompt: prompt.trim().slice(0, 1200),
+          prompt: prompt.trim().slice(0, 1600),
           conversationHistory: compactedHistory,
           storeContext: compactedContext,
+          ...(hasAttachments ? { attachments: serializedAttachments } : {}),
         }),
         signal: controller.signal,
       });
@@ -1464,15 +1505,7 @@ export async function askGeminiAssistantStream(
       }
 
       lastHttpFailureAt = 0;
-      if (timeoutId !== null) {
-        clearTimeout(timeoutId);
-      }
-      timeoutId = setTimeout(() => {
-        if (completed || userAborted) return;
-        try {
-          controller.abort();
-        } catch {}
-      }, 14000);
+      refreshStreamTimeout(tierTimeoutMs);
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -1490,6 +1523,7 @@ export async function askGeminiAssistantStream(
         const { done, value } = await reader.read();
         if (done || completed || userAborted) break;
 
+        refreshStreamTimeout(45000);
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
@@ -1594,94 +1628,81 @@ export async function askGeminiAssistantStream(
 
   if (userAborted || completed || externalSignal?.aborted) return;
 
-  // Fallback 1: Direct Gemini HTTPS call (if not already tried or if token just arrived)
-  if (!useDirectMobilePath) {
-    try {
-      const directRes = await askViaDirectGemini(
-        prompt,
-        compactedHistory,
-        compactedContext,
-        (partial) => {
-          emitChunk(partial);
-        },
-        externalSignal
-      );
-      if (!userAborted && !completed && !externalSignal?.aborted && String(directRes.reply || "").trim()) {
-        safeComplete(directRes);
-        return;
+  // Fallback 1 & 2: Race Firestore RPC bridge with parallel direct HTTP endpoints so whichever completes first wins
+  const directHttpPromise = Promise.any(
+    getCandidateApiBaseUrls().map(async (baseUrl): Promise<AssistantResponse> => {
+      if (userAborted || completed || externalSignal?.aborted) {
+        throw new Error("Aborted");
       }
-    } catch {}
-  }
+      const chatEndpoint = `${baseUrl}/api/gemini/chat`;
+      const chatController = new AbortController();
+      const chatTimer = setTimeout(() => chatController.abort(), tierTimeoutMs);
+      try {
+        const response = await fetch(chatEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt: prompt.trim().slice(0, 1600),
+            conversationHistory: compactedHistory,
+            storeContext: compactedContext,
+            ...(hasAttachments ? { attachments: serializedAttachments } : {}),
+          }),
+          signal: chatController.signal,
+        });
+        clearTimeout(chatTimer);
+        const contentType = response.headers.get("content-type") || "";
+        if (response.ok && contentType.includes("application/json")) {
+          const data = await response.json();
+          const replyStr = String(data?.reply || "").trim();
+          if (replyStr) {
+            return {
+              reply: replyStr,
+              action:
+                validateClientAction(data.action, prompt, replyStr, compactedContext) ||
+                localActionCandidate ||
+                null,
+              thought: data.thought || generateDynamicThought(prompt, replyStr, storeContext),
+            };
+          }
+        }
+        throw new Error(`Status ${response.status}`);
+      } catch (err) {
+        clearTimeout(chatTimer);
+        throw err;
+      }
+    })
+  );
 
-  if (userAborted || completed || externalSignal?.aborted) return;
-
-  // Fallback 2: Firestore RPC bridge (fast 2.8s ack check)
-  try {
-    const bridgeRes = await askViaFirestoreBridge(
-      prompt,
-      compactedHistory,
-      compactedContext,
-      emitChunk,
-      externalSignal
-    );
-    if (!userAborted && !completed && !externalSignal?.aborted && String(bridgeRes.reply || "").trim()) {
-      const validatedAction =
-        validateClientAction(bridgeRes.action, prompt, bridgeRes.reply, compactedContext) ||
+  const bridgePromise = askViaFirestoreBridge(
+    prompt,
+    compactedHistory,
+    compactedContext,
+    emitChunk,
+    externalSignal,
+    attachments
+  ).then((bridgeRes) => {
+    const replyStr = String(bridgeRes.reply || "").trim();
+    if (!replyStr) throw new Error("Empty bridge reply");
+    return {
+      ...bridgeRes,
+      reply: replyStr,
+      action:
+        validateClientAction(bridgeRes.action, prompt, replyStr, compactedContext) ||
         localActionCandidate ||
-        null;
-      emitChunk(bridgeRes.reply);
-      safeComplete({
-        ...bridgeRes,
-        action: validatedAction,
-      });
+        null,
+    };
+  });
+
+  try {
+    const winner = await Promise.any([directHttpPromise, bridgePromise]);
+    if (!userAborted && !completed && !externalSignal?.aborted && String(winner.reply || "").trim()) {
+      emitChunk(winner.reply);
+      safeComplete(winner);
       return;
     }
   } catch {}
 
-  if (userAborted || completed || externalSignal?.aborted) return;
-
-  // Fallback 3: Try candidate non-streaming /api/gemini/chat endpoints
-  for (const baseUrl of getCandidateApiBaseUrls()) {
-    if (userAborted || completed || externalSignal?.aborted) return;
-    const chatEndpoint = `${baseUrl}/api/gemini/chat`;
-    const chatController = new AbortController();
-    const chatTimer = setTimeout(() => chatController.abort(), 5000);
-    try {
-      const response = await fetch(chatEndpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: prompt.trim().slice(0, 1200),
-          conversationHistory: compactedHistory,
-          storeContext: compactedContext,
-        }),
-        signal: chatController.signal,
-      });
-      clearTimeout(chatTimer);
-      const contentType = response.headers.get("content-type") || "";
-      if (response.ok && contentType.includes("application/json")) {
-        const data = await response.json();
-        const replyStr = String(data?.reply || "").trim();
-        if (replyStr && !userAborted && !completed && !externalSignal?.aborted) {
-          const validatedAction =
-            validateClientAction(data.action, prompt, replyStr, compactedContext) ||
-            localActionCandidate ||
-            null;
-          emitChunk(replyStr);
-          safeComplete({
-            reply: replyStr,
-            action: validatedAction,
-            thought: data.thought || generateDynamicThought(prompt, replyStr, storeContext),
-          });
-          return;
-        }
-      }
-    } catch {
-      clearTimeout(chatTimer);
-    }
-  }
-
-  // Final deterministic local store response so Buzz AI never fails even when offline
+  // If partial chunks were already streamed from the real AI, complete with those; otherwise throw a real error (never emit a dummy recorded reply)
   if (!userAborted && !completed && !externalSignal?.aborted) {
     if (lastStreamedChunk) {
       safeComplete({
@@ -1690,9 +1711,7 @@ export async function askGeminiAssistantStream(
         thought: generateDynamicThought(prompt, lastStreamedChunk, storeContext),
       });
     } else {
-      const localFallback = buildFallbackStoreReply(prompt, compactedContext, compactedHistory);
-      emitChunk(localFallback.reply);
-      safeComplete(localFallback);
+      throw new Error("Buzz AI is taking longer than expected or could not reach the server. Please try again.");
     }
   }
 }
@@ -2493,6 +2512,51 @@ export function generateClientStoreResponse(
     }
   }
 
+  // 7B. Update Product Image with Uploaded Image Request (e.g. "use this image for roti", "set this photo for pepsi")
+  const isUpdateProductImageIntent =
+    /\b(use|set|put|apply|make|change|update|attach|assign)\b[\s\S]*?\b(image|photo|picture|pic|thumbnail)\b/i.test(
+      p
+    ) &&
+    !/\b(add|create|new)\s+(?:a\s+|new\s+)?product\b/i.test(p);
+
+  if (isUpdateProductImageIntent && !wantsToBeAsked) {
+    let attachmentIndex = 0;
+    if (/\b(2nd|second|image\s*2|photo\s*2|pic\s*2)\b/i.test(p)) attachmentIndex = 1;
+    else if (/\b(3rd|third|image\s*3|photo\s*3|pic\s*3)\b/i.test(p)) attachmentIndex = 2;
+    else if (/\b(4th|fourth|image\s*4|photo\s*4|pic\s*4)\b/i.test(p)) attachmentIndex = 3;
+
+    let targetProd: any = products.find(
+      (prod: any) => prod?.name && p.includes(prod.name.toLowerCase().trim())
+    );
+    if (!targetProd) {
+      const forMatch =
+        p.match(/\b(?:for|on|to|of)\s+(?:the\s+)?(?:product\s+|item\s+)?([a-zA-Z0-9\s]+?)$/i) ||
+        p.match(/\b(?:change|update|set)\s+([a-zA-Z0-9\s]+?)\s+(?:product\s+)?(?:image|photo|picture|pic)\b/i);
+      if (forMatch) {
+        const cleanedTarget = forMatch[1]
+          .replace(/\b(product|item|the|this|that|image|photo|picture|pic|in\s+store|in\s+catalog)\b/gi, "")
+          .trim();
+        targetProd = findBestClientProduct(products, cleanedTarget);
+      }
+    }
+
+    if (targetProd) {
+      return {
+        reply: `Prepared product image update for **${targetProd.name}** using your uploaded photo.\n\nConfirm below to save this image to **${targetProd.name}** in your store catalog:`,
+        action: {
+          type: "UPDATE_PRODUCT_IMAGE",
+          productId: targetProd.id,
+          productName: targetProd.name,
+          currentPrice: Number(targetProd.price) || 0,
+          currentStock: Number(targetProd.stock) || 0,
+          attachmentIndex,
+        },
+        thought: `Matched product "${targetProd.name}" and linked uploaded image for catalog update.`,
+        thoughtDuration: 1,
+      };
+    }
+  }
+
   // 8. Add New Product(s) Request (Supports both single product & multi-product natural commands)
   const isAddProductIntent =
     (/\b(add|create|insert|register)\s+(?:a\s+|new\s+|the\s+|some\s+)*(?:products?|items?)\b/i.test(p) ||
@@ -2505,6 +2569,7 @@ export function generateClientStoreResponse(
   if (isAddProductIntent) {
     if (!wantsToBeAsked) {
       const parsedProducts = parseAddProductsFromPrompt(prompt);
+      const mentionsImage = /\b(image|photo|picture|pic|uploaded|attached)\b/i.test(p);
       if (parsedProducts.length > 0) {
         if (parsedProducts.length === 1) {
           const item = parsedProducts[0];
@@ -2517,7 +2582,8 @@ export function generateClientStoreResponse(
               price: item.price,
               stock: item.stock,
               category: normCat,
-              products: [{ ...item, category: normCat }],
+              ...(mentionsImage ? { useAttachedImage: true, attachmentIndex: 0 } : {}),
+              products: [{ ...item, category: normCat, ...(mentionsImage ? { attachmentIndex: 0 } : {}) }],
             },
             thought: `Structured new catalog entry "${item.name}" at ₹${item.price} with ${item.stock} initial units (${normCat}).`,
             thoughtDuration: 1,
@@ -3016,102 +3082,6 @@ async function transcribeViaFirestoreBridge(
   });
 }
 
-async function transcribeViaDirectGemini(
-  audioBase64: string,
-  mimeType: string
-): Promise<string> {
-  const apiKey = (await getDirectBridgeToken(false)) || (await getDirectBridgeToken(true));
-  if (!apiKey) {
-    throw new Error("Direct Gemini bridge token unavailable");
-  }
-  const models = ["gemini-3.1-flash-lite", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview"];
-  for (const model of models) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 6500);
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [
-                { inlineData: { mimeType, data: audioBase64 } },
-                {
-                  text: "Transcribe the following spoken store command accurately in English. Output only the transcription text.",
-                },
-              ],
-            },
-          ],
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (res.ok) {
-        const data = await res.json();
-        const text = (data?.candidates?.[0]?.content?.parts || [])
-          .map((p: any) => String(p?.text || ""))
-          .join("")
-          .trim();
-        if (text) return text;
-      }
-    } catch {
-      clearTimeout(timer);
-    }
-  }
-  throw new Error("Direct transcription failed");
-}
-
-async function ttsViaDirectGemini(
-  text: string,
-  timeoutMs: number
-): Promise<string> {
-  const apiKey = (await getDirectBridgeToken(false)) || (await getDirectBridgeToken(true));
-  if (!apiKey) {
-    throw new Error("Direct Gemini bridge token unavailable");
-  }
-  const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
-  for (const ttsModel of ttsModels) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 4800));
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${ttsModel}:generateContent?key=${encodeURIComponent(apiKey)}`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text }] }],
-          generationConfig: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: "Kore",
-                },
-              },
-            },
-          },
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-      if (res.ok) {
-        const data = await res.json();
-        const parts = data?.candidates?.[0]?.content?.parts || [];
-        const audioPart = parts.find((p: any) => p?.inlineData?.data);
-        if (audioPart?.inlineData?.data) {
-          return String(audioPart.inlineData.data);
-        }
-      }
-    } catch {
-      clearTimeout(timer);
-    }
-  }
-  throw new Error("Direct TTS failed");
-}
-
 export async function transcribeAudio(audioBlob: Blob): Promise<string> {
   // Convert Blob to base64 string safely in chunks
   const arrayBuffer = await audioBlob.arrayBuffer();
@@ -3128,58 +3098,45 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
   const rawType = (audioBlob.type || "audio/webm").split(";")[0].trim();
   const mimeType = rawType || "audio/webm";
 
-  // 1. Direct Gemini HTTPS transcription (works 24/7 on mobile APK & web even when server.ts hibernates)
-  if (shouldPreferFirestoreBridge() || isMobileClientDevice()) {
-    try {
-      const directTranscript = await transcribeViaDirectGemini(audioBase64, mimeType);
-      if (directTranscript) return directTranscript;
-    } catch {}
-  }
-
-  // 2. Call server endpoint /api/gemini/transcribe when direct HTTP is available
+  // 1. Call server endpoint /api/gemini/transcribe when direct HTTP is available
   if (!shouldPreferFirestoreBridge()) {
-    const baseUrl = getApiBaseUrl();
-    const endpoint = `${baseUrl}/api/gemini/transcribe`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3800);
+    for (const baseUrl of getCandidateApiBaseUrls()) {
+      const endpoint = `${baseUrl}/api/gemini/transcribe`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
 
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          audioBase64,
-          mimeType,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            audioBase64,
+            mimeType,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
 
-      const contentType = response.headers.get("content-type") || "";
-      if (response.ok && contentType.includes("application/json")) {
-        lastHttpFailureAt = 0;
-        const data = await response.json();
-        if (data && typeof data.transcript === "string" && data.transcript.trim()) {
-          return data.transcript.trim();
+        const contentType = response.headers.get("content-type") || "";
+        if (response.ok && contentType.includes("application/json")) {
+          lastHttpFailureAt = 0;
+          const data = await response.json();
+          if (data && typeof data.transcript === "string" && data.transcript.trim()) {
+            return data.transcript.trim();
+          }
+        } else {
+          lastHttpFailureAt = Date.now();
         }
-      } else {
+      } catch {
+        clearTimeout(timer);
         lastHttpFailureAt = Date.now();
       }
-    } catch {
-      clearTimeout(timer);
-      lastHttpFailureAt = Date.now();
     }
   }
 
-  // 3. Direct Gemini HTTPS transcription fallback
-  try {
-    const directTranscript = await transcribeViaDirectGemini(audioBase64, mimeType);
-    if (directTranscript) return directTranscript;
-  } catch {}
-
-  // 4. Server-side Firestore RPC bridge fallback
+  // 2. Server-side Firestore RPC bridge fallback
   try {
     const transcript = await transcribeViaFirestoreBridge(audioBase64, mimeType);
     if (transcript) return transcript;
@@ -3192,17 +3149,19 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
 const clientTtsCache = new Map<string, string>();
 
 export function formatTextForSpeech(raw: string, maxChars: number = 520): string {
+  const hasBengali = /[\u0980-\u09FF]/.test(raw);
+  const currencyWord = hasBengali ? "টাকা" : "rupees";
   return raw
     .replace(/```[\s\S]*?```/g, "")
     .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-    .replace(/#([a-zA-Z0-9_-]{5,})/g, "transaction")
-    .replace(/₹\s*(\d+(?:\.\d+)?)/g, "$1 rupees")
-    .replace(/(\d+)\s*[×x]\s*/g, "$1 ")
-    .replace(/➔|→/g, " to ")
+    .replace(/#([a-zA-Z0-9_-]{5,})/g, hasBengali ? "ট্রানজেকশন" : "transaction")
+    .replace(/₹\s*([\d\u09E6-\u09EF\u0966-\u096F]+(?:\.[\d\u09E6-\u09EF\u0966-\u096F]+)?)/g, `$1 ${currencyWord}`)
+    .replace(/([\d\u09E6-\u09EF\u0966-\u096F]+)\s*[×x]\s*/g, "$1 ")
+    .replace(/➔|→/g, hasBengali ? " থেকে " : " to ")
     .replace(/[*#_`~>]/g, "")
     .replace(/^[•\-]\s*/gm, "")
     .replace(/\n+/g, ". ")
-    .replace(/[^\w\s.,?!'-]/g, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s.,?!'"।:-]/gu, " ")
     .replace(/\.\s*\./g, ".")
     .replace(/\s+/g, " ")
     .trim()
@@ -3302,82 +3261,51 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
     return clientTtsCache.get(cleanKey)!;
   }
 
-  // 1. Direct Gemini HTTPS TTS on mobile or when Firestore bridge is preferred (works 24/7 even when server.ts hibernates)
-  if (shouldPreferFirestoreBridge() || isMobileClientDevice()) {
-    try {
-      const directAudio = await ttsViaDirectGemini(cleanKey, timeoutMs);
-      if (directAudio) {
-        const wavB64 = clientPcmToWavBase64(directAudio, 24000);
-        const dataUri = `data:audio/wav;base64,${wavB64}`;
-        if (clientTtsCache.size > 40) {
-          const oldestKey = clientTtsCache.keys().next().value;
-          if (oldestKey) clientTtsCache.delete(oldestKey);
-        }
-        clientTtsCache.set(cleanKey, dataUri);
-        return dataUri;
-      }
-    } catch {}
-  }
-
-  // 2. Call server endpoint /api/gemini/tts when direct HTTP is available
+  // 1. Call server endpoint /api/gemini/tts when direct HTTP is available
   if (!shouldPreferFirestoreBridge()) {
-    const baseUrl = getApiBaseUrl();
-    const endpoint = `${baseUrl}/api/gemini/tts`;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 3500));
+    for (const baseUrl of getCandidateApiBaseUrls()) {
+      const endpoint = `${baseUrl}/api/gemini/tts`;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 4200));
 
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ text: cleanKey }),
-        signal: controller.signal,
-      });
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text: cleanKey }),
+          signal: controller.signal,
+        });
 
-      clearTimeout(timer);
-      const contentType = response.headers.get("content-type") || "";
-      if (response.ok && contentType.includes("application/json")) {
-        lastHttpFailureAt = 0;
-        const data = await response.json();
-        if (data?.audioBase64) {
-          const wavB64 = clientPcmToWavBase64(data.audioBase64, 24000);
-          const dataUri = `data:audio/wav;base64,${wavB64}`;
-          if (clientTtsCache.size > 40) {
-            const oldestKey = clientTtsCache.keys().next().value;
-            if (oldestKey) clientTtsCache.delete(oldestKey);
+        clearTimeout(timer);
+        const contentType = response.headers.get("content-type") || "";
+        if (response.ok && contentType.includes("application/json")) {
+          lastHttpFailureAt = 0;
+          const data = await response.json();
+          if (data?.audioBase64) {
+            const wavB64 = clientPcmToWavBase64(data.audioBase64, 24000);
+            const dataUri = `data:audio/wav;base64,${wavB64}`;
+            if (clientTtsCache.size > 40) {
+              const oldestKey = clientTtsCache.keys().next().value;
+              if (oldestKey) clientTtsCache.delete(oldestKey);
+            }
+            clientTtsCache.set(cleanKey, dataUri);
+            return dataUri;
           }
-          clientTtsCache.set(cleanKey, dataUri);
-          return dataUri;
+        } else {
+          lastHttpFailureAt = Date.now();
         }
-      } else {
+      } catch {
+        clearTimeout(timer);
         lastHttpFailureAt = Date.now();
       }
-    } catch {
-      clearTimeout(timer);
-      lastHttpFailureAt = Date.now();
     }
   }
 
-  // 3. Direct Gemini HTTPS TTS fallback
+  // 2. Server-side Firestore RPC bridge fallback
   try {
-    const directAudio = await ttsViaDirectGemini(cleanKey, timeoutMs);
-    if (directAudio) {
-      const wavB64 = clientPcmToWavBase64(directAudio, 24000);
-      const dataUri = `data:audio/wav;base64,${wavB64}`;
-      if (clientTtsCache.size > 40) {
-        const oldestKey = clientTtsCache.keys().next().value;
-        if (oldestKey) clientTtsCache.delete(oldestKey);
-      }
-      clientTtsCache.set(cleanKey, dataUri);
-      return dataUri;
-    }
-  } catch {}
-
-  // 4. Server-side Firestore RPC bridge fallback
-  try {
-    const audioBase64 = await ttsViaFirestoreBridge(cleanKey, Math.min(timeoutMs, 3500));
+    const audioBase64 = await ttsViaFirestoreBridge(cleanKey, Math.min(timeoutMs, 4200));
     if (audioBase64) {
       const wavB64 = clientPcmToWavBase64(audioBase64, 24000);
       const dataUri = `data:audio/wav;base64,${wavB64}`;
@@ -3392,4 +3320,180 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
 
   throw new Error("Voice synthesis unavailable");
 }
+
+export function blobToBase64Chunked(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || "");
+      const commaIdx = result.indexOf(",");
+      resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+    };
+    reader.onerror = () => reject(new Error("Failed to read file into memory."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Compresses and resizes an image file on the client so multi-image uploads
+ * transmit in <1s, fit well under Firestore's 1MB RPC limit, and produce a
+ * persistent data URL for instant full-screen previewing.
+ */
+export async function compressImageFileForChat(
+  file: File,
+  maxDimension: number = 1024,
+  quality: number = 0.82
+): Promise<{ dataBase64: string; mimeType: string; previewUrl: string }> {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        URL.revokeObjectURL(objectUrl);
+        let { width, height } = img;
+        if (width > maxDimension || height > maxDimension) {
+          if (width >= height) {
+            height = Math.round((height * maxDimension) / width);
+            width = maxDimension;
+          } else {
+            width = Math.round((width * maxDimension) / height);
+            height = maxDimension;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, width);
+        canvas.height = Math.max(1, height);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          blobToBase64Chunked(file)
+            .then((b64) => {
+              const mime = file.type || "image/jpeg";
+              resolve({
+                dataBase64: b64,
+                mimeType: mime,
+                previewUrl: `data:${mime};base64,${b64}`,
+              });
+            })
+            .catch(reject);
+          return;
+        }
+        // Fill white background for transparent PNGs converted to JPEG or keep PNG if small
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const outputMime = "image/jpeg";
+        const dataUrl = canvas.toDataURL(outputMime, quality);
+        const commaIdx = dataUrl.indexOf(",");
+        const dataBase64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+        resolve({
+          dataBase64,
+          mimeType: outputMime,
+          previewUrl: dataUrl,
+        });
+      } catch (err) {
+        URL.revokeObjectURL(objectUrl);
+        reject(err);
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      blobToBase64Chunked(file)
+        .then((b64) => {
+          const mime = file.type || "image/jpeg";
+          resolve({
+            dataBase64: b64,
+            mimeType: mime,
+            previewUrl: `data:${mime};base64,${b64}`,
+          });
+        })
+        .catch(reject);
+    };
+    img.src = objectUrl;
+  });
+}
+
+/**
+ * Purges any temporary chat/media RPC records from the server and Firestore database
+ * when the user clicks "New Chat".
+ */
+export async function purgeChatMediaFromDatabase(): Promise<void> {
+  for (const baseUrl of getCandidateApiBaseUrls()) {
+    try {
+      const res = await fetch(`${baseUrl}/api/gemini/clear-chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (res.ok) break;
+    } catch {}
+  }
+}
+
+export async function analyzeMediaWithGemini(
+  file: File,
+  customPrompt?: string
+): Promise<MediaAnalysisResult> {
+  const rawMime = (file.type || "").trim().toLowerCase();
+  const ext = (file.name.split(".").pop() || "").toLowerCase();
+  let mimeType = rawMime;
+  if (!mimeType) {
+    if (["mp4", "m4v"].includes(ext)) mimeType = "video/mp4";
+    else if (ext === "webm") mimeType = "video/webm";
+    else if (ext === "mov") mimeType = "video/quicktime";
+    else if (ext === "png") mimeType = "image/png";
+    else if (ext === "webp") mimeType = "image/webp";
+    else mimeType = "image/jpeg";
+  }
+
+  const isVideo = mimeType.startsWith("video/");
+  const mediaKind: "video" | "image" = isVideo ? "video" : "image";
+
+  if (file.size > 32 * 1024 * 1024) {
+    throw new Error("File is too large (max 32 MB). Please choose a shorter video clip or smaller image.");
+  }
+
+  const mediaBase64 = await blobToBase64Chunked(file);
+  const previewUrl = URL.createObjectURL(file);
+
+  for (const baseUrl of getCandidateApiBaseUrls()) {
+    const endpoint = `${baseUrl}/api/gemini/analyze-media`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 26000);
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mediaBase64,
+          mimeType,
+          fileName: file.name,
+          prompt: customPrompt || "",
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      const contentType = response.headers.get("content-type") || "";
+      if (response.ok && contentType.includes("application/json")) {
+        const data = await response.json();
+        if (data && (data.summary || data.transcribedText)) {
+          return {
+            summary: String(data.summary || "Media analyzed successfully."),
+            transcribedText: String(
+              data.transcribedText || "No visible text or spoken audio detected."
+            ),
+            detectedLanguage: String(data.detectedLanguage || "Auto-detected"),
+            keyHighlights: Array.isArray(data.keyHighlights) ? data.keyHighlights : [],
+            mediaKind,
+            fileName: file.name,
+            mimeType,
+            fileSize: file.size,
+            previewUrl,
+          };
+        }
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+  }
+
+  throw new Error("Could not analyze media file via server.");
+}
+
 

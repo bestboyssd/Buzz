@@ -60,7 +60,7 @@ export function ProductImagePlaceholder({
 
   return (
     <div
-      className={`${className} bg-gradient-to-br ${gradientClass} ${rounded} flex items-center justify-center ${
+      className={`${className} [container-type:inline-size] bg-gradient-to-br ${gradientClass} ${rounded} flex items-center justify-center ${
         showBorder ? "border" : ""
       } ${
         showShadow
@@ -71,25 +71,19 @@ export function ProductImagePlaceholder({
       {/* Subtle glossy radial highlight without GPU blur filter overhead */}
       <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.22),transparent_65%)] dark:bg-[radial-gradient(circle_at_20%_20%,rgba(255,255,255,0.06),transparent_65%)] pointer-events-none" />
 
-      {/* Large monogram letter back-drop for elegant pos branding feel */}
+      {/* Large monogram letter back-drop matching the exact Home screen icon-to-letter ratio everywhere */}
       {firstLetter && (
         <span
-          className={`absolute select-none font-sans leading-none tracking-tighter font-black text-slate-900/[0.04] dark:text-white/[0.03] pointer-events-none ${
-            monogramSize
-              ? monogramSize
-              : isHome
-              ? "bottom-0 right-2 text-[108px] sm:text-[120px] font-black"
-              : "-bottom-4 -right-2 text-6xl"
-          }`}
+          className="absolute bottom-0 right-[5cqw] text-[66cqw] select-none font-sans leading-none tracking-tighter font-black text-slate-900/[0.04] dark:text-white/[0.03] pointer-events-none"
         >
           {firstLetter}
         </span>
       )}
 
-      {/* Icon */}
+      {/* Icon scaled to the exact Home screen ratio (44% of box, 1:1.5 with monogram) */}
       <IconComponent
         size={size}
-        className={`relative z-10 ${iconColor}`}
+        className={`relative z-10 !w-[44cqw] !h-[44cqw] ${iconColor}`}
       />
     </div>
   );

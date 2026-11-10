@@ -5,36 +5,44 @@ import App from './App.tsx';
 import './index.css';
 import { initializeNativeApp } from './lib/capacitor';
 
-// Register Workbox Service Worker for offline resilience & API/static caching
-registerSW({
-  immediate: true,
-  onRegisteredSW(swUrl, registration) {
-    console.debug('Workbox Service Worker registered:', swUrl);
-    if (registration) {
-      registration.update().catch(() => {});
-    }
-    if ('caches' in window) {
-      caches.keys().then((keys) => {
-        keys.forEach((key) => {
-          if (key.startsWith('workbox-precache')) {
-            caches.open(key).then((cache) => {
-              cache.keys().then((requests) => {
-                requests.forEach((req) => {
-                  if (req.url.includes('index.html')) {
-                    cache.delete(req);
-                  }
+// Register Workbox Service Worker in production; in dev mode, unregister any stale dev service workers so Vite pre-bundled chunks are never mixed across restarts
+if (import.meta.env.PROD) {
+  registerSW({
+    immediate: true,
+    onRegisteredSW(swUrl, registration) {
+      console.debug('Workbox Service Worker registered:', swUrl);
+      if (registration) {
+        registration.update().catch(() => {});
+      }
+      if ('caches' in window) {
+        caches.keys().then((keys) => {
+          keys.forEach((key) => {
+            if (key.startsWith('workbox-precache')) {
+              caches.open(key).then((cache) => {
+                cache.keys().then((requests) => {
+                  requests.forEach((req) => {
+                    if (req.url.includes('index.html')) {
+                      cache.delete(req);
+                    }
+                  });
                 });
               });
-            });
-          }
-        });
-      }).catch(() => {});
+            }
+          });
+        }).catch(() => {});
+      }
+    },
+    onOfflineReady() {
+      console.debug('App is cached and ready to work offline.');
+    },
+  });
+} else if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then((registrations) => {
+    for (const registration of registrations) {
+      registration.unregister().catch(() => {});
     }
-  },
-  onOfflineReady() {
-    console.debug('App is cached and ready to work offline.');
-  },
-});
+  }).catch(() => {});
+}
 
 // Initialize native features early
 initializeNativeApp();

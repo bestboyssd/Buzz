@@ -1654,35 +1654,46 @@ export function Analytics() {
       className={`min-h-full flex flex-col pb-6 px-4 pt-12 w-full max-w-lg mx-auto ${gpuClass}`}
     >
       {/* Top Bar: Back + Title + Z-Report Trigger */}
-      <header className="mb-4 flex items-center justify-between gap-3">
+      <motion.header
+        initial={{ opacity: 0, y: -10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ type: 'spring', stiffness: 460, damping: 32, mass: 0.7 }}
+        className="mb-4 flex items-center justify-between gap-3"
+      >
         <div className="flex items-center gap-3 min-w-0">
-          <button
+          <motion.button
+            whileHover={{ scale: 1.06, x: -2 }}
+            whileTap={{ scale: 0.92 }}
+            transition={{ type: 'spring', stiffness: 520, damping: 28 }}
             type="button"
             onClick={() => {
               triggerHaptic('heavy');
               navigate(-1);
             }}
-            className="w-10 h-10 shrink-0 flex items-center justify-center bg-slate-200/80 dark:bg-slate-800 rounded-full hover:scale-105 active:scale-95 transition-all text-slate-700 dark:text-slate-200 cursor-pointer"
+            className="w-10 h-10 shrink-0 flex items-center justify-center bg-slate-200/80 dark:bg-slate-800 rounded-full transition-colors text-slate-700 dark:text-slate-200 cursor-pointer"
           >
             <ArrowLeft size={19} />
-          </button>
+          </motion.button>
           <h1 className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white truncate">
             Analytics
           </h1>
         </div>
 
-        <button
+        <motion.button
+          whileHover={{ scale: 1.04, y: -1 }}
+          whileTap={{ scale: 0.94 }}
+          transition={{ type: 'spring', stiffness: 520, damping: 28 }}
           type="button"
           onClick={() => {
             triggerHaptic('medium');
             setIsZReportOpen(true);
           }}
-          className="h-10 px-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs active:scale-95 transition-all whitespace-nowrap shrink-0 cursor-pointer"
+          className="h-10 px-3.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors whitespace-nowrap shrink-0 cursor-pointer"
         >
           <FileText size={14} />
           <span>Z-Report</span>
-        </button>
-      </header>
+        </motion.button>
+      </motion.header>
 
       {/* Timeframe Segmented Control */}
       <div
@@ -1733,19 +1744,33 @@ export function Analytics() {
       </div>
 
       {/* Unified Financial Overview & Profit Ledger Card */}
-      <div className="rounded-3xl bg-white/90 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800/90 shadow-xs overflow-hidden mb-5">
+      <motion.div
+        initial={{ opacity: 0, y: 14, scale: 0.985 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ type: 'spring', stiffness: 440, damping: 32, mass: 0.72, delay: 0.04 }}
+        className="rounded-3xl bg-white/90 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800/90 shadow-xs overflow-hidden mb-5"
+      >
         {/* Card Header: Gross Sales + Buy Prices Action */}
         <div className="p-4 pb-2 flex items-start justify-between gap-3">
           <div className="min-w-0">
             <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500 block">
               {activeTab === '30days' ? '30-Day Gross Sales' : '12-Month Gross Sales'}
             </span>
-            <p className="text-3xl font-black tracking-tight text-slate-900 dark:text-white mt-0.5 font-mono tabular-nums truncate">
+            <motion.p
+              key={`${activeTab}-${totalAmount}`}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+              className="text-3xl font-black tracking-tight text-slate-900 dark:text-white mt-0.5 font-mono tabular-nums truncate"
+            >
               ₹{formatPrice(totalAmount)}
-            </p>
+            </motion.p>
           </div>
 
-          <button
+          <motion.button
+            whileHover={{ scale: 1.04, y: -1 }}
+            whileTap={{ scale: 0.95 }}
+            transition={{ type: 'spring', stiffness: 520, damping: 28 }}
             type="button"
             onClick={() => {
               triggerHaptic('light');
@@ -1758,7 +1783,7 @@ export function Analytics() {
             <span className="font-mono tabular-nums text-slate-400 dark:text-slate-500">
               {costConfigSummary.configuredCount}/{costConfigSummary.totalProducts}
             </span>
-          </button>
+          </motion.button>
         </div>
 
         {/* Trend Chart */}
@@ -1893,7 +1918,7 @@ export function Analytics() {
             </span>
           </div>
         </div>
-      </div>
+      </motion.div>
 
       {/* ========================================================================
           STORE INTELLIGENCE HUB (Read-Only, 100% Existing Catalog Grounded)
@@ -2040,14 +2065,22 @@ export function Analytics() {
                   </div>
                 ) : (
                   <div className="divide-y divide-slate-200/65 dark:divide-slate-800/80">
-                    {aiInsights.topWatchList.slice(0, 6).map((item) => {
+                    {aiInsights.topWatchList.slice(0, 6).map((item, idx) => {
                       const isCritical = item.urgency === 'critical';
                       const isSoon = item.urgency === 'soon';
                       const imgUrl = getImageUrl(item.image);
 
                       return (
-                        <div
+                        <motion.div
                           key={item.id || item.name}
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{
+                            type: 'spring',
+                            stiffness: 460,
+                            damping: 32,
+                            delay: Math.min(idx * 0.035, 0.18),
+                          }}
                           className="p-3.5 flex items-center justify-between gap-3"
                         >
                           <div className="w-11 h-11 rounded-2xl overflow-hidden shrink-0 bg-slate-100 dark:bg-slate-800 border border-slate-200/70 dark:border-slate-700/60">
@@ -2062,12 +2095,12 @@ export function Analytics() {
                               <ProductImagePlaceholder
                                 name={item.name}
                                 category={item.category}
-                                size={20}
+                                size={15}
                                 rounded="rounded-2xl"
                                 className="w-full h-full"
                                 showBorder={false}
                                 showShadow={false}
-                                monogramSize="bottom-0 right-1.5 text-[20px] font-black"
+                                monogramSize="bottom-0 right-[2px] text-[22px] font-black"
                               />
                             )}
                           </div>
@@ -2096,9 +2129,16 @@ export function Analytics() {
 
                             <div className="mt-1.5 flex items-center gap-2">
                               <div className="flex-1 h-1.5 rounded-full bg-slate-200/80 dark:bg-slate-800 overflow-hidden">
-                                <div
-                                  style={{ width: `${Math.max(6, item.coveragePct)}%` }}
-                                  className={`h-full rounded-full transition-all duration-300 ${
+                                <motion.div
+                                  initial={{ width: 0 }}
+                                  animate={{ width: `${Math.max(6, item.coveragePct)}%` }}
+                                  transition={{
+                                    type: 'spring',
+                                    stiffness: 220,
+                                    damping: 26,
+                                    delay: Math.min(idx * 0.04, 0.2),
+                                  }}
+                                  className={`h-full rounded-full ${
                                     isCritical
                                       ? 'bg-rose-500'
                                       : isSoon
@@ -2129,7 +2169,7 @@ export function Analytics() {
                               ₹{formatPrice(item.recommendedBuyQty * item.price)}
                             </span>
                           </div>
-                        </div>
+                        </motion.div>
                       );
                     })}
                   </div>
@@ -2172,7 +2212,18 @@ export function Analytics() {
                         Math.round((item.rev30d / aiInsights.maxChampionRev) * 100)
                       );
                       return (
-                        <div key={item.id || idx} className="p-3.5 flex items-center gap-3">
+                        <motion.div
+                          key={item.id || idx}
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          transition={{
+                            type: 'spring',
+                            stiffness: 460,
+                            damping: 32,
+                            delay: Math.min(idx * 0.04, 0.2),
+                          }}
+                          className="p-3.5 flex items-center gap-3"
+                        >
                           <span className="w-5 text-[11px] font-mono tabular-nums font-bold text-slate-400 dark:text-slate-500 shrink-0">
                             0{idx + 1}
                           </span>
@@ -2206,13 +2257,20 @@ export function Analytics() {
                               <span className="shrink-0 ml-2">{item.revSharePct}%</span>
                             </div>
                             <div className="w-full h-1.5 rounded-full bg-slate-200/70 dark:bg-slate-800 mt-1.5 overflow-hidden">
-                              <div
-                                style={{ width: `${barPct}%` }}
+                              <motion.div
+                                initial={{ width: 0 }}
+                                animate={{ width: `${barPct}%` }}
+                                transition={{
+                                  type: 'spring',
+                                  stiffness: 220,
+                                  damping: 26,
+                                  delay: Math.min(idx * 0.045, 0.22),
+                                }}
                                 className="h-full rounded-full bg-indigo-500 dark:bg-indigo-400"
                               />
                             </div>
                           </div>
-                        </div>
+                        </motion.div>
                       );
                     })}
                   </div>
@@ -2340,15 +2398,22 @@ export function Analytics() {
                     </span>
                   </div>
                   <div className="grid grid-cols-7 gap-2 items-end h-20 pt-2">
-                    {aiInsights.weekdayBreakdown.map((day) => (
+                    {aiInsights.weekdayBreakdown.map((day, idx) => (
                       <div
                         key={day.label}
                         className="flex flex-col items-center gap-1.5 h-full justify-end"
                       >
                         <div className="w-full flex-1 flex items-end justify-center">
-                          <div
-                            style={{ height: `${day.pct}%` }}
-                            className={`w-full max-w-[22px] rounded-t-md transition-all duration-300 ${
+                          <motion.div
+                            initial={{ height: 0 }}
+                            animate={{ height: `${day.pct}%` }}
+                            transition={{
+                              type: 'spring',
+                              stiffness: 240,
+                              damping: 26,
+                              delay: idx * 0.03,
+                            }}
+                            className={`w-full max-w-[22px] rounded-t-md ${
                               day.isPeak
                                 ? 'bg-indigo-600 dark:bg-indigo-400'
                                 : day.total > 0
@@ -2381,7 +2446,7 @@ export function Analytics() {
                 </div>
 
                 <div className="divide-y divide-slate-200/65 dark:divide-slate-800/80">
-                  {aiInsights.shiftBreakdown.map((shift) => (
+                  {aiInsights.shiftBreakdown.map((shift, idx) => (
                     <div key={shift.id} className="p-3.5 space-y-1.5">
                       <div className="flex items-center justify-between text-xs gap-2">
                         <div className="min-w-0 truncate">
@@ -2397,8 +2462,15 @@ export function Analytics() {
                         </span>
                       </div>
                       <div className="w-full h-1.5 rounded-full bg-slate-200/70 dark:bg-slate-800 overflow-hidden">
-                        <div
-                          style={{ width: `${shift.pct}%` }}
+                        <motion.div
+                          initial={{ width: 0 }}
+                          animate={{ width: `${shift.pct}%` }}
+                          transition={{
+                            type: 'spring',
+                            stiffness: 220,
+                            damping: 26,
+                            delay: idx * 0.04,
+                          }}
                           className={`h-full rounded-full ${
                             shift.isPeak
                               ? 'bg-emerald-500 dark:bg-emerald-400'

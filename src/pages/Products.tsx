@@ -586,11 +586,11 @@ export function Products() {
                           name={product.name}
                           category={product.category}
                           rounded="rounded-2xl"
-                          size={38}
+                          size={26}
                           className="w-full h-full transition-transform duration-300 group-hover:scale-105"
                           showBorder={false}
                           showShadow={false}
-                          monogramSize="bottom-0.5 right-2 text-[40px] font-black"
+                          monogramSize="bottom-0 right-1 text-[38px] font-black"
                         />
                       );
                     })()}

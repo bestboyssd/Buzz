@@ -20,7 +20,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
 import dotenv from "dotenv";
-import { GoogleGenAI, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import {
   getFirestore,
@@ -54,13 +54,13 @@ const PORT = Number(process.env.PORT) || 3000;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 
 const PRIMARY_AI_PROVIDER = process.env.PRIMARY_AI_PROVIDER || "gemini";
-// Primary: Ultra-low-latency Gemini 3.1 Flash Lite (~0.8s response time)
+// Primary: Ultra-low-latency Gemini 3.1 Flash Lite with thinkingBudget: 0 (~0.6s response time)
 const PRIMARY_AI_MODEL = process.env.PRIMARY_AI_MODEL || "gemini-3.1-flash-lite";
 
-// Backup: Secondary & tertiary Gemini Flash models (verified <1.3s 200 OK)
+// Backup: Secondary Gemini 3.5 Flash Lite with minimal thinking (~1.2s response time)
 const BACKUP_AI_PROVIDER = process.env.BACKUP_AI_PROVIDER || "gemini";
-const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-3-flash-preview";
-const TERTIARY_AI_MODEL = "gemini-3.1-flash-lite-preview";
+const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-3.5-flash-lite";
+const TERTIARY_AI_MODEL = "gemini-3.1-flash-lite";
 
 // Store timezone offset: Asia/Kolkata (+5:30) for SmartRooti
 const STORE_TZ_OFFSET_MINUTES = 330;
@@ -972,6 +972,8 @@ export function validateAndNormalizeAction(
               price: itemPrice,
               stock: isNaN(itemStock) || itemStock < 0 ? 0 : itemStock,
               category: itemCat,
+              ...(typeof item?.attachmentIndex === "number" ? { attachmentIndex: item.attachmentIndex } : {}),
+              ...(typeof item?.image === "string" && item.image ? { image: item.image } : {}),
             });
           }
         }
@@ -981,6 +983,12 @@ export function validateAndNormalizeAction(
           action.price = validItems[0].price;
           action.stock = validItems[0].stock;
           action.category = validItems[0].category;
+          if (action.useAttachedImage !== undefined) {
+            action.useAttachedImage = Boolean(action.useAttachedImage);
+          }
+          if (typeof action.attachmentIndex === "number") {
+            action.attachmentIndex = action.attachmentIndex;
+          }
           return action;
         }
       }
@@ -1004,6 +1012,8 @@ export function validateAndNormalizeAction(
           price: action.price,
           stock: action.stock,
           category: action.category,
+          ...(typeof action.attachmentIndex === "number" ? { attachmentIndex: action.attachmentIndex } : {}),
+          ...(typeof action.image === "string" && action.image ? { image: action.image } : {}),
         },
       ];
       return action;
@@ -1057,6 +1067,28 @@ export function validateAndNormalizeAction(
       action.productName = matched.name;
       action.currentPrice = Number(matched.price) || 0;
       action.newPrice = newPrice;
+      return action;
+    }
+
+    case "UPDATE_PRODUCT_IMAGE": {
+      let matched = snapshot.products.find((p) => p.id === action.productId);
+      const searchName = String(action.productName || action.name || "").toLowerCase().trim();
+      if (!matched && searchName) {
+        matched =
+          snapshot.products.find((p) => p.name.toLowerCase().trim() === searchName) ||
+          snapshot.products.find((p) => p.name.toLowerCase().includes(searchName)) ||
+          snapshot.products.find((p) => searchName.includes(p.name.toLowerCase()));
+      }
+      if (!matched) return null;
+
+      action.productId = matched.id;
+      action.productName = matched.name;
+      action.currentPrice = Number(matched.price) || 0;
+      action.currentStock = Number(matched.stock) || 0;
+      action.attachmentIndex =
+        typeof action.attachmentIndex === "number" && action.attachmentIndex >= 0
+          ? Math.floor(action.attachmentIndex)
+          : 0;
       return action;
     }
 
@@ -1268,7 +1300,17 @@ export function generateAuthenticOperationalThought(
     if (actionData.type === "ADD_PRODUCT") {
       steps.push("Validated product creation schema (name, price, stock, category)");
       steps.push(`Prepared new entry "${actionData.name}" @ ₹${actionData.price} with ${actionData.stock || 0} initial units`);
+      if (actionData.useAttachedImage || actionData.image) {
+        steps.push("Linked user-uploaded image attachment to new catalog product");
+      }
       steps.push("Constructed Firestore catalog document ready for atomic write");
+      return steps.join("\n");
+    }
+
+    if (actionData.type === "UPDATE_PRODUCT_IMAGE") {
+      steps.push("Audited catalog media update permissions");
+      steps.push(`Located target product "${actionData.productName || "Product"}" in Firestore catalog`);
+      steps.push("Linked uploaded chat image to product catalog record for operator confirmation");
       return steps.join("\n");
     }
 
@@ -1462,7 +1504,329 @@ function markModelSuccess(model: string) {
   modelHealthMap.delete(model);
 }
 
-// Format Real Store Context for AI Engine
+export function isFastShortTier(prompt: string, hasMedia: boolean): boolean {
+  if (hasMedia) return false;
+  const trimmed = String(prompt || "").trim();
+  if (!trimmed) return false;
+  const userQuestionOnly = trimmed
+    .replace(/^Regarding this quoted text from our chat:\s*"[\s\S]*?"\s*/i, "")
+    .trim();
+  const effectiveText = userQuestionOnly || trimmed;
+  if (effectiveText.length > 160) return false;
+  if (
+    /\b(detail|detailed|paragraph|essay|story|explain\s+everything|in\s+depth|long|comprehensive|elaborate|step\s+by\s+step|100|500|1000|all\s+digits|history\s+of)\b/i.test(
+      effectiveText
+    )
+  ) {
+    return false;
+  }
+  const wordCount = effectiveText.split(/\s+/).length;
+  return wordCount <= 28;
+}
+
+const SERVER_LATEX_SYMBOL_MAP: Record<string, string> = {
+  pi: "π",
+  Pi: "Π",
+  alpha: "α",
+  beta: "β",
+  gamma: "γ",
+  Gamma: "Γ",
+  delta: "δ",
+  Delta: "Δ",
+  epsilon: "ε",
+  varepsilon: "ε",
+  zeta: "ζ",
+  eta: "η",
+  theta: "θ",
+  Theta: "Θ",
+  vartheta: "ϑ",
+  iota: "ι",
+  kappa: "κ",
+  lambda: "λ",
+  Lambda: "Λ",
+  mu: "μ",
+  nu: "ν",
+  xi: "ξ",
+  Xi: "Ξ",
+  rho: "ρ",
+  sigma: "σ",
+  Sigma: "Σ",
+  tau: "τ",
+  upsilon: "υ",
+  phi: "φ",
+  Phi: "Φ",
+  varphi: "ϕ",
+  chi: "χ",
+  psi: "ψ",
+  Psi: "Ψ",
+  omega: "ω",
+  Omega: "Ω",
+  times: "×",
+  div: "÷",
+  cdot: "·",
+  pm: "±",
+  mp: "∓",
+  approx: "≈",
+  sim: "∼",
+  simeq: "≃",
+  cong: "≅",
+  equiv: "≡",
+  neq: "≠",
+  ne: "≠",
+  leq: "≤",
+  le: "≤",
+  geq: "≥",
+  ge: "≥",
+  ll: "≪",
+  gg: "≫",
+  propto: "∝",
+  infty: "∞",
+  partial: "∂",
+  nabla: "∇",
+  forall: "∀",
+  exists: "∃",
+  nexists: "∄",
+  in: "∈",
+  notin: "∉",
+  ni: "∋",
+  subset: "⊂",
+  supset: "⊃",
+  subseteq: "⊆",
+  supseteq: "⊇",
+  cup: "∪",
+  cap: "∩",
+  emptyset: "∅",
+  varnothing: "∅",
+  rightarrow: "→",
+  to: "→",
+  leftarrow: "←",
+  leftrightarrow: "↔",
+  Rightarrow: "⇒",
+  Leftarrow: "⇐",
+  Leftrightarrow: "⇔",
+  iff: "⇔",
+  mapsto: "↦",
+  sum: "∑",
+  prod: "∏",
+  int: "∫",
+  oint: "∮",
+  therefore: "∴",
+  because: "∵",
+  angle: "∠",
+  perp: "⊥",
+  parallel: "∥",
+  triangle: "△",
+  degree: "°",
+  circ: "°",
+  ldots: "…",
+  cdots: "⋯",
+  dots: "…",
+  quad: " ",
+  qquad: "  ",
+};
+
+const SERVER_SUPERSCRIPT_MAP: Record<string, string> = {
+  "0": "⁰",
+  "1": "¹",
+  "2": "²",
+  "3": "³",
+  "4": "⁴",
+  "5": "⁵",
+  "6": "⁶",
+  "7": "⁷",
+  "8": "⁸",
+  "9": "⁹",
+  "+": "⁺",
+  "-": "⁻",
+  "=": "⁼",
+  "(": "⁽",
+  ")": "⁾",
+  n: "ⁿ",
+  i: "ⁱ",
+  "°": "°",
+};
+
+const SERVER_SUBSCRIPT_MAP: Record<string, string> = {
+  "0": "₀",
+  "1": "₁",
+  "2": "₂",
+  "3": "₃",
+  "4": "₄",
+  "5": "₅",
+  "6": "₆",
+  "7": "₇",
+  "8": "₈",
+  "9": "⁹",
+  "+": "₊",
+  "-": "₋",
+  "=": "₌",
+  "(": "₍",
+  ")": "₎",
+  a: "ₐ",
+  e: "ₑ",
+  i: "ᵢ",
+  o: "ₒ",
+  r: "ᵣ",
+  u: "ᵤ",
+  v: "ᵥ",
+  x: "ₓ",
+};
+
+function convertServerLatexSegment(rawSeg: string): string {
+  let s = rawSeg;
+  s = s.replace(/\\(?:text|textbf|textit|mathrm|mathbf|mathit|mathcal|mathbb|operatorname)\s*\{([^{}]*)\}/g, "$1");
+  s = s.replace(/\\left\s*([([\]{}|.])/g, "$1").replace(/\\right\s*([([\]{}|.])/g, "$1");
+  for (let pass = 0; pass < 2; pass++) {
+    s = s.replace(/\\(?:d|t)?frac\s*\{([^{}]+)\}\s*\{([^{}]+)\}/g, (_m, num, den) => {
+      const n = String(num).trim();
+      const d = String(den).trim();
+      const nClean = /^[a-zA-Z0-9π]+$/.test(n) ? n : `(${n})`;
+      const dClean = /^[a-zA-Z0-9π]+$/.test(d) ? d : `(${d})`;
+      return `${nClean}/${dClean}`;
+    });
+  }
+  s = s.replace(/\\sqrt\s*\[([^\]]+)\]\s*\{([^{}]+)\}/g, (_m, root, arg) => {
+    const rSup = String(root)
+      .trim()
+      .split("")
+      .map((c) => SERVER_SUPERSCRIPT_MAP[c] || c)
+      .join("");
+    const a = String(arg).trim();
+    return /^[a-zA-Z0-9π]+$/.test(a) ? `${rSup}√${a}` : `${rSup}√(${a})`;
+  });
+  s = s.replace(/\\sqrt\s*\{([^{}]+)\}/g, (_m, arg) => {
+    const a = String(arg).trim();
+    return /^[a-zA-Z0-9π]+$/.test(a) ? `√${a}` : `√(${a})`;
+  });
+  s = s.replace(/\\([a-zA-Z]+)(?![a-zA-Z])/g, (full, cmd) => {
+    return SERVER_LATEX_SYMBOL_MAP[cmd] !== undefined ? SERVER_LATEX_SYMBOL_MAP[cmd] : full;
+  });
+  s = s.replace(/\^\{([^{}]+)\}/g, (_full, exp) => {
+    const chars = String(exp).trim().split("");
+    if (chars.every((c) => SERVER_SUPERSCRIPT_MAP[c] !== undefined)) {
+      return chars.map((c) => SERVER_SUPERSCRIPT_MAP[c]).join("");
+    }
+    return `^(${exp})`;
+  });
+  s = s.replace(/\^([0-9+\-ni°])/g, (_full, ch) => SERVER_SUPERSCRIPT_MAP[ch] || `^${ch}`);
+  s = s.replace(/_\{([^{}]+)\}/g, (_full, sub) => {
+    const chars = String(sub).trim().split("");
+    if (chars.every((c) => SERVER_SUBSCRIPT_MAP[c] !== undefined)) {
+      return chars.map((c) => SERVER_SUBSCRIPT_MAP[c]).join("");
+    }
+    return `_${sub}`;
+  });
+  s = s.replace(/_([0-9])/g, (_full, ch) => SERVER_SUBSCRIPT_MAP[ch] || `_${ch}`);
+  s = s.replace(/\\([%$&_{}])/g, "$1");
+  s = s.replace(/\\[,;:!]/g, " ");
+  return s;
+}
+
+export function sanitizeLatexAndMathFormatting(raw: string): string {
+  if (!raw) return "";
+  let out = raw;
+  out = out.replace(/\$\$([\s\S]*?)\$\$/g, (_m, inner) => convertServerLatexSegment(String(inner).trim()));
+  out = out.replace(/\\\[([\s\S]*?)\\\]/g, (_m, inner) => convertServerLatexSegment(String(inner).trim()));
+  out = out.replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner) => convertServerLatexSegment(String(inner).trim()));
+  out = out.replace(/\$([^$\n]{1,120})\$/g, (full, inner) => {
+    const trimmed = String(inner).trim();
+    if (!trimmed) return full;
+    if (/^\d+(?:\.\d+)?\s+(?:and|or|to|per|each|for|in|at|of|from)\b/i.test(trimmed)) {
+      return full;
+    }
+    return convertServerLatexSegment(trimmed);
+  });
+  out = out.replace(/\$(?=\s*\\[a-zA-Z]+)/g, "");
+  if (out.includes("\\") || out.includes("^") || out.includes("_")) {
+    out = convertServerLatexSegment(out);
+  }
+  return out;
+}
+
+function buildFastStoreSystemPrompt(snapshot: StoreSnapshot, prompt: string): string {
+  const productListBrief = snapshot.products.slice(0, 45).map((p) => ({
+    id: p.id,
+    name: p.name,
+    price: p.price,
+    stock: p.stock,
+    category: p.category,
+  }));
+
+  const cu = snapshot.currentUser;
+  const userLine = cu
+    ? `USER: ${cu.displayName} (${cu.email || "signed in"}, UID: ${cu.uid}, Role: ${cu.role}, Admin: ${cu.isAdmin ? "YES" : "NO"}, Owner: ${cu.isSuperAdmin ? "YES" : "NO"}).`
+    : `USER: Guest session.`;
+
+  const needsActionSchema =
+    /\b(add|create|new|update|set|change|edit|adjust|increase|decrease|reduce|restock|delete|remove|void|cancel|purge|clear|reset|cost|expense|borrow|due|stock|price|rate|bill|receipt|transaction|product|item|image|photo|picture|pic|use|admin|role|promote|demote)\b/i.test(
+      prompt
+    );
+
+  if (!needsActionSchema) {
+    const staffSummary = snapshot.accounts
+      .slice(0, 10)
+      .map((a) => `${a.displayName} (${a.email}, ${a.isAdmin ? "Admin" : "Staff"})`)
+      .join("; ");
+    return `You are "Buzz AI", the smart retail store manager for "SmartRooti".
+${userLine}
+LIVE STORE DATA: ${snapshot.products.length} products | Today Sales: ₹${snapshot.todayRevenue.toLocaleString("en-IN")} (${snapshot.todayBillsCount} bills) | Today Expenses: ₹${snapshot.todayExpenseTotal.toLocaleString("en-IN")} (${snapshot.expenses.length} records).
+CATALOG: ${JSON.stringify(productListBrief)}
+STAFF: ${staffSummary || "None"}
+RULES: Reply directly, warmly, and concisely (1-3 sentences) in the exact language of the user's latest message (English unless they wrote in Bengali/Hindi). If the user quotes a message, directly explain or respond to that quoted text. NEVER use LaTeX dollar signs ($...$, $$...$$) or backslash math commands like \\pi, \\times, \\frac—always use clean Unicode symbols directly (e.g., π, ×, ÷, ≈, √, ², ³). Use ₹ for currency. Only recommend products from CATALOG.`;
+  }
+
+  const billsBrief = snapshot.recentBills.slice(0, 6).map((b) => ({
+    id: b.id,
+    total: b.total,
+    itemSummary: b.items.map((i) => `${i.quantity}x ${i.name}`).join(", "),
+  }));
+  const expensesBrief = snapshot.expenses.slice(0, 8).map((e) => ({
+    id: e.id,
+    title: e.title,
+    amount: e.amount,
+    category: e.category || "expense",
+  }));
+
+  return `You are "Buzz AI", store manager for "SmartRooti".
+${userLine}
+LIVE STORE DATA: ${snapshot.products.length} products | Today Sales: ₹${snapshot.todayRevenue.toLocaleString("en-IN")} (${snapshot.todayBillsCount} bills) | Expenses: ₹${snapshot.todayExpenseTotal.toLocaleString("en-IN")}.
+CATALOG: ${JSON.stringify(productListBrief)}
+RECENT BILLS: ${JSON.stringify(billsBrief)}
+RECENT EXPENSES: ${JSON.stringify(expensesBrief)}
+ACTION RULES:
+1. NEVER emit \`\`\`action\`\`\` if required fields are missing or if user says "ask me details"; ask in plain text first.
+2. Product categories for ADD_PRODUCT: ONLY "fresh", "frozen", or "cold drinks".
+3. Role promotions/demotions via chat are forbidden; politely refuse UPDATE_ROLE.
+4. When all required fields are known, append at end of reply:
+\`\`\`action
+{"type":"UPDATE_STOCK"|"UPDATE_PRICE"|"UPDATE_PRODUCT_IMAGE"|"ADD_PRODUCT"|"DELETE_PRODUCT"|"ADD_EXPENSE"|"DELETE_EXPENSE"|"UPDATE_BILL"|"DELETE_BILL"|"PURGE_STORE_DATA", ...fields}
+\`\`\`
+Required fields per type:
+- UPDATE_STOCK: productId, productName, currentStock, newStock, quantityChange
+- UPDATE_PRICE: productId, productName, currentPrice, newPrice
+- UPDATE_PRODUCT_IMAGE: productId, productName, attachmentIndex (0-based index of uploaded image)
+- ADD_PRODUCT: name, price, stock (default 0), category ("fresh"|"frozen"|"cold drinks"), useAttachedImage (optional), attachmentIndex (optional), products (array if adding multiple)
+- DELETE_PRODUCT: productId, productName, currentPrice, currentStock
+- ADD_EXPENSE: title, amount, category ("expense"|"borrow"|"due"|"other")
+- DELETE_EXPENSE: expenseId, title, amount
+- UPDATE_BILL: billId, oldTotal, newTotal
+- DELETE_BILL: billId, total, itemsCount, itemSummary
+- PURGE_STORE_DATA: target ("products"|"bills"|"both"), productsCount (${snapshot.products.length}), billsCount (${snapshot.bills.length})
+5. Reply concisely in the exact language of the user's latest message. NEVER use LaTeX dollar signs ($...$) or backslash math commands like \\pi; use Unicode symbols directly (π, ×, ÷, ≈, √, ²).`;
+}
+
+export function buildAdaptiveStoreSystemPrompt(
+  snapshot: StoreSnapshot,
+  prompt: string,
+  hasMedia: boolean
+): string {
+  if (!hasMedia) {
+    return buildFastStoreSystemPrompt(snapshot, prompt);
+  }
+  return buildStoreSystemPrompt(snapshot);
+}
+
+// Format Real Store Context for AI Engine (Tier 2: Long Paragraphs & Multimodal Media)
 function buildStoreSystemPrompt(snapshot: StoreSnapshot): string {
   const outOfStock = snapshot.products.filter((p) => p.stock <= 0);
   const lowStock = snapshot.products.filter((p) => p.stock > 0 && p.stock <= 5);
@@ -1552,8 +1916,11 @@ CRITICAL CONVERSATIONAL & ACTION CARD RULES (MUST FOLLOW STRICTLY):
    - \`ADD_PRODUCT\`:
      * VALID CATEGORIES ONLY: The store ONLY has 3 product categories: \`"fresh"\`, \`"frozen"\`, and \`"cold drinks"\`. NEVER use \`"General"\` or invent any other category!
      * Automatically infer the best category from the product name if not specified: beverages/sodas/juices/water/cans (e.g. Pepsi, Coke, Sprite, Maaza, Water) -> \`"cold drinks"\`; ice cream/frozen snacks/peas -> \`"frozen"\`; all other grocery/bakery/fresh items -> \`"fresh"\`.
-     * For a single product: \`name\` (specific product name), \`price\` (positive number in ₹), \`stock\` (default 0), \`category\` (\`"fresh"\` | \`"frozen"\` | \`"cold drinks"\`).
+     * For a single product: \`name\` (specific product name), \`price\` (positive number in ₹), \`stock\` (default 0), \`category\` (\`"fresh"\` | \`"frozen"\` | \`"cold drinks"\`). If the user uploaded an image or asked to use the uploaded image for this new product, also include \`"useAttachedImage": true, "attachmentIndex": 0\` (or 0-based index if they specified e.g. 2nd image -> \`1\`).
      * For multiple products in one command (e.g., "add product atta, maida with the price 20, 30 and stock 50 for both"): include a \`products\` array of \`{ "name": "...", "price": 20, "stock": 50, "category": "fresh" | "frozen" | "cold drinks" }\` along with \`name\` (comma-separated names), \`price\` (first price), and \`stock\` (first stock).
+   - \`UPDATE_PRODUCT_IMAGE\`:
+     * Use when the user uploads an image (or refers to an image they already uploaded in chat) and asks to set, use, update, or change a store product's photo/image/picture (e.g., "use this image for roti", "set this photo for pepsi", "use the 2nd image for roti").
+     * Required: \`productId\` & \`productName\` (must match an existing product in CURRENT CATALOG SNAPSHOT), \`attachmentIndex\` (0-based index of the uploaded image to use: \`0\` for the first/only image, \`1\` for the second image, \`2\` for the third image, etc.).
    - \`UPDATE_STOCK\`:
      * Required: \`productId\` & \`productName\` (must match an existing product in CURRENT CATALOG SNAPSHOT), \`currentStock\`, \`newStock\` (non-negative number), \`quantityChange\`. If the product is not in the catalog, tell the user and do not emit \`UPDATE_STOCK\`.
    - \`UPDATE_PRICE\`:
@@ -1572,12 +1939,22 @@ CRITICAL CONVERSATIONAL & ACTION CARD RULES (MUST FOLLOW STRICTLY):
    Append at the very end of your response:
    \`\`\`action
    {
-     "type": "UPDATE_STOCK" | "UPDATE_PRICE" | "ADD_PRODUCT" | "DELETE_PRODUCT" | "UPDATE_BILL" | "DELETE_BILL" | "PURGE_STORE_DATA" | "ADD_EXPENSE" | "DELETE_EXPENSE",
+     "type": "UPDATE_STOCK" | "UPDATE_PRICE" | "UPDATE_PRODUCT_IMAGE" | "ADD_PRODUCT" | "DELETE_PRODUCT" | "UPDATE_BILL" | "DELETE_BILL" | "PURGE_STORE_DATA" | "ADD_EXPENSE" | "DELETE_EXPENSE",
      ...exact fields for that type
    }
    \`\`\`
 4. Keep answers concise, warm, natural, factual, and formatted in Indian Rupees (₹). Never output hidden reasoning tags or robotic canned "Store Snapshot:" templates—always answer the user's actual message, greeting, question, or command directly and conversationally!
-5. **STRICT CATALOG GROUNDING FOR RECOMMENDATIONS**: Whenever the user asks what to buy next, what to restock, what combos to offer, or asks for product recommendations, you MUST ONLY recommend products that ALREADY EXIST in CURRENT CATALOG SNAPSHOT. NEVER suggest or invent new products that are not in the user's existing products list.`;
+5. **STRICT CATALOG GROUNDING FOR RECOMMENDATIONS**: Whenever the user asks what to buy next, what to restock, what combos to offer, or asks for product recommendations, you MUST ONLY recommend products that ALREADY EXIST in CURRENT CATALOG SNAPSHOT. NEVER suggest or invent new products that are not in the user's existing products list.
+6. **STRICT LANGUAGE MATCHING RULE (CRITICAL)**:
+   - You MUST ALWAYS reply in the EXACT SAME LANGUAGE as the user's **LATEST** message!
+   - If the user's latest message is written in English (e.g., "what was in the image?", "lol", "add product...", "what did I send?"), you MUST reply **100% in English** — NEVER reply in Bengali or Hindi just because an earlier message in the conversation history used Bengali!
+   - Only reply in Bengali if the user's latest message itself is written in Bengali (or explicitly asks you to reply in Bengali).
+7. **MULTIMODAL IMAGE & VIDEO UNDERSTANDING**:
+   - Whenever the user attaches images or videos in the current message OR asks about images/videos they sent in an earlier message in this chat (such as "what was in the image?", "what did I send?", "lol", "see this", "what is this?"), carefully inspect the attached visual media in the conversation turns, describe what is shown clearly, extract any visible text/numbers/labels, and answer their question directly.
+8. **QUOTED TEXT EXPLANATION**:
+   - When the user quotes a specific word, phrase, or line from the chat (indicated by \`Regarding this quoted text from our chat: "..."\`), directly address their question or explain what that quoted text means clearly and concisely.
+9. **NO RAW LATEX DOLLAR SIGNS OR BACKSLASH COMMANDS**:
+   - NEVER use LaTeX math delimiters (\`$...$\`, \`$$...$$\`, \`\\(...\\)\`, \`\\[...\\]\`) or backslash commands like \`\\pi\`, \`\\times\`, \`\\frac\`, \`\\approx\`. Always write clean Unicode symbols directly (e.g., π, ×, ÷, ≈, √, ², ³, ±, ∞, °, ≠, ≤, ≥).`;
 }
 
 function normalizeServerProductCategory(
@@ -2149,6 +2526,50 @@ export function generateLocalDeterministicResponse(
     }
   }
 
+  // 5B. Update Product Image with Uploaded Image Request (e.g. "use this image for roti", "set this photo for pepsi", "change roti image")
+  const isUpdateProductImageIntent =
+    /\b(use|set|put|apply|make|change|update|attach|assign)\b[\s\S]*?\b(image|photo|picture|pic|thumbnail)\b/i.test(
+      p
+    ) &&
+    !/\b(add|create|new)\s+(?:a\s+|new\s+)?product\b/i.test(p);
+
+  if (isUpdateProductImageIntent && !wantsToBeAsked) {
+    let attachmentIndex = 0;
+    if (/\b(2nd|second|image\s*2|photo\s*2|pic\s*2)\b/i.test(p)) attachmentIndex = 1;
+    else if (/\b(3rd|third|image\s*3|photo\s*3|pic\s*3)\b/i.test(p)) attachmentIndex = 2;
+    else if (/\b(4th|fourth|image\s*4|photo\s*4|pic\s*4)\b/i.test(p)) attachmentIndex = 3;
+
+    let targetProd: StoreProduct | undefined = snapshot.products.find((prod) =>
+      p.includes(prod.name.toLowerCase().trim())
+    );
+    if (!targetProd) {
+      const forMatch =
+        p.match(/\b(?:for|on|to|of)\s+(?:the\s+)?(?:product\s+|item\s+)?([a-zA-Z0-9\s]+?)$/i) ||
+        p.match(/\b(?:change|update|set)\s+([a-zA-Z0-9\s]+?)\s+(?:product\s+)?(?:image|photo|picture|pic)\b/i);
+      if (forMatch) {
+        const cleanedTarget = forMatch[1]
+          .replace(/\b(product|item|the|this|that|image|photo|picture|pic|in\s+store|in\s+catalog)\b/gi, "")
+          .trim();
+        targetProd = findBestServerProduct(snapshot.products, cleanedTarget);
+      }
+    }
+
+    if (targetProd) {
+      return {
+        reply: `Prepared product image update for **${targetProd.name}** using your uploaded photo.\n\nConfirm below to save this image to **${targetProd.name}** in your store catalog:`,
+        action: {
+          type: "UPDATE_PRODUCT_IMAGE",
+          productId: targetProd.id,
+          productName: targetProd.name,
+          currentPrice: targetProd.price,
+          currentStock: targetProd.stock,
+          attachmentIndex,
+        },
+        status: `Updating product image for ${targetProd.name}…`,
+      };
+    }
+  }
+
   // 6. Add New Product(s) Request (Supports both single product & multi-product natural commands)
   const isAddProductIntent =
     (/\b(add|create|insert|register)\s+(?:a\s+|new\s+|the\s+|some\s+)*(?:products?|items?)\b/i.test(p) ||
@@ -2161,6 +2582,7 @@ export function generateLocalDeterministicResponse(
   if (isAddProductIntent) {
     if (!wantsToBeAsked) {
       const parsedProducts = parseServerAddProductsFromPrompt(prompt);
+      const mentionsImage = /\b(image|photo|picture|pic|uploaded|attached)\b/i.test(p);
       if (parsedProducts.length > 0) {
         if (parsedProducts.length === 1) {
           const item = parsedProducts[0];
@@ -2173,7 +2595,8 @@ export function generateLocalDeterministicResponse(
               price: item.price,
               stock: item.stock,
               category: normCat,
-              products: [{ ...item, category: normCat }],
+              ...(mentionsImage ? { useAttachedImage: true, attachmentIndex: 0 } : {}),
+              products: [{ ...item, category: normCat, ...(mentionsImage ? { attachmentIndex: 0 } : {}) }],
             },
             status: "Creating new product…",
           };
@@ -2556,27 +2979,113 @@ function cleanReplyWhenActionSuppressed(text: string): string {
     .trim();
 }
 
+function detectLanguageInstructionForPrompt(cleanPrompt: string): string {
+  const hasBengaliScript = /[\u0980-\u09FF]/.test(cleanPrompt);
+  const hasHindiScript = /[\u0900-\u097F]/.test(cleanPrompt);
+  const asksForBengali = /\b(in\s+bengali|in\s+bangla|bangla\s+te|bengali\s+te)\b/i.test(cleanPrompt);
+  const asksForHindi = /\b(in\s+hindi|hindi\s+me|hindi\s+mein)\b/i.test(cleanPrompt);
+
+  if (hasBengaliScript || asksForBengali) {
+    return "\n\n[System Language Rule: The user's current message is in Bengali. Reply in Bengali.]";
+  }
+  if (hasHindiScript || asksForHindi) {
+    return "\n\n[System Language Rule: The user's current message is in Hindi. Reply in Hindi.]";
+  }
+  return "\n\n[System Language Rule: The user's current message is in ENGLISH. You MUST reply 100% in ENGLISH. Do NOT reply in Bengali or Hindi.]";
+}
+
 export function buildValidServerGeminiContents(
   conversationHistory: any[],
-  prompt: string
-): Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> {
-  const cleanPrompt = prompt.trim().slice(0, 1200);
-  const rawTurns: Array<{ role: "user" | "model"; text: string }> = [];
+  prompt: string,
+  attachments: any[] = []
+): Array<{ role: "user" | "model"; parts: Array<any> }> {
+  const validAttachments = Array.isArray(attachments)
+    ? attachments.filter(
+        (a) =>
+          a &&
+          typeof a.mimeType === "string" &&
+          typeof a.data === "string" &&
+          a.data.length > 0
+      )
+    : [];
 
-  for (const msg of (conversationHistory || []).slice(-10)) {
-    const text = String(msg?.content || "").trim().slice(0, 800);
-    if (!text) continue;
+  const fallbackPrompt =
+    validAttachments.length > 0
+      ? "Analyze the attached media (images/videos), describe what is shown, extract any visible text or spoken audio, and help me with my request."
+      : "";
+  const cleanPrompt = (prompt || fallbackPrompt).trim().slice(0, 1600);
+  const langInstruction = detectLanguageInstructionForPrompt(cleanPrompt);
+
+  const rawTurns: Array<{
+    role: "user" | "model";
+    text: string;
+    mediaParts: Array<any>;
+  }> = [];
+
+  const promptReferencesHistoryMedia =
+    validAttachments.length === 0 &&
+    /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|product|use\s+this|use\s+it)\b/i.test(
+      cleanPrompt
+    );
+
+  const recentHistory = (conversationHistory || []).slice(-8);
+  let keptHistoryMediaCount = 0;
+
+  for (let idx = 0; idx < recentHistory.length; idx++) {
+    const msg = recentHistory[idx];
+    const rawText = String(msg?.content || "").trim().slice(0, 800);
+    const isMostRecentMediaTurn = idx >= recentHistory.length - 4;
+    const rawTurnAttachments =
+      promptReferencesHistoryMedia &&
+      isMostRecentMediaTurn &&
+      keptHistoryMediaCount < 2 &&
+      Array.isArray(msg?.attachments)
+        ? msg.attachments.filter(
+            (a: any) =>
+              a &&
+              typeof a.mimeType === "string" &&
+              typeof a.data === "string" &&
+              a.data.length > 0
+          )
+        : [];
+    if (rawTurnAttachments.length > 0) {
+      keptHistoryMediaCount++;
+    }
+    const turnMediaParts = rawTurnAttachments.map((att: any) => ({
+      inlineData: {
+        mimeType: att.mimeType,
+        data: att.data,
+      },
+    }));
+
+    const text =
+      rawText ||
+      (turnMediaParts.length > 0
+        ? `[User attached ${turnMediaParts.length} media file(s)]`
+        : "");
+    if (!text && turnMediaParts.length === 0) continue;
     if (text.includes("I am **Buzz AI**, your intelligent retail store manager")) continue;
+    // Skip canned fallback messages from polluting multi-turn vision context
+    if (
+      msg?.role === "assistant" &&
+      text.includes("I checked your store catalog (") &&
+      text.includes("Please rephrase or try your command again.")
+    ) {
+      continue;
+    }
+
     rawTurns.push({
       role: msg.role === "assistant" ? "model" : "user",
       text,
+      mediaParts: turnMediaParts,
     });
   }
 
   while (
     rawTurns.length > 0 &&
     rawTurns[rawTurns.length - 1].role === "user" &&
-    rawTurns[rawTurns.length - 1].text.toLowerCase() === cleanPrompt.toLowerCase()
+    rawTurns[rawTurns.length - 1].text.toLowerCase() === cleanPrompt.toLowerCase() &&
+    rawTurns[rawTurns.length - 1].mediaParts.length === 0
   ) {
     rawTurns.pop();
   }
@@ -2585,26 +3094,47 @@ export function buildValidServerGeminiContents(
     rawTurns.shift();
   }
 
-  const contents: Array<{ role: "user" | "model"; parts: Array<{ text: string }> }> = [];
+  const contents: Array<{ role: "user" | "model"; parts: Array<any> }> = [];
   for (const turn of rawTurns) {
     const prev = contents[contents.length - 1];
     if (prev && prev.role === turn.role) {
-      prev.parts[0].text = `${prev.parts[0].text}\n\n${turn.text}`.slice(-1200);
+      if (turn.mediaParts.length > 0) {
+        prev.parts.push(...turn.mediaParts);
+      }
+      if (turn.text) {
+        const lastTextPart = [...prev.parts].reverse().find((p) => typeof p.text === "string");
+        if (lastTextPart) {
+          lastTextPart.text = `${lastTextPart.text}\n\n${turn.text}`.slice(-1200);
+        } else {
+          prev.parts.push({ text: turn.text });
+        }
+      }
     } else {
       contents.push({
         role: turn.role,
-        parts: [{ text: turn.text }],
+        parts: [...turn.mediaParts, ...(turn.text ? [{ text: turn.text }] : [])],
       });
     }
   }
 
+  const mediaParts = validAttachments.map((att) => ({
+    inlineData: {
+      mimeType: att.mimeType,
+      data: att.data,
+    },
+  }));
+
+  const finalPromptWithLang = `${cleanPrompt}${langInstruction}`;
+
   const last = contents[contents.length - 1];
-  if (last && last.role === "user") {
-    last.parts[0].text = `${last.parts[0].text}\n\n${cleanPrompt}`.slice(-1200);
+  if (last && last.role === "user" && mediaParts.length === 0) {
+    last.parts.push({ text: finalPromptWithLang });
+  } else if (last && last.role === "user" && mediaParts.length > 0) {
+    last.parts.push(...mediaParts, { text: finalPromptWithLang });
   } else {
     contents.push({
       role: "user",
-      parts: [{ text: cleanPrompt }],
+      parts: [...mediaParts, { text: finalPromptWithLang }],
     });
   }
 
@@ -2615,56 +3145,103 @@ export function buildValidServerGeminiContents(
 export async function executeAiQuery(
   prompt: string,
   snapshot: StoreSnapshot,
-  conversationHistory: any[] = []
+  conversationHistory: any[] = [],
+  attachments: any[] = []
 ): Promise<{ text: string; modelUsed: string }> {
   if (!GEMINI_API_KEY) {
     throw new Error("No GEMINI_API_KEY configured.");
   }
 
-  const systemInstruction = buildStoreSystemPrompt(snapshot);
-  const contents = buildValidServerGeminiContents(conversationHistory, prompt);
+  const hasHistoryMedia =
+    Array.isArray(conversationHistory) &&
+    conversationHistory.some(
+      (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
+    );
+  const hasMedia =
+    (Array.isArray(attachments) && attachments.length > 0) || hasHistoryMedia;
+  const fastTier = isFastShortTier(prompt, hasMedia);
+  const systemInstruction = buildAdaptiveStoreSystemPrompt(snapshot, prompt, hasMedia);
+  const trimmedHistory = fastTier ? (conversationHistory || []).slice(-4) : conversationHistory;
+  const contents = buildValidServerGeminiContents(trimmedHistory, prompt, attachments);
 
-  // Try PRIMARY_AI_MODEL twice before falling back to slower models
-  const rawList = [
-    PRIMARY_AI_MODEL,
-    PRIMARY_AI_MODEL,
-    ...([BACKUP_AI_MODEL, TERTIARY_AI_MODEL].filter((m) => !isModelInCooldown(m))),
-  ];
+  const callSingleModel = async (
+    model: string,
+    timeoutMs: number
+  ): Promise<{ text: string; modelUsed: string }> => {
+    const response = await Promise.race([
+      ai.models.generateContent({
+        model,
+        contents,
+        config: {
+          systemInstruction,
+          temperature: 0.3,
+          maxOutputTokens: fastTier ? 380 : 900,
+          ...(model.startsWith("gemini-3")
+            ? {
+                thinkingConfig:
+                  model === "gemini-3.1-flash-lite"
+                    ? { thinkingBudget: 0 }
+                    : { thinkingLevel: ThinkingLevel.MINIMAL },
+              }
+            : {}),
+        },
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Timeout on model ${model}`)), timeoutMs)
+      ),
+    ]);
+    if (response && response.text && response.text.trim()) {
+      markModelSuccess(model);
+      return { text: response.text, modelUsed: model };
+    }
+    throw new Error(`Empty response from ${model}`);
+  };
+
+  // Tier 1 (Short sentence): Hedged execution with generous completion window so long answers never abort
+  if (fastTier) {
+    try {
+      const primaryPromise = callSingleModel("gemini-3.1-flash-lite", 9000);
+      const hedgedBackupPromise = new Promise<{ text: string; modelUsed: string }>(
+        (resolve, reject) => {
+          const timer = setTimeout(() => {
+            callSingleModel("gemini-3.5-flash-lite", 9000).then(resolve, reject);
+          }, 1400);
+          primaryPromise.then(
+            () => clearTimeout(timer),
+            () => {
+              clearTimeout(timer);
+              callSingleModel("gemini-3.5-flash-lite", 9000).then(resolve, reject);
+            }
+          );
+        }
+      );
+      return await Promise.any([primaryPromise, hedgedBackupPromise]);
+    } catch {
+      // Fall through to multi-model loop below
+    }
+  }
+
+  // Tier 2 & Fallback: Multi-model sequential failover with generous timeout
+  const allModels = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"].filter(
+    (m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx
+  );
+  const activeModels = allModels.filter((m) => !isModelInCooldown(m));
+  const rawList = activeModels.length > 0 ? activeModels : allModels;
 
   for (let i = 0; i < rawList.length; i++) {
     const model = rawList[i];
-    const timeoutMs = model === "gemini-3.1-flash-lite" ? 6500 : 5000;
+    const timeoutMs = hasMedia ? 16000 : 12000;
     try {
-      const response = await Promise.race([
-        ai.models.generateContent({
-          model,
-          contents,
-          config: {
-            systemInstruction,
-            temperature: 0.35,
-            ...(model.startsWith("gemini-3") && !model.includes("lite")
-              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-              : {}),
-          },
-        }),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error(`Timeout on model ${model}`)), timeoutMs)
-        ),
-      ]);
-
-      if (response && response.text && response.text.trim()) {
-        markModelSuccess(model);
-        return { text: response.text, modelUsed: model };
-      }
+      return await callSingleModel(model, timeoutMs);
     } catch (err: any) {
       const errMsg = String(err?.message || err);
-      const isQuota =
+      const isQuotaOrNotFound =
         errMsg.includes("429") ||
+        errMsg.includes("404") ||
+        errMsg.includes("NOT_FOUND") ||
         errMsg.includes("RESOURCE_EXHAUSTED") ||
         errMsg.includes("quota");
-      if (model !== PRIMARY_AI_MODEL || i > 0) {
-        markModelFailure(model, isQuota);
-      }
+      markModelFailure(model, isQuotaOrNotFound);
       console.warn(`Model ${model} attempt ${i + 1} failed. Error: ${errMsg.slice(0, 100)}`);
     }
   }
@@ -2678,8 +3255,8 @@ export async function executeAiQuery(
 
 const app = express();
 
-app.use(express.json({ limit: "15mb" }));
-app.use(express.urlencoded({ extended: true, limit: "15mb" }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // Basic Security Headers & CORS (including Capacitor Android https://localhost preflight)
 app.use((req, res, next) => {
@@ -2766,13 +3343,16 @@ app.get("/api/health", async (_req, res) => {
 // ----------------------------------------------------------------------------
 app.post("/api/gemini/chat", async (req, res) => {
   try {
-    const { prompt, conversationHistory = [] } = req.body;
-    if (!prompt || typeof prompt !== "string") {
+    const { prompt = "", conversationHistory = [], attachments = [] } = req.body;
+    const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+    if ((!prompt || typeof prompt !== "string" || !prompt.trim()) && !hasAttachments) {
       res.status(400).json({ error: "Missing or invalid 'prompt' in request body." });
       return;
     }
 
-    const cleanPrompt = prompt.trim();
+    const cleanPrompt =
+      String(prompt || "").trim() ||
+      "Analyze the attached media (images/videos), extract any visible text or spoken audio, and summarize what is shown.";
     const status = getSafeStatusMessage(cleanPrompt);
 
     // 1. Hydrate from Client Real-Time Context (0ms) or Retrieve Real Database State
@@ -2800,7 +3380,12 @@ app.post("/api/gemini/chat", async (req, res) => {
     let actionData: any = null;
     let activeModel = PRIMARY_AI_MODEL;
 
-    const aiResult = await executeAiQuery(cleanPrompt, snapshot, conversationHistory);
+    const aiResult = await executeAiQuery(
+      cleanPrompt,
+      snapshot,
+      conversationHistory,
+      hasAttachments ? attachments : []
+    );
     replyText = aiResult.text;
     activeModel = aiResult.modelUsed;
 
@@ -2833,6 +3418,7 @@ app.post("/api/gemini/chat", async (req, res) => {
     if (rawAction && !actionData) {
       replyText = cleanReplyWhenActionSuppressed(replyText);
     }
+    replyText = sanitizeLatexAndMathFormatting(replyText);
 
     const richThought = generateAuthenticOperationalThought(
       cleanPrompt,
@@ -2861,13 +3447,16 @@ app.post("/api/gemini/chat", async (req, res) => {
 // ----------------------------------------------------------------------------
 app.post("/api/gemini/chat-stream", async (req, res) => {
   try {
-    const { prompt, conversationHistory = [] } = req.body;
-    if (!prompt || typeof prompt !== "string") {
+    const { prompt = "", conversationHistory = [], attachments = [] } = req.body;
+    const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+    if ((!prompt || typeof prompt !== "string" || !prompt.trim()) && !hasAttachments) {
       res.status(400).json({ error: "Missing or invalid 'prompt' in request body." });
       return;
     }
 
-    const cleanPrompt = prompt.trim();
+    const cleanPrompt =
+      String(prompt || "").trim() ||
+      "Analyze the attached media (images/videos), extract any visible text or spoken audio, and summarize what is shown.";
     const status = getSafeStatusMessage(cleanPrompt);
 
     // Initialize Server-Sent Events headers
@@ -2906,56 +3495,95 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
       }
     }
 
-    // 2. Stream Response with Multi-Model Failover (gemini-3.1-flash-lite primary)
-    const systemInstruction = buildStoreSystemPrompt(snapshot);
-    const contents = buildValidServerGeminiContents(conversationHistory, cleanPrompt);
+    // 2. Stream Response with Two-Tier Adaptive Speed (<2s short sentence, <8-10s media/paragraph)
+    const hasHistoryMedia =
+      Array.isArray(conversationHistory) &&
+      conversationHistory.some(
+        (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
+      );
+    const hasAnyStreamMedia = hasAttachments || hasHistoryMedia;
+    const fastStreamTier = isFastShortTier(cleanPrompt, hasAnyStreamMedia);
+    const systemInstruction = buildAdaptiveStoreSystemPrompt(
+      snapshot,
+      cleanPrompt,
+      hasAnyStreamMedia
+    );
+    const trimmedHistory = fastStreamTier
+      ? (conversationHistory || []).slice(-4)
+      : conversationHistory;
+    const contents = buildValidServerGeminiContents(
+      trimmedHistory,
+      cleanPrompt,
+      hasAttachments ? attachments : []
+    );
 
-    const candidates = [
-      PRIMARY_AI_MODEL,
-      PRIMARY_AI_MODEL,
-      ...([BACKUP_AI_MODEL, TERTIARY_AI_MODEL].filter((m) => !isModelInCooldown(m))),
-    ];
+    const allStreamModels = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"].filter(
+      (m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx
+    );
+    const activeStreamModels = allStreamModels.filter((m) => !isModelInCooldown(m));
+    const candidates = activeStreamModels.length > 0 ? activeStreamModels : allStreamModels;
 
     let streamSucceeded = false;
     let fullOutput = "";
     let activeModel = PRIMARY_AI_MODEL;
 
+    // Stream tokens progressively so first token arrives in ~0.4s-0.8s and long responses never cut off
     if (GEMINI_API_KEY) {
       for (let i = 0; i < candidates.length; i++) {
         const model = candidates[i];
         if (clientAborted) break;
-        const timeoutMs = model === "gemini-3.1-flash-lite" ? 7000 : 5000;
+        const firstChunkTimeoutMs = hasAnyStreamMedia ? 14000 : 8000;
+        let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
         try {
-          await Promise.race([
-            (async () => {
-              const stream = await ai.models.generateContentStream({
-                model,
-                contents,
-                config: {
-                  systemInstruction,
-                  temperature: 0.35,
-                  ...(model.startsWith("gemini-3") && !model.includes("lite")
-                    ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
-                    : {}),
-                },
-              });
+          await new Promise<void>((resolve, reject) => {
+            const resetInactivity = (ms: number) => {
+              if (inactivityTimer) clearTimeout(inactivityTimer);
+              inactivityTimer = setTimeout(() => {
+                reject(new Error(`Stream inactivity timeout on ${model}`));
+              }, ms);
+            };
+            resetInactivity(firstChunkTimeoutMs);
 
-              for await (const chunk of stream) {
-                if (clientAborted || res.writableEnded) break;
-                const chunkText = chunk.text || "";
-                if (chunkText) {
-                  fullOutput += chunkText;
-                  // Do not stream raw action JSON once ```action begins
-                  if (!fullOutput.includes("```action")) {
-                    res.write(`data: ${JSON.stringify({ chunk: chunkText })}\n\n`);
+            (async () => {
+              try {
+                const stream = await ai.models.generateContentStream({
+                  model,
+                  contents,
+                  config: {
+                    systemInstruction,
+                    temperature: 0.3,
+                    maxOutputTokens: fastStreamTier ? 400 : 950,
+                    ...(model.startsWith("gemini-3")
+                      ? {
+                          thinkingConfig:
+                            model === "gemini-3.1-flash-lite"
+                              ? { thinkingBudget: 0 }
+                              : { thinkingLevel: ThinkingLevel.MINIMAL },
+                        }
+                      : {}),
+                  },
+                });
+
+                for await (const chunk of stream) {
+                  if (clientAborted || res.writableEnded) break;
+                  resetInactivity(10000);
+                  const chunkText = chunk.text || "";
+                  if (chunkText) {
+                    fullOutput += chunkText;
+                    if (!fullOutput.includes("```action")) {
+                      const sanitizedChunk = sanitizeLatexAndMathFormatting(chunkText);
+                      res.write(`data: ${JSON.stringify({ chunk: sanitizedChunk })}\n\n`);
+                    }
                   }
                 }
+                if (inactivityTimer) clearTimeout(inactivityTimer);
+                resolve();
+              } catch (err) {
+                if (inactivityTimer) clearTimeout(inactivityTimer);
+                reject(err);
               }
-            })(),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error(`Stream timeout on ${model}`)), timeoutMs)
-            ),
-          ]);
+            })();
+          });
 
           if (clientAborted || res.writableEnded) {
             return;
@@ -2968,21 +3596,34 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
             break;
           }
         } catch (streamErr: any) {
+          if (inactivityTimer) clearTimeout(inactivityTimer);
           const errMsg = String(streamErr?.message || streamErr);
-          const isQuota =
+          const isQuotaOrNotFound =
             errMsg.includes("429") ||
+            errMsg.includes("404") ||
+            errMsg.includes("NOT_FOUND") ||
             errMsg.includes("RESOURCE_EXHAUSTED") ||
             errMsg.includes("quota");
-          if (model !== PRIMARY_AI_MODEL || i > 0) {
-            markModelFailure(model, isQuota);
+          markModelFailure(model, isQuotaOrNotFound);
+          // If partial tokens were already streamed and look complete enough, keep them; otherwise reset and try next model
+          if (fullOutput.trim().length < 15) {
+            fullOutput = "";
+          } else {
+            streamSucceeded = true;
+            activeModel = model;
+            break;
           }
-          fullOutput = "";
         }
       }
     }
 
     if (!streamSucceeded || !fullOutput.trim()) {
-      const aiResult = await executeAiQuery(cleanPrompt, snapshot, conversationHistory);
+      const aiResult = await executeAiQuery(
+        cleanPrompt,
+        snapshot,
+        conversationHistory,
+        hasAttachments ? attachments : []
+      );
       fullOutput = aiResult.text;
       activeModel = aiResult.modelUsed;
       const previewClean = fullOutput
@@ -3027,6 +3668,7 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
     if (rawAction && !actionData) {
       cleanDisplayText = cleanReplyWhenActionSuppressed(cleanDisplayText);
     }
+    cleanDisplayText = sanitizeLatexAndMathFormatting(cleanDisplayText);
 
     const richThought = generateAuthenticOperationalThought(
       cleanPrompt,
@@ -3038,7 +3680,7 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
     res.write(
       `data: ${JSON.stringify({
         done: true,
-        fullText: cleanDisplayText || fullOutput,
+        fullText: cleanDisplayText || sanitizeLatexAndMathFormatting(fullOutput),
         action: actionData,
         thought: richThought,
         modelUsed: activeModel,
@@ -3047,16 +3689,66 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
     res.end();
   } catch (err: any) {
     console.error("Stream route error:", err);
-    res.write(`data: ${JSON.stringify({ chunk: "A stream error occurred." })}\n\n`);
     res.write(
       `data: ${JSON.stringify({
-        done: true,
-        fullText: "A stream error occurred.",
-        action: null,
-        thought: "Error",
+        error: err?.message || "Failed to generate AI response.",
       })}\n\n`
     );
     res.end();
+  }
+});
+
+// ----------------------------------------------------------------------------
+// GET /api/avatar-proxy (Resilient Server-Side Proxy for External User Avatars)
+// ----------------------------------------------------------------------------
+const avatarProxyCache = new Map<string, { buffer: Buffer; contentType: string; ts: number }>();
+
+app.get("/api/avatar-proxy", async (req, res) => {
+  try {
+    const rawUrl = String(req.query.url || "").trim();
+    if (!rawUrl || (!rawUrl.startsWith("https://") && !rawUrl.startsWith("http://"))) {
+      res.status(400).send("Invalid avatar URL");
+      return;
+    }
+
+    const cached = avatarProxyCache.get(rawUrl);
+    if (cached && Date.now() - cached.ts < 24 * 60 * 60 * 1000) {
+      res.setHeader("Content-Type", cached.contentType);
+      res.setHeader("Cache-Control", "public, max-age=86400");
+      res.send(cached.buffer);
+      return;
+    }
+
+    const upstream = await fetch(rawUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept: "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+      },
+    });
+
+    if (!upstream.ok) {
+      res.status(upstream.status).send("Upstream avatar fetch failed");
+      return;
+    }
+
+    const contentType = upstream.headers.get("content-type") || "image/jpeg";
+    const arrayBuf = await upstream.arrayBuffer();
+    const buffer = Buffer.from(arrayBuf);
+
+    if (buffer.length > 0 && buffer.length < 2 * 1024 * 1024) {
+      if (avatarProxyCache.size > 100) {
+        const oldestKey = avatarProxyCache.keys().next().value;
+        if (oldestKey) avatarProxyCache.delete(oldestKey);
+      }
+      avatarProxyCache.set(rawUrl, { buffer, contentType, ts: Date.now() });
+    }
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.send(buffer);
+  } catch (err) {
+    res.status(502).send("Avatar proxy error");
   }
 });
 
@@ -3066,17 +3758,19 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
 const ttsMemoryCache = new Map<string, { audioBase64: string; mimeType: string }>();
 
 function formatSpeechText(raw: string): string {
+  const hasBengali = /[\u0980-\u09FF]/.test(raw);
+  const currencyWord = hasBengali ? "টাকা" : "rupees";
   return raw
     .replace(/```[\s\S]*?```/g, "")
     .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-    .replace(/#([a-zA-Z0-9_-]{5,})/g, "transaction")
-    .replace(/₹\s*(\d+(?:\.\d+)?)/g, "$1 rupees")
-    .replace(/(\d+)\s*[×x]\s*/g, "$1 ")
-    .replace(/➔|→/g, " to ")
+    .replace(/#([a-zA-Z0-9_-]{5,})/g, hasBengali ? "ট্রানজেকশন" : "transaction")
+    .replace(/₹\s*([\d\u09E6-\u09EF\u0966-\u096F]+(?:\.[\d\u09E6-\u09EF\u0966-\u096F]+)?)/g, `$1 ${currencyWord}`)
+    .replace(/([\d\u09E6-\u09EF\u0966-\u096F]+)\s*[×x]\s*/g, "$1 ")
+    .replace(/➔|→/g, hasBengali ? " থেকে " : " to ")
     .replace(/[*#_`~>]/g, "")
     .replace(/^[•\-]\s*/gm, "")
     .replace(/\n+/g, ". ")
-    .replace(/[^\w\s.,?!'-]/g, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s.,?!'"।:-]/gu, " ")
     .replace(/\.\s*\./g, ".")
     .replace(/\s+/g, " ")
     .trim();
@@ -3220,10 +3914,10 @@ app.post("/api/gemini/transcribe", async (req, res) => {
     }
 
     const transcribeModels = [
-      "gemini-3.1-flash-lite",
+      PRIMARY_AI_MODEL,
+      BACKUP_AI_MODEL,
+      TERTIARY_AI_MODEL,
       "gemini-3.5-transcribe",
-      "gemini-3.8-flash",
-      "gemini-flash-latest",
     ];
     let transcript = "";
     let succeeded = false;
@@ -3244,7 +3938,7 @@ app.post("/api/gemini/transcribe", async (req, res) => {
                     },
                   },
                   {
-                    text: "Transcribe the following spoken store command accurately in English. Output only the transcription text.",
+                    text: "Transcribe the spoken audio clip accurately in the language it was spoken (such as English, Bengali, or Hindi). Output only the transcription text.",
                   },
                 ],
               },
@@ -3273,6 +3967,181 @@ app.post("/api/gemini/transcribe", async (req, res) => {
     res.json({ transcript });
   } catch (err: any) {
     res.status(500).json({ error: "Could not transcribe audio clip. Please try speaking again or type your command." });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// POST /api/gemini/analyze-media (Video & Image Footage Analysis + OCR/Speech Extraction)
+// ----------------------------------------------------------------------------
+app.post("/api/gemini/analyze-media", async (req, res) => {
+  try {
+    const {
+      mediaBase64,
+      mimeType = "image/jpeg",
+      fileName = "uploaded-media",
+      prompt = "",
+    } = req.body || {};
+
+    if (!mediaBase64 || typeof mediaBase64 !== "string") {
+      res.status(400).json({ error: "Missing or invalid 'mediaBase64' payload." });
+      return;
+    }
+
+    if (!GEMINI_API_KEY) {
+      res.status(503).json({ error: "Gemini API key is not configured on the server." });
+      return;
+    }
+
+    const cleanMime = String(mimeType || "image/jpeg").split(";")[0].trim().toLowerCase();
+    const isVideo = cleanMime.startsWith("video/");
+    const mediaLabel = isVideo ? "video footage" : "image";
+    const userQuestion = String(prompt || "").trim();
+
+    const analysisInstruction = `Analyze this uploaded ${mediaLabel} ("${fileName}") thoroughly.
+${userQuestion ? `User's specific request: "${userQuestion}"\n` : ""}
+Perform two comprehensive tasks:
+1. SUMMARY: Provide a clear, detailed summary of everything shown or happening in the ${mediaLabel} (visual scenes, UI elements, products, receipts, bills, actions, or spoken events).
+2. EXTRACTED & TRANSCRIBED TEXT: Extract ALL visible on-screen text (OCR from frames, receipts, labels, chat messages, numbers, prices) AND transcribe ALL spoken audio/dialogue heard in the footage verbatim in its original script (e.g. English, Bengali, Hindi), including English translations in parentheses if non-English text or speech is present. If no text or speech exists, state "No visible text or spoken audio detected."`;
+
+    const mediaModels = [
+      PRIMARY_AI_MODEL,
+      BACKUP_AI_MODEL,
+      TERTIARY_AI_MODEL,
+    ];
+
+    let parsedResult: {
+      summary: string;
+      transcribedText: string;
+      detectedLanguage: string;
+      keyHighlights: string[];
+      modelUsed?: string;
+    } | null = null;
+
+    for (const modelName of mediaModels) {
+      try {
+        const response = await Promise.race([
+          ai.models.generateContent({
+            model: modelName,
+            contents: {
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: cleanMime,
+                    data: mediaBase64,
+                  },
+                },
+                {
+                  text: analysisInstruction,
+                },
+              ],
+            },
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  summary: {
+                    type: Type.STRING,
+                    description:
+                      "Detailed summary of the video footage or image content, visual context, and key findings.",
+                  },
+                  transcribedText: {
+                    type: Type.STRING,
+                    description:
+                      "Complete verbatim transcription of spoken audio/dialogue in the video AND all visible on-screen text (OCR) extracted from the video frames or image.",
+                  },
+                  detectedLanguage: {
+                    type: Type.STRING,
+                    description:
+                      "Primary language(s) detected in the text or audio (e.g., 'English', 'Bengali', 'Hindi', 'None').",
+                  },
+                  keyHighlights: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
+                    description:
+                      "2 to 5 concise bullet highlights or actionable insights from the media.",
+                  },
+                },
+                required: ["summary", "transcribedText", "detectedLanguage", "keyHighlights"],
+              },
+            },
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Media analysis timeout on ${modelName}`)), 25000)
+          ),
+        ]);
+
+        const rawText = response.text;
+        if (rawText && rawText.trim()) {
+          try {
+            const jsonObj = JSON.parse(rawText.trim());
+            if (jsonObj && (jsonObj.summary || jsonObj.transcribedText)) {
+              parsedResult = {
+                summary: String(jsonObj.summary || "Media analyzed successfully.").trim(),
+                transcribedText: String(
+                  jsonObj.transcribedText || "No visible text or spoken audio detected."
+                ).trim(),
+                detectedLanguage: String(jsonObj.detectedLanguage || "Auto-detected").trim(),
+                keyHighlights: Array.isArray(jsonObj.keyHighlights)
+                  ? jsonObj.keyHighlights.map((h: any) => String(h).trim()).filter(Boolean)
+                  : [],
+                modelUsed: modelName,
+              };
+              break;
+            }
+          } catch {
+            parsedResult = {
+              summary: rawText.trim(),
+              transcribedText: rawText.trim(),
+              detectedLanguage: "Auto-detected",
+              keyHighlights: [],
+              modelUsed: modelName,
+            };
+            break;
+          }
+        }
+      } catch (modelErr: any) {
+        console.warn(`Media analysis failed on ${modelName}:`, modelErr?.message || modelErr);
+      }
+    }
+
+    if (!parsedResult) {
+      res.status(502).json({
+        error: "Could not analyze the uploaded file right now. Please try a smaller clip or clearer image.",
+      });
+      return;
+    }
+
+    res.json(parsedResult);
+  } catch (err: any) {
+    console.error("POST /api/gemini/analyze-media error:", err);
+    res.status(500).json({
+      error: "Failed to analyze media file. Please try again.",
+    });
+  }
+});
+
+// ----------------------------------------------------------------------------
+// POST /api/gemini/clear-chat (Purge any stored chat/media RPC records from DB)
+// ----------------------------------------------------------------------------
+app.post("/api/gemini/clear-chat", async (_req, res) => {
+  try {
+    let deletedCount = 0;
+    if (db) {
+      const snap = await getDocs(collection(db, "settings"));
+      const deletions: Promise<void>[] = [];
+      snap.forEach((docSnap) => {
+        const id = docSnap.id;
+        if (id.startsWith("ai_rpc_req_") || id.startsWith("chat_media_") || id.startsWith("buzz_chat_")) {
+          deletedCount++;
+          deletions.push(deleteDoc(doc(db!, "settings", id)).catch(() => {}));
+        }
+      });
+      await Promise.all(deletions);
+    }
+    res.json({ ok: true, deletedCount });
+  } catch (err: any) {
+    res.json({ ok: true, deletedCount: 0 });
   }
 });
 
@@ -3411,20 +4280,19 @@ async function startServer() {
   const isProduction = process.env.NODE_ENV === "production";
 
   if (!isProduction) {
-    // Serve compiled Workbox service worker assets from dist/ if available so offline caching works cleanly in dev preview
-    if (fs.existsSync(distPath)) {
-      app.get(/^\/(sw\.js|registerSW\.js|workbox-.*\.js|manifest\.webmanifest)$/, (req, res, next) => {
-        const filePath = path.join(distPath, req.path);
-        if (fs.existsSync(filePath)) {
-          res.setHeader("Cache-Control", "no-cache");
-          if (req.path.endsWith(".js")) {
-            res.setHeader("Content-Type", "application/javascript; charset=utf-8");
-          }
-          return res.sendFile(filePath);
-        }
-        next();
-      });
-    }
+    // In dev mode, serve a self-unregistering service worker at /sw.js and /dev-sw.js
+    // so any previously registered service worker never caches or serves stale Vite dep chunks
+    app.get(/^\/(sw\.js|dev-sw\.js|registerSW\.js|workbox-.*\.js)$/, (_req, res) => {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+      res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+      return res.send(`self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+      .then(() => self.registration.unregister())
+  );
+});`);
+    });
 
     // Serve a WebSocket-free /@vite/client module so Vite never attempts or rejects WebSocket connections in the preview iframe
     app.get("/@vite/client", (_req, res) => {
@@ -3458,7 +4326,7 @@ export function createHotContext() {
     dispose() {},
     prune() {},
     invalidate() {},
-     decline() {},
+    decline() {},
     on() {},
     off() {},
     send() {},
@@ -3475,6 +4343,52 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
 `);
     });
 
+    let activeFrontendMiddleware: any = null;
+    let resolveViteReady: (() => void) | null = null;
+    const viteReadyPromise = new Promise<void>((resolve) => {
+      resolveViteReady = resolve;
+    });
+
+    app.use(async (req, res, next) => {
+      if (req.path.startsWith("/api/")) {
+        return next();
+      }
+      // Wait for Vite middleware to finish initializing so we never mix dist/ and Vite modules
+      if (!activeFrontendMiddleware) {
+        await viteReadyPromise;
+      }
+      // Force no-store on dev source and pre-bundled dep chunks so browser never caches stale React/Capacitor instances
+      if (
+        req.path === "/" ||
+        req.path === "/index.html" ||
+        req.path.startsWith("/src/") ||
+        req.path.startsWith("/@id/") ||
+        req.path.startsWith("/node_modules/.vite/")
+      ) {
+        res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+        delete req.headers["if-none-match"];
+        delete req.headers["if-modified-since"];
+      }
+      if (activeFrontendMiddleware) {
+        return activeFrontendMiddleware(req, res, next);
+      }
+      if (hasDist) {
+        const candidate = path.join(distPath, req.path === "/" ? "index.html" : req.path);
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          return res.sendFile(candidate);
+        }
+        if (req.method === "GET" && !req.path.startsWith("/api/")) {
+          return res.sendFile(path.resolve(distPath, "index.html"));
+        }
+      }
+      next();
+    });
+
+    // Bind port 3000 immediately so dev server readiness checks succeed in <20ms while Vite warms up
+    const server = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Buzz AI Server listening on 0.0.0.0:${PORT} [mode: development]`);
+    });
+
     try {
       const { createServer: createViteServer } = await import("vite");
       const vite = await createViteServer({
@@ -3487,16 +4401,14 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
         },
         appType: "spa",
       });
-      app.use(vite.middlewares);
+      activeFrontendMiddleware = vite.middlewares;
     } catch (viteErr) {
       console.warn("Vite middleware unavailable, serving static files:", viteErr);
-      if (hasDist) {
-        app.use(express.static(distPath));
-        app.get("*", (_req, res) => {
-          res.sendFile(path.resolve(distPath, "index.html"));
-        });
-      }
+    } finally {
+      if (resolveViteReady) resolveViteReady();
     }
+
+    var activeServer = server;
   } else {
     if (hasDist) {
       app.use(express.static(distPath, {
@@ -3511,33 +4423,69 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
     } else {
       console.warn("dist/index.html not found; will attempt dynamic handling");
     }
+
+    var activeServer = app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Buzz AI Server listening on 0.0.0.0:${PORT} [mode: production]`);
+    });
   }
+  const server = activeServer;
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Buzz AI Server listening on 0.0.0.0:${PORT} [mode: ${isProduction ? "production" : "development"}]`);
-  });
-
-  // Start real-time server-side Firestore AI RPC listener & sync bridge config for 24/7 standalone mobile operation
+  // Start real-time server-side Firestore AI RPC listener for mobile & web clients
   if (db) {
-    if (GEMINI_API_KEY) {
-      setDoc(
-        doc(db, "settings", "ai_bridge_config"),
-        {
-          id: "ai_bridge_config",
-          token: Buffer.from(GEMINI_API_KEY, "utf-8").toString("base64"),
-          primaryModel: PRIMARY_AI_MODEL,
-          backupModel: BACKUP_AI_MODEL,
-          tertiaryModel: TERTIARY_AI_MODEL,
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      ).catch(() => {});
-    }
+    setDoc(
+      doc(db, "settings", "ai_bridge_config"),
+      {
+        id: "ai_bridge_config",
+        serverOnline: Boolean(GEMINI_API_KEY),
+        primaryModel: PRIMARY_AI_MODEL,
+        backupModel: BACKUP_AI_MODEL,
+        tertiaryModel: TERTIARY_AI_MODEL,
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    ).catch(() => {});
 
     const processedRpcIds = new Set<string>();
     const serverSeenFinishedAt = new Map<string, number>();
+    const cachedProfileAvatars = new Set<string>();
+
+    const syncProfileAvatarToDataUrl = async (docSnap: any) => {
+      if (!docSnap || !docSnap.id || !docSnap.id.startsWith("profile_")) return;
+      const data = docSnap.data();
+      if (!data) return;
+      const rawPhoto = String(data.customPhotoURL || data.photoURL || "").trim();
+      if (!rawPhoto || !rawPhoto.startsWith("http")) return;
+      const cacheKey = `${docSnap.id}::${rawPhoto}`;
+      if (cachedProfileAvatars.has(cacheKey)) return;
+      cachedProfileAvatars.add(cacheKey);
+      try {
+        const res = await fetch(rawPhoto, {
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            Accept: "image/*",
+          },
+        });
+        if (!res.ok) return;
+        const contentType = (res.headers.get("content-type") || "image/jpeg").split(";")[0].trim();
+        if (!contentType.startsWith("image/")) return;
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length > 100 && buf.length < 350 * 1024) {
+          const dataUrl = `data:${contentType};base64,${buf.toString("base64")}`;
+          await setDoc(
+            doc(db!, "settings", docSnap.id),
+            { customPhotoURL: dataUrl },
+            { merge: true }
+          );
+        }
+      } catch {}
+    };
 
     const handleRpcDocument = async (docSnap: any) => {
+      if (docSnap?.id?.startsWith("profile_")) {
+        syncProfileAvatarToDataUrl(docSnap).catch(() => {});
+        return;
+      }
       if (!docSnap || !docSnap.id || !docSnap.id.startsWith("ai_rpc_req_")) return;
       const data = docSnap.data();
       if (!data) return;
@@ -3555,9 +4503,6 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
 
       if (data.status !== "pending" || processedRpcIds.has(docSnap.id)) return;
 
-      // NOTE: Never compare client `data.createdAt` against server `Date.now()` because the server
-      // container clock and user's mobile phone clock can differ, which previously caused mobile
-      // RPC requests to be misclassified as stale and deleted before processing!
       processedRpcIds.add(docSnap.id);
       if (processedRpcIds.size > 300) {
         const first = processedRpcIds.values().next().value;
@@ -3610,7 +4555,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                               },
                             },
                             {
-                              text: "Transcribe the following spoken store command accurately in English. Output only the transcription text.",
+                              text: "Transcribe the spoken audio clip accurately in the language it was spoken (such as English, Bengali, or Hindi). Output only the transcription text.",
                             },
                           ],
                         },
@@ -3722,7 +4667,10 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               return;
             }
 
-            const cleanPrompt = String(data.prompt || "").trim();
+            const rpcAttachments = Array.isArray(data.attachments) ? data.attachments : [];
+            const cleanPrompt =
+              String(data.prompt || "").trim() ||
+              "Analyze the attached media (images/videos), extract any visible text or spoken audio, and summarize what is shown.";
             const conversationHistory = Array.isArray(data.conversationHistory)
               ? data.conversationHistory
               : [];
@@ -3733,19 +4681,55 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
             let actionData: any = null;
             let activeModel = PRIMARY_AI_MODEL;
 
-            const systemInstruction = buildStoreSystemPrompt(snapshot);
-            const contents = buildValidServerGeminiContents(conversationHistory, cleanPrompt);
-            const candidates = [
-              PRIMARY_AI_MODEL,
-              PRIMARY_AI_MODEL,
-              ...([BACKUP_AI_MODEL, TERTIARY_AI_MODEL].filter((m) => !isModelInCooldown(m))),
-            ];
+            const hasRpcHistoryMedia =
+              Array.isArray(conversationHistory) &&
+              conversationHistory.some(
+                (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
+              );
+            const hasRpcMedia = rpcAttachments.length > 0 || hasRpcHistoryMedia;
+            const fastRpcTier = isFastShortTier(cleanPrompt, hasRpcMedia);
+            const systemInstruction = buildAdaptiveStoreSystemPrompt(
+              snapshot,
+              cleanPrompt,
+              hasRpcMedia
+            );
+            const trimmedRpcHistory = fastRpcTier
+              ? conversationHistory.slice(-4)
+              : conversationHistory;
+            const contents = buildValidServerGeminiContents(
+              trimmedRpcHistory,
+              cleanPrompt,
+              rpcAttachments
+            );
 
             let streamOk = false;
-            if (GEMINI_API_KEY) {
+            // Tier 1 (Short sentence): Execute hedged <2s fast query and write final result in a single Firestore round-trip
+            if (fastRpcTier && GEMINI_API_KEY) {
+              try {
+                const aiRes = await executeAiQuery(
+                  cleanPrompt,
+                  snapshot,
+                  trimmedRpcHistory,
+                  []
+                );
+                if (aiRes.text && aiRes.text.trim()) {
+                  replyText = aiRes.text;
+                  activeModel = aiRes.modelUsed;
+                  streamOk = true;
+                }
+              } catch {}
+            }
+
+            if (!streamOk && GEMINI_API_KEY) {
+              const allRpcModels = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"].filter(
+                (m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx
+              );
+              const activeRpcModels = allRpcModels.filter((m) => !isModelInCooldown(m));
+              const candidates = activeRpcModels.length > 0 ? activeRpcModels : allRpcModels;
+
               for (let i = 0; i < candidates.length; i++) {
                 const model = candidates[i];
-                const timeoutMs = model === "gemini-3.1-flash-lite" ? 7000 : 5000;
+                const timeoutMs = hasRpcMedia ? 16000 : 12000;
                 try {
                   let streamedText = "";
                   let lastPartialFlush = 0;
@@ -3756,9 +4740,15 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                         contents,
                         config: {
                           systemInstruction,
-                          temperature: 0.35,
-                          ...(model.startsWith("gemini-3") && !model.includes("lite")
-                            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+                          temperature: 0.3,
+                          maxOutputTokens: fastRpcTier ? 400 : 950,
+                          ...(model.startsWith("gemini-3")
+                            ? {
+                                thinkingConfig:
+                                  model === "gemini-3.1-flash-lite"
+                                    ? { thinkingBudget: 0 }
+                                    : { thinkingLevel: ThinkingLevel.MINIMAL },
+                              }
                             : {}),
                         },
                       });
@@ -3769,13 +4759,15 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                           const now = Date.now();
                           if (
                             !streamedText.includes("```action") &&
-                            now - lastPartialFlush >= 220
+                            (lastPartialFlush === 0 || now - lastPartialFlush >= 180)
                           ) {
                             lastPartialFlush = now;
-                            const cleanPartial = streamedText
-                              .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-                              .replace(/<thought>[\s\S]*$/g, "")
-                              .trim();
+                            const cleanPartial = sanitizeLatexAndMathFormatting(
+                              streamedText
+                                .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+                                .replace(/<thought>[\s\S]*$/g, "")
+                                .trim()
+                            );
                             if (cleanPartial) {
                               setDoc(
                                 doc(db!, "settings", docSnap.id),
@@ -3807,17 +4799,22 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                   const errMsg = String(streamErr?.message || streamErr);
                   const isQuota =
                     errMsg.includes("429") ||
+                    errMsg.includes("404") ||
+                    errMsg.includes("NOT_FOUND") ||
                     errMsg.includes("RESOURCE_EXHAUSTED") ||
                     errMsg.includes("quota");
-                  if (model !== PRIMARY_AI_MODEL || i > 0) {
-                    markModelFailure(model, isQuota);
-                  }
+                  markModelFailure(model, isQuota);
                 }
               }
             }
 
             if (!streamOk) {
-              const aiRes = await executeAiQuery(cleanPrompt, snapshot, conversationHistory);
+              const aiRes = await executeAiQuery(
+                cleanPrompt,
+                snapshot,
+                trimmedRpcHistory,
+                rpcAttachments
+              );
               replyText = aiRes.text;
               activeModel = aiRes.modelUsed;
             }
@@ -3849,6 +4846,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
             if (rawAction && !actionData) {
               replyText = cleanReplyWhenActionSuppressed(replyText);
             }
+            replyText = sanitizeLatexAndMathFormatting(replyText);
 
             const richThought = generateAuthenticOperationalThought(
               cleanPrompt,

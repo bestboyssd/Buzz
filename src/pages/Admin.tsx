@@ -46,6 +46,7 @@ import {
   FileText,
 } from "lucide-react";
 import { AdminAIAssistant } from "../components/AdminAIAssistant";
+import { getApiBaseUrl } from "../lib/geminiApi";
 import appletConfig from "../../firebase-applet-config.json";
 import { triggerHaptic } from "../lib/haptics";
 import {
@@ -499,7 +500,9 @@ export function Admin() {
           allUids: [uid],
           displayName: profile.displayName || "Anonymous User",
           email: emailStr || "No Email provided",
-          customPhotoURL: profile.customPhotoURL || profile.photoURL || "",
+          customPhotoURL: String(
+            profile.customPhotoURL || profile.photoURL || profile.avatar || ""
+          ).trim(),
           failedCount: isActuallyAdmin ? 0 : attemptInfo.failedCount,
           lockedByAdmin: isActuallyAdmin ? false : attemptInfo.lockedByAdmin,
           isBlocked,
@@ -512,6 +515,14 @@ export function Admin() {
         };
       })
       .filter(Boolean) as any[];
+
+    const pickBestPhotoUrl = (primaryUrl: string, secondaryUrl: string): string => {
+      const p = String(primaryUrl || "").trim();
+      const s = String(secondaryUrl || "").trim();
+      if (p.startsWith("data:image/") && !s.startsWith("data:image/")) return p;
+      if (s.startsWith("data:image/") && !p.startsWith("data:image/")) return s;
+      return p || s || "";
+    };
 
     // Deduplicate accounts by normalized email so a user signing in on both PC and Mobile APK appears once
     const byKey = new Map<string, any>();
@@ -535,13 +546,20 @@ export function Admin() {
               deleteDoc(doc(db, "settings", `attempts_${staleUid}`)).catch(() => {});
             }
           });
-          byKey.set(normEmail, { ...acc, allUids: [acc.uid] });
+          byKey.set(normEmail, {
+            ...acc,
+            customPhotoURL: pickBestPhotoUrl(acc.customPhotoURL, existing.customPhotoURL),
+            allUids: [acc.uid],
+          });
           return;
         }
         if (existingRecreated > accRecreated && existingRecreated > (acc.updatedAt || 0)) {
           if (acc.uid !== existing.uid) {
             deleteDoc(doc(db, "settings", `profile_${acc.uid}`)).catch(() => {});
             deleteDoc(doc(db, "settings", `attempts_${acc.uid}`)).catch(() => {});
+          }
+          if (!existing.customPhotoURL && acc.customPhotoURL) {
+            existing.customPhotoURL = acc.customPhotoURL;
           }
           return;
         }
@@ -552,6 +570,10 @@ export function Admin() {
         const mergedLocked = mergedAdmin ? false : existing.lockedByAdmin || acc.lockedByAdmin;
         const mergedBlocked = mergedAdmin ? false : Boolean(existing.isBlocked || acc.isBlocked);
         const mergedFailed = mergedAdmin ? 0 : Math.max(existing.failedCount || 0, acc.failedCount || 0);
+        const resolvedPhoto = preferCurrent
+          ? pickBestPhotoUrl(acc.customPhotoURL, existing.customPhotoURL)
+          : pickBestPhotoUrl(existing.customPhotoURL, acc.customPhotoURL);
+
         byKey.set(normEmail, {
           ...(preferCurrent ? acc : existing),
           uid: acc.uid === user?.uid ? acc.uid : existing.uid === user?.uid ? existing.uid : (preferCurrent ? acc.uid : existing.uid),
@@ -562,7 +584,7 @@ export function Admin() {
               : existing.displayName !== "Anonymous User"
               ? existing.displayName
               : acc.displayName,
-          customPhotoURL: (preferCurrent ? acc.customPhotoURL : existing.customPhotoURL) || existing.customPhotoURL || acc.customPhotoURL,
+          customPhotoURL: resolvedPhoto,
           isAdmin: mergedAdmin,
           role: mergedAdmin ? "admin" : "user",
           failedCount: mergedFailed,
@@ -2639,7 +2661,7 @@ export function Admin() {
       // Update local state immediately for instant feedback
       setAccounts((prev) => {
         const nextList = prev.map((acc) =>
-          acc.uid === editingAccount.uid
+          acc.uid === editingAccount.uid || targetUids.includes(acc.uid)
             ? {
                 ...acc,
                 displayName: trimmedName,
@@ -4107,12 +4129,18 @@ export function Admin() {
                   {[0, 1, 2, 3].map((i) => {
                     const filled = i < newPin.length;
                     return (
-                      <div
+                      <motion.div
                         key={i}
-                        className={`w-4 h-4 rounded-full transition-all duration-300 ${
+                        initial={false}
+                        animate={{
+                          scale: filled ? 1.22 : 1,
+                          y: filled ? -2 : 0,
+                        }}
+                        transition={{ type: "spring", stiffness: 560, damping: 22, mass: 0.5 }}
+                        className={`w-4 h-4 rounded-full transition-colors duration-200 ${
                           filled
-                            ? "bg-indigo-600 dark:bg-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.6)] scale-110"
-                            : "bg-slate-200 dark:bg-slate-800 scale-100"
+                            ? "bg-indigo-600 dark:bg-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.6)]"
+                            : "bg-slate-200 dark:bg-slate-800"
                         }`}
                       />
                     );
@@ -4120,31 +4148,64 @@ export function Admin() {
                 </div>
 
                 <div className="grid grid-cols-3 gap-3.5 w-full px-4">
-                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
-                    <button
+                  {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num, idx) => (
+                    <motion.button
                       type="button"
                       key={num}
+                      initial={{ opacity: 0, y: 12, scale: 0.92 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      whileHover={{ y: -2, scale: 1.03 }}
+                      whileTap={{ scale: 0.88 }}
+                      transition={{
+                        type: "spring",
+                        stiffness: 520,
+                        damping: 28,
+                        mass: 0.55,
+                        delay: idx * 0.018,
+                      }}
                       onClick={() => handleNewPinInput(num.toString())}
-                      className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-15 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:scale-90 active:bg-slate-100 dark:active:!bg-slate-800 transition-all outline-none select-none"
+                      className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-15 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none select-none cursor-pointer"
                     >
                       {num}
-                    </button>
+                    </motion.button>
                   ))}
                   <div />
-                  <button
+                  <motion.button
                     type="button"
+                    initial={{ opacity: 0, y: 12, scale: 0.92 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    whileHover={{ y: -2, scale: 1.03 }}
+                    whileTap={{ scale: 0.88 }}
+                    transition={{
+                      type: "spring",
+                      stiffness: 520,
+                      damping: 28,
+                      mass: 0.55,
+                      delay: 9 * 0.018,
+                    }}
                     onClick={() => handleNewPinInput("0")}
-                    className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-15 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:scale-90 active:bg-slate-100 dark:active:!bg-slate-800 transition-all outline-none select-none"
+                    className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-15 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none select-none cursor-pointer"
                   >
                     0
-                  </button>
-                  <button
+                  </motion.button>
+                  <motion.button
                     type="button"
+                    initial={{ opacity: 0, y: 12, scale: 0.92 }}
+                    animate={{ opacity: 1, y: 0, scale: 1 }}
+                    whileHover={{ y: -2, scale: 1.03 }}
+                    whileTap={{ scale: 0.88 }}
+                    transition={{
+                      type: "spring",
+                      stiffness: 520,
+                      damping: 28,
+                      mass: 0.55,
+                      delay: 10 * 0.018,
+                    }}
                     onClick={handleNewPinBackspace}
-                    className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-15 flex items-center justify-center text-slate-400 dark:text-slate-500 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:scale-90 active:bg-slate-100 dark:active:!bg-slate-800 transition-all outline-none select-none"
+                    className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-15 flex items-center justify-center text-slate-400 dark:text-slate-500 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none select-none cursor-pointer"
                   >
                     <Delete size={22} className="stroke-[2.5]" />
-                  </button>
+                  </motion.button>
                 </div>
 
                 {/* Fixed-height action slot prevents keypad from jumping when 4th digit is entered */}
@@ -4538,8 +4599,19 @@ export function Admin() {
                           conflict.conflictingItems || conflict.conflicts || [];
 
                         return (
-                          <div
+                          <motion.div
+                            layout="position"
                             key={conflict.id || `conflict_${idx}`}
+                            initial={{ opacity: 0, y: 14, scale: 0.97 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            whileHover={{ y: -2 }}
+                            transition={{
+                              type: "spring",
+                              stiffness: 440,
+                              damping: 30,
+                              mass: 0.65,
+                              delay: Math.min(idx * 0.035, 0.22),
+                            }}
                             className={`p-4 glass-card rounded-[24px] flex flex-col gap-3 border ${
                               isUnresolved
                                 ? "border-amber-500/35 dark:border-amber-500/30"
@@ -4683,7 +4755,7 @@ export function Admin() {
                                 </span>
                               </div>
                             )}
-                          </div>
+                          </motion.div>
                         );
                       })}
                     </div>
@@ -5109,8 +5181,19 @@ export function Admin() {
                             "bg-emerald-100/80 text-emerald-800 dark:bg-emerald-500/15 dark:text-emerald-300 border border-emerald-300/40 dark:border-emerald-500/25";
 
                         return (
-                          <div
+                          <motion.div
+                            layout="position"
                             key={log.id ? `${log.id}_${idx}` : `log_${idx}`}
+                            initial={{ opacity: 0, y: 14, scale: 0.97 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            whileHover={{ y: -2 }}
+                            transition={{
+                              type: "spring",
+                              stiffness: 440,
+                              damping: 30,
+                              mass: 0.65,
+                              delay: Math.min(idx * 0.028, 0.22),
+                            }}
                             className="p-4 glass-card rounded-[24px] flex flex-col gap-2"
                           >
                             <div className="flex items-center justify-between gap-2">
@@ -5144,7 +5227,7 @@ export function Admin() {
                                 {log.userName || "System"} · {log.userEmail || "no email"}
                               </span>
                             </div>
-                          </div>
+                          </motion.div>
                         );
                       })}
                     </div>
@@ -5223,22 +5306,29 @@ export function Admin() {
       return (
         <motion.div
           key="admin-accounts-view"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.18 }}
+          initial={{ opacity: 0, y: 14, scale: 0.985 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 12, scale: 0.985 }}
+          transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.7 }}
           className="min-h-full flex flex-col pb-4 px-4 pt-12 w-full max-w-lg mx-auto [overflow-anchor:none]"
         >
           {/* Header */}
-          <header className="mb-6 flex flex-col gap-4 shrink-0">
+          <motion.header
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ type: "spring", stiffness: 440, damping: 30, mass: 0.65 }}
+            className="mb-6 flex flex-col gap-4 shrink-0"
+          >
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3.5">
-                <button
+                <motion.button
+                  whileHover={{ scale: 1.06 }}
+                  whileTap={{ scale: 0.9 }}
                   onClick={() => setIsViewingAccounts(false)}
                   className="m3-icon-btn flex-shrink-0 pointer-events-auto"
                 >
                   <ArrowLeft size={18} />
-                </button>
+                </motion.button>
                 <div>
                   <h1 className="text-2xl font-black tracking-tight text-slate-900 dark:text-white">
                     User{" "}
@@ -5251,7 +5341,9 @@ export function Admin() {
                   </p>
                 </div>
               </div>
-              <button
+              <motion.button
+                whileHover={{ scale: 1.06, rotate: 15 }}
+                whileTap={{ scale: 0.9 }}
                 onClick={() => {
                   triggerHaptic("heavy");
                   setIsRefreshingAccounts(true);
@@ -5272,12 +5364,18 @@ export function Admin() {
                 ) : (
                   <RefreshCw size={16} />
                 )}
-              </button>
+              </motion.button>
             </div>
 
             {/* Quick stats banner (Material 3 Surface Cards) */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="p-4 rounded-[24px] bg-[#f3edf7]/90 dark:bg-[#1b1f2b]/95 border border-slate-200/80 dark:border-white/[0.08] flex flex-col gap-1 shadow-2xs">
+              <motion.div
+                initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                whileHover={{ y: -2, scale: 1.015 }}
+                transition={{ type: "spring", stiffness: 460, damping: 30, delay: 0.04 }}
+                className="p-4 rounded-[24px] bg-[#f3edf7]/90 dark:bg-[#1b1f2b]/95 border border-slate-200/80 dark:border-white/[0.08] flex flex-col gap-1 shadow-2xs"
+              >
                 <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-500 dark:text-slate-400">
                   Total Registered
                 </span>
@@ -5287,8 +5385,14 @@ export function Admin() {
                     users
                   </span>
                 </span>
-              </div>
-              <div className="p-4 rounded-[24px] bg-[#f3edf7]/90 dark:bg-[#1b1f2b]/95 border border-slate-200/80 dark:border-white/[0.08] flex flex-col gap-1 shadow-2xs">
+              </motion.div>
+              <motion.div
+                initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                whileHover={{ y: -2, scale: 1.015 }}
+                transition={{ type: "spring", stiffness: 460, damping: 30, delay: 0.08 }}
+                className="p-4 rounded-[24px] bg-[#f3edf7]/90 dark:bg-[#1b1f2b]/95 border border-slate-200/80 dark:border-white/[0.08] flex flex-col gap-1 shadow-2xs"
+              >
                 <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-500 dark:text-slate-400">
                   Blocked / Locked
                 </span>
@@ -5304,9 +5408,9 @@ export function Admin() {
                     restricted
                   </span>
                 </span>
-              </div>
+              </motion.div>
             </div>
-          </header>
+          </motion.header>
 
           {/* Material 3 Search Bar */}
           <div className="relative mb-5 shrink-0">
@@ -5402,8 +5506,19 @@ export function Admin() {
                       (acc.isOnline === true &&
                         Date.now() - (Number(acc.lastActive) || 0) <= 60000));
                   return (
-                    <div
+                    <motion.div
+                      layout="position"
                       key={acc.uid ? `${acc.uid}_${idx}` : `acc_${idx}`}
+                      initial={{ opacity: 0, y: 16, scale: 0.965 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      whileHover={{ y: -2 }}
+                      transition={{
+                        type: "spring",
+                        stiffness: 440,
+                        damping: 30,
+                        mass: 0.65,
+                        delay: Math.min(idx * 0.035, 0.22),
+                      }}
                       className={`p-4 sm:p-5 bg-white dark:bg-[#1b1f2b] rounded-[28px] flex flex-col gap-3.5 overflow-hidden border shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none ${
                         isBlocked
                           ? "border-rose-500/35 dark:border-rose-500/30"
@@ -5425,12 +5540,38 @@ export function Admin() {
                               />
                               {acc.customPhotoURL && (
                                 <img
+                                  key={`${acc.uid}_${acc.customPhotoURL.slice(0, 64)}`}
                                   src={acc.customPhotoURL}
                                   alt={acc.displayName}
-                                  className="w-full h-full object-cover absolute inset-0 z-10"
+                                  className="w-full h-full object-cover absolute inset-0 z-10 transition-opacity duration-200"
                                   referrerPolicy="no-referrer"
+                                  decoding="async"
+                                  onLoad={(e) => {
+                                    e.currentTarget.style.opacity = "1";
+                                  }}
                                   onError={(e) => {
-                                    e.currentTarget.style.opacity = "0";
+                                    const img = e.currentTarget;
+                                    const retries = Number(img.dataset.retryCount || "0");
+                                    if (retries === 0 && acc.customPhotoURL.startsWith("http")) {
+                                      img.dataset.retryCount = "1";
+                                      const altUrl = acc.customPhotoURL.includes("googleusercontent.com")
+                                        ? acc.customPhotoURL.replace(/=s\d+-c$/, "=s128-c")
+                                        : acc.customPhotoURL;
+                                      setTimeout(() => {
+                                        img.src =
+                                          altUrl !== acc.customPhotoURL
+                                            ? altUrl
+                                            : `${acc.customPhotoURL}${acc.customPhotoURL.includes("?") ? "&" : "?"}r=1`;
+                                      }, 180 + (idx % 4) * 90);
+                                      return;
+                                    }
+                                    if (retries === 1 && acc.customPhotoURL.startsWith("http")) {
+                                      img.dataset.retryCount = "2";
+                                      const base = getApiBaseUrl();
+                                      img.src = `${base}/api/avatar-proxy?url=${encodeURIComponent(acc.customPhotoURL)}`;
+                                      return;
+                                    }
+                                    img.style.opacity = "0";
                                   }}
                                 />
                               )}
@@ -5587,7 +5728,7 @@ export function Admin() {
                             ))}
                         </div>
                       </div>
-                    </div>
+                    </motion.div>
                   );
                 })}
               </motion.div>
@@ -5741,12 +5882,25 @@ export function Admin() {
                               />
                               {editPhoto && (
                                 <img
+                                  key={editPhoto.slice(0, 64)}
                                   src={editPhoto}
                                   alt="Preview"
                                   className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-110 absolute inset-0 z-10"
                                   referrerPolicy="no-referrer"
+                                  decoding="async"
+                                  onLoad={(e) => {
+                                    e.currentTarget.style.opacity = "1";
+                                  }}
                                   onError={(e) => {
-                                    e.currentTarget.style.opacity = "0";
+                                    const img = e.currentTarget;
+                                    const retries = Number(img.dataset.retryCount || "0");
+                                    if (retries === 0 && editPhoto.startsWith("http")) {
+                                      img.dataset.retryCount = "1";
+                                      const base = getApiBaseUrl();
+                                      img.src = `${base}/api/avatar-proxy?url=${encodeURIComponent(editPhoto)}`;
+                                      return;
+                                    }
+                                    img.style.opacity = "0";
                                   }}
                                 />
                               )}
@@ -5979,17 +6133,24 @@ export function Admin() {
       return (
         <motion.div
           key="admin-product-costs-view"
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          transition={{ duration: 0.18 }}
+          initial={{ opacity: 0, y: 14, scale: 0.985 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 12, scale: 0.985 }}
+          transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.7 }}
           className="min-h-full flex flex-col pb-6 px-4 pt-10 w-full max-w-lg mx-auto [overflow-anchor:none]"
         >
           {/* Clean Single-Line Header */}
-          <header className="mb-5 flex flex-col gap-4 shrink-0">
+          <motion.header
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ type: "spring", stiffness: 440, damping: 30, mass: 0.65 }}
+            className="mb-5 flex flex-col gap-4 shrink-0"
+          >
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-3 min-w-0">
-                <button
+                <motion.button
+                  whileHover={{ scale: 1.06 }}
+                  whileTap={{ scale: 0.9 }}
                   type="button"
                   onClick={() => {
                     triggerHaptic("light");
@@ -6003,7 +6164,7 @@ export function Admin() {
                   className="m3-icon-btn flex-shrink-0 pointer-events-auto"
                 >
                   <ArrowLeft size={18} />
-                </button>
+                </motion.button>
                 <div className="min-w-0">
                   <h1 className="text-xl sm:text-2xl font-black tracking-tight text-slate-900 dark:text-white truncate">
                     Buy{" "}
@@ -6016,22 +6177,30 @@ export function Admin() {
                   </p>
                 </div>
               </div>
-              <button
+              <motion.button
+                whileHover={{ scale: 1.04, y: -1 }}
+                whileTap={{ scale: 0.94 }}
                 type="button"
                 onClick={() => {
                   triggerHaptic("selection");
                   navigate("/analytics");
                 }}
-                className="min-h-[38px] px-3.5 py-2 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all active:scale-95 shrink-0 cursor-pointer"
+                className="min-h-[38px] px-3.5 py-2 rounded-full bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-colors shrink-0 cursor-pointer"
               >
                 <BarChart3 size={14} />
                 <span>Profit</span>
-              </button>
+              </motion.button>
             </div>
 
             {/* Clean 2-Card Summary Strip */}
             <div className="grid grid-cols-2 gap-3">
-              <div className="p-3.5 rounded-[22px] bg-[#f3edf7]/90 dark:bg-[#1b1f2b]/95 border border-slate-200/80 dark:border-white/[0.08] flex flex-col gap-0.5">
+              <motion.div
+                initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                whileHover={{ y: -2, scale: 1.015 }}
+                transition={{ type: "spring", stiffness: 460, damping: 30, delay: 0.04 }}
+                className="p-3.5 rounded-[22px] bg-[#f3edf7]/90 dark:bg-[#1b1f2b]/95 border border-slate-200/80 dark:border-white/[0.08] flex flex-col gap-0.5"
+              >
                 <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-500 dark:text-slate-400">
                   Price Saved
                 </span>
@@ -6043,8 +6212,14 @@ export function Admin() {
                     / {globalProducts.length} items
                   </span>
                 </div>
-              </div>
-              <div className="p-3.5 rounded-[22px] bg-[#f3edf7]/90 dark:bg-[#1b1f2b]/95 border border-slate-200/80 dark:border-white/[0.08] flex flex-col gap-0.5">
+              </motion.div>
+              <motion.div
+                initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                whileHover={{ y: -2, scale: 1.015 }}
+                transition={{ type: "spring", stiffness: 460, damping: 30, delay: 0.08 }}
+                className="p-3.5 rounded-[22px] bg-[#f3edf7]/90 dark:bg-[#1b1f2b]/95 border border-slate-200/80 dark:border-white/[0.08] flex flex-col gap-0.5"
+              >
                 <span className="text-[10px] font-extrabold uppercase tracking-widest text-slate-500 dark:text-slate-400">
                   Needs Buy Price
                 </span>
@@ -6062,9 +6237,9 @@ export function Admin() {
                     {missingCount === 0 ? "all set" : "₹0 profit until set"}
                   </span>
                 </div>
-              </div>
+              </motion.div>
             </div>
-          </header>
+          </motion.header>
 
           {/* Search Bar */}
           <div className="relative mb-3.5 shrink-0">
@@ -6249,8 +6424,19 @@ export function Admin() {
                   const isJustSaved = justSavedCostProductId === p.id;
 
                   return (
-                    <div
+                    <motion.div
+                      layout="position"
                       key={pid}
+                      initial={{ opacity: 0, y: 16, scale: 0.965 }}
+                      animate={{ opacity: 1, y: 0, scale: 1 }}
+                      whileHover={{ y: -2 }}
+                      transition={{
+                        type: "spring",
+                        stiffness: 440,
+                        damping: 30,
+                        mass: 0.65,
+                        delay: Math.min(idx * 0.03, 0.22),
+                      }}
                       className="bg-white dark:bg-[#1b1f2b] p-4 rounded-[24px] flex flex-col gap-3.5 border border-slate-200/80 dark:border-white/[0.08] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none"
                     >
                       {/* Top Row: Thumbnail + Full-Width Name & Single-Line MRP/Stock + Saved Status */}
@@ -6267,11 +6453,12 @@ export function Admin() {
                               <ProductImagePlaceholder
                                 name={p.name}
                                 category={p.category}
-                                size={22}
+                                size={16}
                                 rounded="rounded-2xl"
                                 className="w-full h-full"
                                 showBorder={false}
                                 showShadow={false}
+                                monogramSize="bottom-0 right-[2px] text-[24px] font-black"
                               />
                             )}
                           </div>
@@ -6387,7 +6574,7 @@ export function Admin() {
                           )}
                         </button>
                       </div>
-                    </div>
+                    </motion.div>
                   );
                 })}
               </div>
@@ -6408,19 +6595,26 @@ export function Admin() {
         exit={{
           opacity: 0,
           scale: 0.98,
-          transition: { duration: 0.3, ease: [0.16, 1, 0.3, 1] },
+          transition: { duration: 0.25, ease: [0.16, 1, 0.3, 1] },
         }}
-        transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.7 }}
         className="pb-2 px-4 pt-12 max-w-lg mx-auto"
       >
-        <header className="mb-8 p-4 rounded-[2rem] bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl border border-slate-200/50 dark:border-slate-800/60 shadow-lg flex items-center justify-between">
+        <motion.header
+          initial={{ opacity: 0, y: -14, scale: 0.97 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={{ type: "spring", stiffness: 460, damping: 30, mass: 0.65 }}
+          className="mb-8 p-4 rounded-[2rem] bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl border border-slate-200/50 dark:border-slate-800/60 shadow-lg flex items-center justify-between"
+        >
           <div className="flex items-center gap-4">
-            <button
+            <motion.button
+              whileHover={{ scale: 1.08 }}
+              whileTap={{ scale: 0.9 }}
               onClick={handleExitAdmin}
-              className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200/60 dark:bg-slate-800/80 rounded-full shadow-sm hover:scale-105 active:scale-95 transition-all text-slate-700 dark:text-slate-200 border border-slate-200/30 dark:border-slate-700/40 outline-none pointer-events-auto"
+              className="w-10 h-10 flex-shrink-0 flex items-center justify-center bg-slate-200/60 dark:bg-slate-800/80 rounded-full shadow-sm transition-colors text-slate-700 dark:text-slate-200 border border-slate-200/30 dark:border-slate-700/40 outline-none pointer-events-auto cursor-pointer"
             >
               <ArrowLeft size={18} />
-            </button>
+            </motion.button>
             <div>
               <h1 className="text-xl font-black tracking-tight text-slate-900 dark:text-slate-100 leading-none">
                 Admin{" "}
@@ -6433,22 +6627,25 @@ export function Admin() {
               </p>
             </div>
           </div>
-        </header>
+        </motion.header>
 
         <div className="grid grid-cols-1 gap-4">
           {/* Gemini AI Store Manager - Premier Featured Card */}
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -3, scale: 1.018 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.02 }}
             onClick={() => {
               triggerHaptic("heavy");
               setIsAIAssistantOpen(true);
             }}
-            className="w-full relative overflow-hidden p-6 rounded-[2rem] bg-gradient-to-br from-indigo-500/10 via-purple-500/10 to-pink-500/10 border-2 border-indigo-500/30 dark:border-indigo-400/30 shadow-lg shadow-indigo-500/5 hover:border-indigo-500 dark:hover:border-indigo-400 transition-all flex items-center gap-5 text-left group"
+            className="w-full relative overflow-hidden p-6 rounded-[2rem] bg-gradient-to-br from-indigo-500/10 via-purple-500/10 to-pink-500/10 border-2 border-indigo-500/30 dark:border-indigo-400/30 shadow-lg shadow-indigo-500/5 hover:border-indigo-500 dark:hover:border-indigo-400 transition-colors flex items-center gap-5 text-left group cursor-pointer"
           >
             <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-bl from-indigo-500/20 via-purple-500/10 to-transparent rounded-bl-full pointer-events-none blur-xl" />
             
-            <div className="relative w-16 h-16 rounded-2xl bg-indigo-600 flex items-center justify-center text-white shadow-lg shadow-indigo-500/25 group-hover:scale-105 transition-transform shrink-0 overflow-hidden">
+            <div className="relative w-16 h-16 rounded-2xl bg-indigo-600 flex items-center justify-center text-white shadow-lg shadow-indigo-500/25 group-hover:scale-110 group-hover:rotate-3 transition-transform duration-300 shrink-0 overflow-hidden">
               <div className="absolute inset-0 bg-gradient-to-tr from-amber-400 via-indigo-500 to-purple-600" />
               <Zap size={32} className="relative z-10 fill-white text-white" />
             </div>
@@ -6464,15 +6661,18 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.05 }}
             onClick={() => {
               triggerHaptic("medium");
               navigate("/analytics");
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 group-hover:-rotate-3 transition-transform duration-300">
               <BarChart3 size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6486,15 +6686,18 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.08 }}
             onClick={() => {
               triggerHaptic("medium");
               setIsViewingProductCosts(true);
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-emerald-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-emerald-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-emerald-50 dark:bg-emerald-500/10 flex items-center justify-center text-emerald-600 dark:text-emerald-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-emerald-50 dark:bg-emerald-500/10 flex items-center justify-center text-emerald-600 dark:text-emerald-400 group-hover:scale-110 group-hover:rotate-3 transition-transform duration-300">
               <TrendingUp size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6508,15 +6711,18 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.11 }}
             onClick={() => {
               triggerHaptic("medium");
               navigate("/all-bills");
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 group-hover:-rotate-3 transition-transform duration-300">
               <Receipt size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6530,8 +6736,11 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.14 }}
             onClick={() => {
               triggerHaptic("medium");
               if (savePinTimerRef.current) {
@@ -6544,9 +6753,9 @@ export function Admin() {
               setIsChangingPin(true);
               setError(false);
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 group-hover:rotate-6 transition-transform duration-300">
               <KeyRound size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6560,15 +6769,18 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.17 }}
             onClick={() => {
               triggerHaptic("medium");
               navigate("/other-costs");
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-rose-50 dark:bg-rose-500/10 flex items-center justify-center text-rose-600 dark:text-rose-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-rose-50 dark:bg-rose-500/10 flex items-center justify-center text-rose-600 dark:text-rose-400 group-hover:scale-110 group-hover:-rotate-3 transition-transform duration-300">
               <IndianRupee size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6582,8 +6794,11 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.2 }}
             onClick={() => {
               triggerHaptic("medium");
               setIsViewingAccounts(true);
@@ -6591,9 +6806,9 @@ export function Admin() {
                 fetchAccounts();
               }
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 group-hover:rotate-3 transition-transform duration-300">
               <User size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6607,8 +6822,11 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.23 }}
             onClick={() => {
               triggerHaptic("medium");
               setShowBroadcastModal(true);
@@ -6616,9 +6834,9 @@ export function Admin() {
                 fetchAccounts();
               }
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-violet-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-violet-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-violet-50 dark:bg-violet-500/10 flex items-center justify-center text-violet-600 dark:text-violet-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-violet-50 dark:bg-violet-500/10 flex items-center justify-center text-violet-600 dark:text-violet-400 group-hover:scale-110 group-hover:rotate-6 transition-transform duration-300">
               <Bell size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6632,15 +6850,18 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.26 }}
             onClick={() => {
               triggerHaptic("medium");
               setIsViewingSyncConflicts(true);
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-amber-500/50 relative"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-amber-500/50 relative cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-amber-50 dark:bg-amber-500/10 flex items-center justify-center text-amber-600 dark:text-amber-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-amber-50 dark:bg-amber-500/10 flex items-center justify-center text-amber-600 dark:text-amber-400 group-hover:scale-110 group-hover:-rotate-3 transition-transform duration-300">
               <AlertTriangle size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6665,15 +6886,18 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.29 }}
             onClick={() => {
               triggerHaptic("medium");
               setIsViewingActivityLogs(true);
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-indigo-50 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-600 dark:text-indigo-400 group-hover:scale-110 group-hover:rotate-3 transition-transform duration-300">
               <Shield size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6687,15 +6911,18 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.32 }}
             onClick={() => {
               triggerHaptic("medium");
               setShowBackupModal(true);
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-emerald-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-emerald-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-emerald-50 dark:bg-emerald-500/10 flex items-center justify-center text-emerald-600 dark:text-emerald-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-emerald-50 dark:bg-emerald-500/10 flex items-center justify-center text-emerald-600 dark:text-emerald-400 group-hover:scale-110 group-hover:-rotate-3 transition-transform duration-300">
               <Database size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6709,15 +6936,18 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.35 }}
             onClick={() => {
               triggerHaptic("medium");
               setLogoutConfirm(true);
             }}
-            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50"
+            className="w-full h-[112px] glass-card p-6 flex items-center gap-6 group hover:border-indigo-500/50 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-amber-50 dark:bg-amber-500/10 flex items-center justify-center text-amber-600 dark:text-amber-400 group-hover:scale-110 transition-transform">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-amber-50 dark:bg-amber-500/10 flex items-center justify-center text-amber-600 dark:text-amber-400 group-hover:scale-110 group-hover:rotate-3 transition-transform duration-300">
               <LogOut size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -6731,16 +6961,19 @@ export function Admin() {
           </motion.button>
 
           <motion.button
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
+            initial={{ opacity: 0, y: 18, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            whileHover={{ y: -2.5, scale: 1.015 }}
+            whileTap={{ scale: 0.965 }}
+            transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.38 }}
             onClick={() => {
               triggerHaptic("medium");
               setDeleteConfMode("products");
               setDangerConfirmText("");
             }}
-            className="w-full h-[112px] p-6 flex items-center gap-6 group border border-red-500/25 bg-red-500/[0.04] dark:bg-red-500/[0.06] hover:bg-red-500/[0.08] hover:border-red-500 transition-all rounded-[1.5rem] shadow-sm shadow-red-500/5 hover:shadow-red-500/10"
+            className="w-full h-[112px] p-6 flex items-center gap-6 group border border-red-500/25 bg-red-500/[0.04] dark:bg-red-500/[0.06] hover:bg-red-500/[0.08] hover:border-red-500 transition-colors rounded-[1.5rem] shadow-sm shadow-red-500/5 hover:shadow-red-500/10 cursor-pointer"
           >
-            <div className="w-16 h-16 shrink-0 rounded-2xl bg-red-100 dark:bg-red-500/20 flex items-center justify-center text-red-600 dark:text-red-400 group-hover:scale-110 transition-transform shadow-inner">
+            <div className="w-16 h-16 shrink-0 rounded-2xl bg-red-100 dark:bg-red-500/20 flex items-center justify-center text-red-600 dark:text-red-400 group-hover:scale-110 group-hover:rotate-3 transition-transform duration-300 shadow-inner">
               <Trash2 size={32} />
             </div>
             <div className="text-left flex-1 min-w-0">
@@ -7557,46 +7790,92 @@ export function Admin() {
             )}
           </div>
 
-          <div className="flex gap-4 mb-10 justify-center">
-            {[0, 1, 2, 3].map((i) => (
-              <div
-                key={i}
-                className={`w-4 h-4 rounded-full transition-all duration-300 ${
-                  i < pin.length
-                    ? error
-                      ? "bg-rose-500 shadow-[0_0_12px_rgba(244,63,94,0.6)] scale-110"
-                      : success
-                      ? "bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)] scale-110"
-                      : "bg-indigo-600 dark:bg-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.6)] scale-110"
-                    : "bg-slate-200 dark:bg-slate-800"
-                }`}
-              />
-            ))}
-          </div>
+          <motion.div
+            animate={error ? { x: [-10, 10, -8, 8, -4, 4, 0] } : { x: 0 }}
+            transition={{ duration: 0.36 }}
+            className="flex gap-4 mb-10 justify-center"
+          >
+            {[0, 1, 2, 3].map((i) => {
+              const isFilled = i < pin.length;
+              return (
+                <motion.div
+                  key={i}
+                  initial={false}
+                  animate={{
+                    scale: isFilled ? 1.22 : 1,
+                    y: isFilled ? -2 : 0,
+                  }}
+                  transition={{ type: "spring", stiffness: 560, damping: 22, mass: 0.5 }}
+                  className={`w-4 h-4 rounded-full transition-colors duration-200 ${
+                    isFilled
+                      ? error
+                        ? "bg-rose-500 shadow-[0_0_12px_rgba(244,63,94,0.6)]"
+                        : success
+                        ? "bg-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.6)]"
+                        : "bg-indigo-600 dark:bg-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.6)]"
+                      : "bg-slate-200 dark:bg-slate-800"
+                  }`}
+                />
+              );
+            })}
+          </motion.div>
 
           <div className="grid grid-cols-3 gap-4 w-full px-4">
-            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
-              <button
+            {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num, idx) => (
+              <motion.button
                 key={num}
+                initial={{ opacity: 0, y: 14, scale: 0.92 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                whileHover={{ y: -2, scale: 1.03 }}
+                whileTap={{ scale: 0.88 }}
+                transition={{
+                  type: "spring",
+                  stiffness: 520,
+                  damping: 28,
+                  mass: 0.55,
+                  delay: idx * 0.018,
+                }}
                 onClick={() => handlePinInput(num.toString())}
-                className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-16 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:scale-90 active:bg-slate-100 dark:active:!bg-slate-800 transition-all outline-none"
+                className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-16 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none cursor-pointer"
               >
                 {num}
-              </button>
+              </motion.button>
             ))}
             <div />
-            <button
+            <motion.button
+              initial={{ opacity: 0, y: 14, scale: 0.92 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              whileHover={{ y: -2, scale: 1.03 }}
+              whileTap={{ scale: 0.88 }}
+              transition={{
+                type: "spring",
+                stiffness: 520,
+                damping: 28,
+                mass: 0.55,
+                delay: 9 * 0.018,
+              }}
               onClick={() => handlePinInput("0")}
-              className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-16 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:scale-90 active:bg-slate-100 dark:active:!bg-slate-800 transition-all outline-none"
+              className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-16 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none cursor-pointer"
             >
               0
-            </button>
-            <button
+            </motion.button>
+            <motion.button
+              initial={{ opacity: 0, y: 14, scale: 0.92 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              whileHover={{ y: -2, scale: 1.03 }}
+              whileTap={{ scale: 0.88 }}
+              transition={{
+                type: "spring",
+                stiffness: 520,
+                damping: 28,
+                mass: 0.55,
+                delay: 10 * 0.018,
+              }}
               onClick={handleBackspace}
-              className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-16 flex items-center justify-center text-slate-400 dark:text-slate-500 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:scale-90 active:bg-slate-100 dark:active:!bg-slate-800 transition-all outline-none"
+              className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-16 flex items-center justify-center text-slate-400 dark:text-slate-500 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none cursor-pointer"
             >
               <Delete size={22} className="stroke-[2.5]" />
-            </button>
+            </motion.button>
           </div>
         </div>
       )}
