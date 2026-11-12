@@ -1991,11 +1991,11 @@ export function AdminAIAssistant({
         if (isImage) {
           let compressed = await compressImageFileForChat(
             file,
-            files.length > 1 ? 600 : 720,
-            0.7
+            files.length > 1 ? 560 : 640,
+            0.68
           );
-          if (compressed.dataBase64.length > 140000) {
-            compressed = await compressImageFileForChat(file, 520, 0.62);
+          if (compressed.dataBase64.length > 100000) {
+            compressed = await compressImageFileForChat(file, 480, 0.6);
           }
           added.push({
             id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -3170,7 +3170,7 @@ export function AdminAIAssistant({
   return (
     <AnimatePresence>
       {isOpen && (
-        <div className="fixed inset-0 z-[120] flex flex-col bg-slate-50/40 dark:bg-[#070a13]/40 backdrop-blur-md text-slate-900 dark:text-slate-100 select-text overflow-hidden h-[100dvh] w-screen top-0 left-0 right-0 bottom-0">
+        <div className="fixed inset-0 z-[120] flex flex-col bg-slate-50 dark:bg-[#070a13] text-slate-900 dark:text-slate-100 select-text overflow-hidden h-[100dvh] w-screen top-0 left-0 right-0 bottom-0">
           <motion.div
             initial={{ opacity: 0, y: 24, scale: 0.985 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -3178,13 +3178,13 @@ export function AdminAIAssistant({
             transition={{ type: "spring", stiffness: 460, damping: 34, mass: 0.72 }}
             className="w-full h-full flex flex-col bg-slate-50 dark:bg-[#070a13] text-slate-900 dark:text-slate-100 relative overflow-hidden transition-colors duration-300"
           >
-            {/* Ambient Lighting & Depth Texture */}
-            <div className="pointer-events-none absolute -top-32 left-1/2 -translate-x-1/2 w-[720px] h-[400px] bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.14)_0%,rgba(168,85,247,0.07)_45%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.12)_0%,rgba(168,85,247,0.06)_45%,transparent_70%)] blur-[90px]" />
-            <div className="pointer-events-none absolute bottom-24 right-1/4 w-[500px] h-[300px] bg-[radial-gradient(ellipse_at_center,rgba(79,70,229,0.09)_0%,transparent_70%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(79,70,229,0.08)_0%,transparent_70%)] blur-[100px]" />
+            {/* Ambient Lighting & Depth Texture (feather via radial gradient — no GPU blur pass) */}
+            <div className="pointer-events-none absolute -top-32 left-1/2 -translate-x-1/2 w-[720px] h-[400px] bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.14)_0%,rgba(168,85,247,0.06)_45%,transparent_72%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.11)_0%,rgba(168,85,247,0.05)_45%,transparent_72%)] transform-gpu" />
+            <div className="pointer-events-none absolute bottom-24 right-1/4 w-[500px] h-[300px] bg-[radial-gradient(ellipse_at_center,rgba(79,70,229,0.08)_0%,transparent_72%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(79,70,229,0.07)_0%,transparent_72%)] transform-gpu" />
             <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(rgba(15,23,42,0.05)_1px,transparent_1px)] dark:bg-[radial-gradient(rgba(255,255,255,0.035)_1px,transparent_1px)] [background-size:26px_26px] opacity-50 dark:opacity-40" />
 
             {/* Refined Top Bar — padded below mobile status bar (clock, Wi-Fi, battery) */}
-            <header className="px-4 sm:px-6 pt-[max(calc(env(safe-area-inset-top,0px)+0.75rem),2.75rem)] sm:pt-3.5 pb-3 border-b border-slate-200/80 dark:border-white/[0.07] flex items-center justify-between shrink-0 bg-white/85 dark:bg-[#090d18]/90 backdrop-blur-xl relative z-10">
+            <header className="px-4 sm:px-6 pt-[max(calc(env(safe-area-inset-top,0px)+0.75rem),2.75rem)] sm:pt-3.5 pb-3 border-b border-slate-200/80 dark:border-white/[0.07] flex items-center justify-between shrink-0 bg-white dark:bg-[#090d18] relative z-20 [transform:translateZ(0)]">
               <div className="flex items-center gap-3 min-w-0">
                 <motion.div
                   initial={{ scale: 0.85, rotate: -10 }}
@@ -3278,7 +3278,7 @@ export function AdminAIAssistant({
         <div
           ref={chatContainerRef}
           onScroll={handleContainerScroll}
-          className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 custom-scrollbar relative z-10 overscroll-y-none [overflow-anchor:auto] touch-pan-y"
+          className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 custom-scrollbar relative z-10 isolate overscroll-y-contain [overflow-anchor:auto] touch-pan-y [-webkit-overflow-scrolling:touch]"
         >
           <div className="max-w-4xl mx-auto w-full space-y-6">
             {messages.map((msg) => {
@@ -3424,7 +3424,7 @@ export function AdminAIAssistant({
 
                     {msg.quotedText && !hasText && (
                       <div className="w-fit max-w-[86%] sm:max-w-[74%] rounded-[22px] rounded-br-xs p-1.5 bg-gradient-to-br from-indigo-600 via-indigo-600 to-violet-700 text-white shadow-lg shadow-indigo-600/25 dark:shadow-indigo-950/40 border border-indigo-400/35 break-words [overflow-wrap:anywhere] [word-break:break-word] overflow-hidden min-w-[150px]">
-                        <div className="relative overflow-hidden rounded-[16px] bg-slate-950/40 dark:bg-[#080c18]/75 border border-white/15 px-3 py-2 backdrop-blur-md shadow-inner">
+                        <div className="relative overflow-hidden rounded-[16px] bg-slate-950/65 dark:bg-[#080c18]/90 border border-white/15 px-3 py-2 shadow-inner">
                           <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-amber-300 via-indigo-300 to-purple-400" />
                           <div className="flex items-center justify-between gap-2 mb-1 pl-1.5">
                             <div className="flex items-center gap-1.5 min-w-0">
@@ -3469,7 +3469,7 @@ export function AdminAIAssistant({
                           } bg-gradient-to-br from-indigo-600 via-indigo-600 to-violet-700 text-white shadow-lg shadow-indigo-600/20 dark:shadow-indigo-950/35 border border-indigo-400/35 break-words [overflow-wrap:anywhere] [word-break:break-word] overflow-hidden min-w-0`}
                         >
                           {msg.quotedText && (
-                            <div className="relative overflow-hidden rounded-[15px] bg-slate-950/40 dark:bg-[#080c18]/75 border border-white/15 px-3 py-2 mb-1 backdrop-blur-md shadow-inner">
+                            <div className="relative overflow-hidden rounded-[15px] bg-slate-950/65 dark:bg-[#080c18]/90 border border-white/15 px-3 py-2 mb-1 shadow-inner">
                               <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-amber-300 via-indigo-300 to-purple-400" />
                               <div className="flex items-center gap-1.5 mb-0.5 pl-1.5">
                                 <span className="w-4 h-4 rounded-md bg-indigo-400/20 border border-indigo-300/30 flex items-center justify-center shrink-0">
@@ -3556,7 +3556,7 @@ export function AdminAIAssistant({
                     </span>
                   </div>
 
-                  <div className={`${msg.action ? "w-full sm:max-w-[430px]" : "w-fit max-w-[96%] sm:max-w-[88%]"} rounded-2xl rounded-tl-xs p-3.5 sm:p-4 bg-white/95 dark:bg-gradient-to-b dark:from-slate-900/95 dark:via-slate-900/90 dark:to-slate-950/95 border border-slate-200/90 dark:border-slate-700/70 text-slate-800 dark:text-slate-100 shadow-lg shadow-slate-900/[0.04] dark:shadow-xl dark:shadow-black/40 relative backdrop-blur-xl overflow-hidden break-words [overflow-wrap:anywhere] [word-break:break-word] min-w-0`}>
+                  <div className={`${msg.action ? "w-full sm:max-w-[430px]" : "w-fit max-w-[96%] sm:max-w-[88%]"} rounded-2xl rounded-tl-xs p-3.5 sm:p-4 bg-white dark:bg-[#0f172a] dark:bg-gradient-to-b dark:from-slate-900 dark:via-slate-900 dark:to-slate-950 border border-slate-200/90 dark:border-slate-700/70 text-slate-800 dark:text-slate-100 shadow-lg shadow-slate-900/[0.04] dark:shadow-xl dark:shadow-black/40 relative overflow-hidden break-words [overflow-wrap:anywhere] [word-break:break-word] min-w-0 [backface-visibility:hidden]`}>
                     {/* While Streaming: Compact Thinking Indicator with Live Stopwatch */}
                     {msg.isStreaming && !msg.content && (
                       <div className="flex items-center gap-2.5 py-0.5 px-0.5">
@@ -3942,7 +3942,7 @@ export function AdminAIAssistant({
                           const isBatch = batchItems.length > 1;
 
                           return (
-                            <div className="rounded-2xl bg-gradient-to-b from-emerald-50/90 via-white to-emerald-50/40 dark:from-emerald-950/60 dark:via-slate-900/95 dark:to-slate-950 border border-emerald-200/90 dark:border-emerald-500/30 shadow-md shadow-emerald-950/5 dark:shadow-emerald-950/40 overflow-hidden">
+                            <div className="rounded-2xl bg-white dark:bg-slate-900 bg-gradient-to-b from-emerald-50/90 via-white to-emerald-50/40 dark:from-emerald-950/60 dark:via-slate-900/95 dark:to-slate-950 border border-emerald-200/90 dark:border-emerald-500/30 shadow-md shadow-emerald-950/5 dark:shadow-emerald-950/40 overflow-hidden">
                               {/* Header */}
                               <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-emerald-500/[0.06] dark:bg-emerald-500/[0.08] border-b border-emerald-200/70 dark:border-emerald-500/20">
                                 <div className="flex items-center gap-2.5 min-w-0">
@@ -4800,7 +4800,7 @@ export function AdminAIAssistant({
                 </p>
 
                 {/* Non-interactive Live Store Telemetry Strip */}
-                <div className="w-full max-w-md grid grid-cols-3 gap-2 p-2 rounded-2xl bg-white/90 dark:bg-white/[0.03] border border-slate-200/90 dark:border-white/[0.07] shadow-sm dark:shadow-none backdrop-blur-md">
+                <div className="w-full max-w-md grid grid-cols-3 gap-2 p-2 rounded-2xl bg-white dark:bg-[#0f172a]/90 border border-slate-200/90 dark:border-white/[0.07] shadow-sm dark:shadow-none">
                   <div className="py-2.5 px-2 rounded-xl bg-slate-50/80 dark:bg-white/[0.02] flex flex-col items-center justify-center">
                     <span className="text-sm font-black font-mono text-slate-900 dark:text-white tabular-nums">
                       {products.length}
@@ -4833,7 +4833,7 @@ export function AdminAIAssistant({
 
         {/* Unified Input Composer Dock — padded above mobile bottom gesture/navigation bar */}
         <footer
-          className={`border-t border-slate-200/80 dark:border-white/[0.07] bg-white/90 dark:bg-[#090d18]/95 backdrop-blur-xl shrink-0 relative z-10 ${
+          className={`border-t border-slate-200/80 dark:border-white/[0.07] bg-white dark:bg-[#090d18] shrink-0 relative z-20 [transform:translateZ(0)] ${
             isKeyboardOpen
               ? "pb-2"
               : "pb-[max(calc(env(safe-area-inset-bottom,0px)+0.85rem),1.5rem)] sm:pb-3"
@@ -4866,7 +4866,7 @@ export function AdminAIAssistant({
                   transition={{ type: "spring", stiffness: 500, damping: 34, mass: 0.55 }}
                   className="mb-2.5 overflow-hidden"
                 >
-                  <div className="relative overflow-hidden pl-3.5 pr-2.5 py-2.5 rounded-2xl bg-gradient-to-r from-indigo-500/[0.1] via-slate-100/95 to-purple-500/[0.08] dark:from-indigo-500/[0.14] dark:via-[#0f1629]/95 dark:to-purple-500/[0.12] border border-indigo-500/30 dark:border-indigo-400/25 flex items-start justify-between gap-2.5 shadow-md backdrop-blur-xl">
+                  <div className="relative overflow-hidden pl-3.5 pr-2.5 py-2.5 rounded-2xl bg-slate-100 dark:bg-[#0f1629] bg-gradient-to-r from-indigo-500/[0.1] via-slate-100/95 to-purple-500/[0.08] dark:from-indigo-500/[0.14] dark:via-[#0f1629]/95 dark:to-purple-500/[0.12] border border-indigo-500/30 dark:border-indigo-400/25 flex items-start justify-between gap-2.5 shadow-md">
                     <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-amber-400 via-indigo-500 to-purple-500" />
                     <div className="min-w-0 flex-1 pl-1">
                       <div className="flex items-center gap-1.5 mb-0.5">

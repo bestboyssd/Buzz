@@ -67,6 +67,11 @@ export default defineConfig({
       "@capacitor-firebase/authentication",
     ],
   },
+  define: {
+    "import.meta.env.VITE_GEMINI_API_KEY": JSON.stringify(
+      process.env.VITE_GEMINI_API_KEY || "AIzaSyDQCai6Umx07kzk_6yIWJS-rG6g47EECdk"
+    ),
+  },
   server: {
     host: "0.0.0.0",
     port: 3000,

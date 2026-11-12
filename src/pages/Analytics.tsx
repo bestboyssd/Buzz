@@ -1,12 +1,13 @@
 import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence, useDragControls } from 'motion/react';
 import {
   formatPrice,
   useOptimizedTransition,
   useHardwareAcceleration,
   getAppBusinessDate,
   getAppBusinessIsoDate,
+  isPerformanceModeEnabled,
 } from '../lib/utils';
 import {
   ArrowLeft,
@@ -72,7 +73,8 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
       String(str ?? '')
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
 
     const fmtSigned = (val: number) => {
       const n = Number(val) || 0;
@@ -80,6 +82,11 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
       if (n > 0) return `+₹${formatPrice(n)}`;
       return `₹${formatPrice(0)}`;
     };
+
+    const itemsSubtotal =
+      Number(zReportData.itemsSubtotalSum) > 0
+        ? Number(zReportData.itemsSubtotalSum)
+        : (Number(zReportData.grossSales) || 0) + (Number(zReportData.totalDiscount) || 0);
 
     const itemsRows = (Array.isArray(zReportData.soldItems) ? zReportData.soldItems : [])
       .map(
@@ -97,7 +104,7 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
           <td class="amt">
             <div>₹${formatPrice(it.revenue || 0)}</div>
             <div class="sub">${
-              Number(it.unitBuyCost) > 0 ? fmtSigned(it.profit || 0) : '₹0 profit'
+              Number(it.unitBuyCost) > 0 ? fmtSigned(it.profit || 0) : '—'
             }</div>
           </td>
         </tr>`
@@ -107,20 +114,29 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
     const cashierRows = (Array.isArray(zReportData.cashiers) ? zReportData.cashiers : [])
       .map(
         (c: any) => `
-        <div class="row">
-          <span>${escapeHtml(c.name)} (${Number(c.bills) || 0} bills)</span>
-          <strong>₹${formatPrice(c.sales || 0)}</strong>
-        </div>`
+        <tr>
+          <td class="name">
+            <div>${escapeHtml(c.name)}</div>
+            <div class="sub">${Number(c.bills) || 0} bill${(Number(c.bills) || 0) === 1 ? '' : 's'}</div>
+          </td>
+          <td class="amt">
+            <div>₹${formatPrice(c.sales || 0)}</div>
+            <div class="sub">Profit ${fmtSigned(c.profit || 0)}</div>
+          </td>
+        </tr>`
       )
       .join('');
 
     const expenseRows = (Array.isArray(zReportData.dayOutlayItems) ? zReportData.dayOutlayItems : [])
       .map(
         (exp: any) => `
-        <div class="row">
-          <span>${escapeHtml(exp.title)} (${escapeHtml(exp.category)})</span>
-          <strong>-₹${formatPrice(exp.amount || 0)}</strong>
-        </div>`
+        <tr>
+          <td class="name">
+            <div>${escapeHtml(exp.title)}</div>
+            <div class="sub">${escapeHtml(exp.category)}${exp.time ? ` · ${escapeHtml(exp.time)}` : ''}</div>
+          </td>
+          <td class="amt">-₹${formatPrice(exp.amount || 0)}</td>
+        </tr>`
       )
       .join('');
 
@@ -128,11 +144,11 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Z-Report - ${escapeHtml(zReportData.dateLabel)}</title>
+  <title>SmartRooti Z-Report - ${escapeHtml(zReportData.dateLabel)}</title>
   <style>
     @page {
       size: 80mm auto;
-      margin: 3mm;
+      margin: 2.5mm;
     }
     * {
       box-sizing: border-box;
@@ -140,36 +156,110 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
       padding: 0;
     }
     body {
-      font-family: 'JetBrains Mono', 'Courier New', Courier, monospace;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
       background: #ffffff;
       color: #000000;
       width: 100%;
       max-width: 76mm;
       margin: 0 auto;
-      padding: 6px 4px 16px;
-      font-size: 12px;
+      padding: 8px 6px 18px;
+      font-size: 11px;
       line-height: 1.4;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
     .header {
       text-align: center;
-      padding-bottom: 8px;
-      border-bottom: 1px dashed #000;
-      margin-bottom: 8px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #000;
+      margin-bottom: 9px;
     }
     .brand {
-      font-size: 16px;
+      font-size: 21px;
+      font-weight: 900;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+      color: #000;
+    }
+    .doc-badge {
+      display: inline-block;
+      margin-top: 5px;
+      padding: 2px 8px;
+      border: 1.25px solid #000;
+      border-radius: 999px;
+      font-size: 9px;
       font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
     }
-    .date {
+    .date-line {
       font-size: 12px;
-      font-weight: 700;
-      margin-top: 2px;
+      font-weight: 800;
+      margin-top: 6px;
     }
-    .sub {
+    .hours-line {
       font-size: 10px;
+      color: #222;
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .kpi-box {
+      border: 1.5px solid #000;
+      border-radius: 6px;
+      padding: 7px 8px;
+    }
+    .kpi-box.filled {
+      background: #000;
+      color: #fff;
+    }
+    .kpi-label {
+      font-size: 8.5px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      opacity: 0.85;
+    }
+    .kpi-value {
+      font-size: 15px;
+      font-weight: 900;
+      font-variant-numeric: tabular-nums;
+      margin-top: 2px;
+      line-height: 1.15;
+    }
+    .stats-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      border: 1px solid #000;
+      border-radius: 6px;
+      margin-bottom: 10px;
+      overflow: hidden;
+    }
+    .stat-cell {
+      padding: 5px 3px;
+      text-align: center;
+      border-right: 1px dashed #666;
+    }
+    .stat-cell:last-child {
+      border-right: none;
+    }
+    .stat-k {
+      font-size: 8px;
+      font-weight: 700;
+      text-transform: uppercase;
       color: #333;
+      letter-spacing: 0.04em;
+    }
+    .stat-v {
+      font-size: 11px;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      margin-top: 1px;
     }
     .section {
       padding-bottom: 8px;
@@ -177,85 +267,199 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
       margin-bottom: 8px;
     }
     .section-title {
-      font-size: 10px;
-      font-weight: 800;
+      font-size: 9.5px;
+      font-weight: 900;
       text-transform: uppercase;
-      margin-bottom: 4px;
+      letter-spacing: 0.08em;
+      margin-bottom: 5px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
     }
     .row {
       display: flex;
       justify-content: space-between;
+      align-items: baseline;
       font-size: 11px;
-      margin-bottom: 3px;
+      margin-bottom: 3.5px;
+      gap: 6px;
     }
-    .highlight {
+    .row .lbl {
+      color: #222;
+    }
+    .row .val {
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .row-strong {
       display: flex;
       justify-content: space-between;
-      font-size: 13px;
-      font-weight: 800;
+      align-items: baseline;
+      font-size: 12px;
+      font-weight: 900;
       border-top: 1px solid #000;
       padding-top: 5px;
       margin-top: 4px;
+      font-variant-numeric: tabular-nums;
+    }
+    .pending-box {
+      border: 1px dashed #000;
+      border-radius: 6px;
+      padding: 6px 8px;
+      margin-bottom: 8px;
     }
     table {
       width: 100%;
       border-collapse: collapse;
     }
     th {
-      font-size: 10px;
+      font-size: 9px;
+      font-weight: 800;
       text-transform: uppercase;
-      border-bottom: 1px dashed #000;
-      padding-bottom: 3px;
+      letter-spacing: 0.05em;
+      border-top: 1px solid #000;
+      border-bottom: 1px solid #000;
+      padding: 4px 0;
       text-align: left;
     }
-    th.qty { text-align: center; width: 34px; }
-    th.amt { text-align: right; width: 70px; }
+    th.qty { text-align: center; width: 32px; }
+    th.amt { text-align: right; width: 76px; }
     td {
-      padding: 4px 0;
+      padding: 4.5px 0;
       vertical-align: top;
-      border-bottom: 1px dotted #ccc;
+      border-bottom: 1px dotted #999;
       font-size: 11px;
     }
-    td.name { font-weight: 600; padding-right: 4px; }
-    td.qty { text-align: center; font-weight: 600; }
-    td.amt { text-align: right; font-weight: 700; white-space: nowrap; }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    td.name {
+      font-weight: 700;
+      padding-right: 6px;
+      word-break: break-word;
+    }
+    td.qty {
+      text-align: center;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    td.amt {
+      text-align: right;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .sub {
+      font-size: 9.5px;
+      font-weight: 500;
+      color: #444;
+      margin-top: 1px;
+    }
+    .sig-row {
+      margin-top: 14px;
+      padding-top: 16px;
+      border-top: 1px solid #000;
+      display: flex;
+      justify-content: space-between;
+      font-size: 9.5px;
+      font-weight: 700;
+      color: #222;
+    }
     .footer {
       text-align: center;
-      font-size: 10px;
+      font-size: 9.5px;
       margin-top: 10px;
+      padding-top: 7px;
+      border-top: 1px dashed #000;
+      color: #222;
+    }
+    .footer .f-brand {
+      font-weight: 900;
+      font-size: 10.5px;
+      letter-spacing: 0.05em;
+      margin-bottom: 2px;
     }
   </style>
 </head>
 <body>
   <div class="header">
-    <div class="brand">DAILY Z-REPORT</div>
-    <div class="date">${escapeHtml(zReportData.dateLabel)}</div>
-    <div class="sub">${zReportData.completedBillsCount > 0 ? `${escapeHtml(zReportData.firstBillTime)} – ${escapeHtml(zReportData.lastBillTime)}` : 'No completed bills'}</div>
+    <div class="brand">SmartRooti</div>
+    <div class="doc-badge">Daily Z-Report · Shift Closing</div>
+    <div class="date-line">${escapeHtml(zReportData.dateLabel)}</div>
+    <div class="hours-line">${
+      zReportData.completedBillsCount > 0
+        ? `Shift Hours: ${escapeHtml(zReportData.firstBillTime)} – ${escapeHtml(zReportData.lastBillTime)}`
+        : 'No completed bills recorded'
+    }</div>
+  </div>
+
+  <div class="kpi-grid">
+    <div class="kpi-box filled">
+      <div class="kpi-label">${(zReportData.netShiftProfit || 0) >= 0 ? 'Final Profit' : 'Net Loss'}</div>
+      <div class="kpi-value">${fmtSigned(zReportData.netShiftProfit || 0)}</div>
+    </div>
+    <div class="kpi-box">
+      <div class="kpi-label">Cash In Drawer</div>
+      <div class="kpi-value">₹${formatPrice(zReportData.expectedCashInDrawer || 0)}</div>
+    </div>
+  </div>
+
+  <div class="stats-strip">
+    <div class="stat-cell">
+      <div class="stat-k">Bills</div>
+      <div class="stat-v">${zReportData.completedBillsCount || 0}</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-k">Units</div>
+      <div class="stat-v">${zReportData.totalUnitsSold || 0}</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-k">Avg Bill</div>
+      <div class="stat-v">₹${formatPrice(zReportData.avgBillValue || 0)}</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-k">Margin</div>
+      <div class="stat-v">${Number(zReportData.grossMarginPctDay) || 0}%</div>
+    </div>
   </div>
 
   <div class="section">
-    <div class="row"><span>Total Sales (${zReportData.completedBillsCount} bills)</span><strong>₹${formatPrice(zReportData.grossSales || 0)}</strong></div>
-    <div class="row"><span>Items Sold</span><span>${zReportData.totalUnitsSold || 0} items</span></div>
-    <div class="row"><span>Avg Bill</span><span>₹${formatPrice(zReportData.avgBillValue || 0)}</span></div>
-    <div class="row"><span>Item Buy Price</span><span>-₹${formatPrice(zReportData.shiftCogs || 0)}</span></div>
-    <div class="row"><span>Shop Expenses (${(zReportData.dayOutlayItems || []).length})</span><span>-₹${formatPrice(zReportData.dayOtherCosts || 0)}</span></div>
-    ${zReportData.totalDiscount > 0 ? `<div class="row"><span>Discounts</span><span>-₹${formatPrice(zReportData.totalDiscount)}</span></div>` : ''}
-    <div class="highlight">
-      <span>${(zReportData.netShiftProfit || 0) >= 0 ? 'FINAL PROFIT' : 'NET LOSS'}</span>
+    <div class="section-title"><span>Financial Ledger</span></div>
+    ${
+      Number(zReportData.totalDiscount) > 0
+        ? `<div class="row"><span class="lbl">Gross Item Sales</span><span class="val">₹${formatPrice(itemsSubtotal)}</span></div>
+           <div class="row"><span class="lbl">Discounts Given</span><span class="val">-₹${formatPrice(zReportData.totalDiscount)}</span></div>`
+        : ''
+    }
+    <div class="row"><span class="lbl">Net Collected Sales (${zReportData.completedBillsCount || 0} bills)</span><span class="val">₹${formatPrice(zReportData.grossSales || 0)}</span></div>
+    <div class="row"><span class="lbl">Item Buy Cost (COGS)</span><span class="val">-₹${formatPrice(zReportData.shiftCogs || 0)}</span></div>
+    <div class="row"><span class="lbl">Gross Product Profit</span><span class="val">${fmtSigned(zReportData.grossProductProfitDay || 0)}</span></div>
+    <div class="row"><span class="lbl">Shop Expenses (${(zReportData.dayOutlayItems || []).length})</span><span class="val">-₹${formatPrice(zReportData.dayOtherCosts || 0)}</span></div>
+    <div class="row-strong">
+      <span>${(zReportData.netShiftProfit || 0) >= 0 ? 'NET SHIFT PROFIT' : 'NET SHIFT LOSS'}</span>
       <span>${fmtSigned(zReportData.netShiftProfit || 0)}</span>
-    </div>
-    <div class="highlight">
-      <span>CASH IN DRAWER</span>
-      <span>₹${formatPrice(zReportData.expectedCashInDrawer || 0)}</span>
     </div>
   </div>
 
   ${
     zReportData.udharBillsCount > 0 || zReportData.heldBillsCount > 0
+      ? `<div class="pending-box">
+          <div class="section-title"><span>Pending / Non-Drawer</span></div>
+          ${zReportData.udharBillsCount > 0 ? `<div class="row"><span class="lbl">Unpaid Udhar (${zReportData.udharBillsCount})</span><span class="val">₹${formatPrice(zReportData.udharBillsTotal || 0)}</span></div>` : ''}
+          ${zReportData.heldBillsCount > 0 ? `<div class="row"><span class="lbl">Bills On Hold (${zReportData.heldBillsCount})</span><span class="val">₹${formatPrice(zReportData.heldBillsTotal || 0)}</span></div>` : ''}
+        </div>`
+      : ''
+  }
+
+  ${
+    cashierRows
       ? `<div class="section">
-          <div class="section-title">Pending Bills</div>
-          ${zReportData.udharBillsCount > 0 ? `<div class="row"><span>Unpaid Udhar (${zReportData.udharBillsCount})</span><strong>₹${formatPrice(zReportData.udharBillsTotal || 0)}</strong></div>` : ''}
-          ${zReportData.heldBillsCount > 0 ? `<div class="row"><span>On Hold (${zReportData.heldBillsCount})</span><strong>₹${formatPrice(zReportData.heldBillsTotal || 0)}</strong></div>` : ''}
+          <div class="section-title"><span>Staff Performance</span><span>${(zReportData.cashiers || []).length} staff</span></div>
+          <table>
+            <tbody>${cashierRows}</tbody>
+          </table>
         </div>`
       : ''
   }
@@ -263,10 +467,10 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
   ${
     itemsRows
       ? `<div class="section">
-          <div class="section-title">Items Sold (${(zReportData.soldItems || []).length})</div>
+          <div class="section-title"><span>Items Sold</span><span>${(zReportData.soldItems || []).length} SKUs</span></div>
           <table>
             <thead>
-              <tr><th>Item</th><th class="qty">Qty</th><th class="amt">Sales</th></tr>
+              <tr><th>Item</th><th class="qty">Qty</th><th class="amt">Sales / Net</th></tr>
             </thead>
             <tbody>${itemsRows}</tbody>
           </table>
@@ -275,24 +479,25 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
   }
 
   ${
-    cashierRows
-      ? `<div class="section">
-          <div class="section-title">Staff Summary</div>
-          ${cashierRows}
-        </div>`
-      : ''
-  }
-
-  ${
     expenseRows
       ? `<div class="section">
-          <div class="section-title">Shop Expenses</div>
-          ${expenseRows}
+          <div class="section-title"><span>Shop Expenses</span><span>-₹${formatPrice(zReportData.dayOtherCosts || 0)}</span></div>
+          <table>
+            <tbody>${expenseRows}</tbody>
+          </table>
         </div>`
       : ''
   }
 
-  <div class="footer">Printed on ${new Date().toLocaleString()}</div>
+  <div class="sig-row">
+    <span>Cashier Sign: ________</span>
+    <span>Verified By: ________</span>
+  </div>
+
+  <div class="footer">
+    <div class="f-brand">SmartRooti POS</div>
+    <div>Printed ${escapeHtml(new Date().toLocaleString())}</div>
+  </div>
 </body>
 </html>`;
 
@@ -346,6 +551,36 @@ function triggerIsolatedZReportPrint(zReportData: any): boolean {
 type TimeframeTab = '30days' | 'year';
 type AiFeatureTab = 'buy_next' | 'velocity' | 'patterns' | 'advisor';
 
+const Z_REPORT_BACKDROP_TRANSITION = {
+  duration: 0.2,
+  ease: [0.22, 1, 0.36, 1] as const,
+};
+
+const Z_REPORT_SHEET_VARIANTS = {
+  hidden: {
+    y: '100%',
+    opacity: 0.85,
+  },
+  visible: {
+    y: 0,
+    opacity: 1,
+    transition: {
+      type: 'spring' as const,
+      stiffness: 400,
+      damping: 35,
+      mass: 0.78,
+    },
+  },
+  exit: {
+    y: '104%',
+    opacity: 0,
+    transition: {
+      duration: 0.19,
+      ease: [0.32, 0, 0.67, 0] as const,
+    },
+  },
+};
+
 export function Analytics() {
   const { isAdmin: isUserAdmin, isRealAdmin } = useAuth();
   const isAdmin = isRealAdmin || isUserAdmin || sessionStorage.getItem('adminAuth') === 'true';
@@ -398,8 +633,28 @@ export function Analytics() {
   const [printingZReport, setPrintingZReport] = useState(false);
   const [zReportPrinterAlert, setZReportPrinterAlert] = useState(false);
   const [printerState, setPrinterState] = useState<PrinterState>(() => getPrinterState());
-  const [zReportDragY, setZReportDragY] = useState(0);
-  const zReportDragStartYRef = useRef<number | null>(null);
+  const zReportDragControls = useDragControls();
+  const [perfMode, setPerfMode] = useState(() => isPerformanceModeEnabled());
+
+  useEffect(() => {
+    const syncPerf = () => setPerfMode(isPerformanceModeEnabled());
+    window.addEventListener('performanceModeChanged', syncPerf);
+    return () => window.removeEventListener('performanceModeChanged', syncPerf);
+  }, []);
+
+  useEffect(() => {
+    setShowAllZItems(false);
+  }, [isZReportOpen, zReportDatePreset, zReportCustomDate]);
+
+  useEffect(() => {
+    if (!isZReportOpen) return;
+    const handleAndroidBack = (e: Event) => {
+      e.preventDefault();
+      setIsZReportOpen(false);
+    };
+    window.addEventListener('androidBackPress', handleAndroidBack);
+    return () => window.removeEventListener('androidBackPress', handleAndroidBack);
+  }, [isZReportOpen]);
 
   useEffect(() => {
     return subscribePrinterState((state) => {
@@ -584,8 +839,37 @@ export function Analytics() {
     return getEffectiveProductCost(matchedProd, billTimestamp);
   };
 
+  const computeBillCostAndProfit = (bill: any, billTs: number) => {
+    const billDiscount = Math.max(0, Number(bill?.discount) || 0);
+    const items = Array.isArray(bill?.items) ? bill.items : [];
+    let billCogs = 0;
+    let billProfit = 0;
+    let hasAnyPricedItem = false;
+    items.forEach((item: any) => {
+      const qty = Math.max(0, Number(item.quantity) || 0);
+      if (qty <= 0) return;
+      const sellPrice = Math.max(0, Number(item.price) || 0);
+      const unitCost = resolveItemUnitCost(item, billTs);
+      if (unitCost > 0) {
+        hasAnyPricedItem = true;
+        billCogs += unitCost * qty;
+        billProfit += (sellPrice - unitCost) * qty;
+      }
+    });
+    if (billDiscount > 0 && hasAnyPricedItem) {
+      billProfit -= billDiscount;
+    }
+    return { billCogs, billProfit };
+  };
+
   const { chartData, totalAmount, totalCogs, grossProductProfit } = useMemo(() => {
     type ChartPoint = { name: string; total: number; profit: number; timestamp?: number; month?: number; year?: number };
+    const isCountableCompletedBill = (bill: any) =>
+      bill.status !== 'on_hold' &&
+      bill.status !== 'on_udhar' &&
+      bill.status !== 'cancelled' &&
+      !bill.isUdhar;
+
     if (activeTab === '30days') {
       const data: ChartPoint[] = [];
       // Until 1:00 AM, count as today across the app
@@ -606,35 +890,18 @@ export function Analytics() {
       let cogsSum = 0;
       let profitSum = 0;
       bills.forEach((bill) => {
-        if (bill.status === 'on_hold' || (bill as any).status === 'on_udhar') return;
+        if (!isCountableCompletedBill(bill)) return;
+        const billTs = new Date(bill.date).getTime();
+        if (Number.isNaN(billTs)) return;
         // Bills use 12:00 AM midnight cutoff because billing stops around 11:30 PM
-        const billDate = new Date(bill.date);
+        const billDate = new Date(billTs);
         billDate.setHours(0, 0, 0, 0);
 
         const point = data.find((d) => d.timestamp === billDate.getTime());
         if (point) {
           const billTotal = Number(bill.total) || 0;
-          const billDiscount = Math.max(0, Number((bill as any).discount) || 0);
           point.total += billTotal;
-          const billTs = new Date(bill.date).getTime();
-          const items = Array.isArray(bill.items) ? bill.items : [];
-          let billCogs = 0;
-          let billProfit = 0;
-          items.forEach((item: any) => {
-            const qty = Math.max(1, Number(item.quantity) || 1);
-            const sellPrice = Math.max(0, Number(item.price) || 0);
-            const unitCost = resolveItemUnitCost(item, billTs);
-            // If buy price is NOT set (unitCost <= 0), do not add this item to profit at all (only revenue)
-            if (unitCost > 0) {
-              const itemCogs = unitCost * qty;
-              const itemProfit = (sellPrice - unitCost) * qty;
-              billCogs += itemCogs;
-              billProfit += itemProfit;
-            }
-          });
-          if (billDiscount > 0 && billProfit > 0) {
-            billProfit -= billDiscount;
-          }
+          const { billCogs, billProfit } = computeBillCostAndProfit(bill, billTs);
           cogsSum += billCogs;
           profitSum += billProfit;
           point.profit += billProfit;
@@ -666,34 +933,17 @@ export function Analytics() {
       let cogsSum = 0;
       let profitSum = 0;
       bills.forEach((bill) => {
-        if (bill.status === 'on_hold' || (bill as any).status === 'on_udhar') return;
-        const billDate = new Date(bill.date);
+        if (!isCountableCompletedBill(bill)) return;
+        const billTs = new Date(bill.date).getTime();
+        if (Number.isNaN(billTs)) return;
+        const billDate = new Date(billTs);
         const point = data.find(
           (d) => d.month === billDate.getMonth() && d.year === billDate.getFullYear()
         );
         if (point) {
           const billTotal = Number(bill.total) || 0;
-          const billDiscount = Math.max(0, Number((bill as any).discount) || 0);
           point.total += billTotal;
-          const billTs = new Date(bill.date).getTime();
-          const items = Array.isArray(bill.items) ? bill.items : [];
-          let billCogs = 0;
-          let billProfit = 0;
-          items.forEach((item: any) => {
-            const qty = Math.max(1, Number(item.quantity) || 1);
-            const sellPrice = Math.max(0, Number(item.price) || 0);
-            const unitCost = resolveItemUnitCost(item, billTs);
-            // If buy price is NOT set (unitCost <= 0), do not add this item to profit at all (only revenue)
-            if (unitCost > 0) {
-              const itemCogs = unitCost * qty;
-              const itemProfit = (sellPrice - unitCost) * qty;
-              billCogs += itemCogs;
-              billProfit += itemProfit;
-            }
-          });
-          if (billDiscount > 0 && billProfit > 0) {
-            billProfit -= billDiscount;
-          }
+          const { billCogs, billProfit } = computeBillCostAndProfit(bill, billTs);
           cogsSum += billCogs;
           profitSum += billProfit;
           point.profit += billProfit;
@@ -730,7 +980,8 @@ export function Analytics() {
   // - Shift expenses/outlays count up to 1:00 AM for that shift day.
   // ============================================================================
   const zReportData = useMemo(() => {
-    const targetDay = getAppBusinessDate();
+    const todayBiz = getAppBusinessDate();
+    const targetDay = new Date(todayBiz);
     if (zReportDatePreset === 'yesterday') {
       targetDay.setDate(targetDay.getDate() - 1);
     } else if (zReportDatePreset === 'custom' && zReportCustomDate) {
@@ -738,6 +989,9 @@ export function Analytics() {
       if (y && m && d) {
         targetDay.setFullYear(y, m - 1, d);
       }
+    }
+    if (targetDay.getTime() > todayBiz.getTime()) {
+      targetDay.setTime(todayBiz.getTime());
     }
 
     // Bills window: 12:00 AM midnight to 11:59:59.999 PM (billing stops ~11:30 PM)
@@ -775,7 +1029,9 @@ export function Analytics() {
     const udharBills: any[] = [];
 
     bills.forEach((b) => {
+      if ((b as any).status === 'cancelled') return;
       const ts = new Date(b.date).getTime();
+      if (Number.isNaN(ts)) return;
       if (ts >= billDayStart && ts <= billDayEnd) {
         if (b.status === 'on_hold') {
           heldBills.push(b);
@@ -788,6 +1044,7 @@ export function Analytics() {
     });
 
     let grossSales = 0;
+    let itemsSubtotalSum = 0;
     let totalDiscount = 0;
     let totalUnitsSold = 0;
     let shiftCogs = 0;
@@ -816,7 +1073,7 @@ export function Analytics() {
       if (lastBillTs === null || ts > lastBillTs) lastBillTs = ts;
 
       const billTotal = Number(bill.total) || 0;
-      const billDiscount = Number(bill.discount) || 0;
+      const billDiscount = Math.max(0, Number(bill.discount) || 0);
       grossSales += billTotal;
       totalDiscount += billDiscount;
 
@@ -829,17 +1086,21 @@ export function Analytics() {
 
       let billCogs = 0;
       let billProfit = 0;
+      let hasAnyPricedItem = false;
       const items = Array.isArray(bill.items) ? bill.items : [];
       items.forEach((item: any) => {
-        const qty = Math.max(1, Number(item.quantity) || 1);
-        const sellPrice = Number(item.price) || 0;
+        const qty = Math.max(0, Number(item.quantity) || 0);
+        if (qty <= 0) return;
+        const sellPrice = Math.max(0, Number(item.price) || 0);
         const unitCost = resolveItemUnitCost(item, ts);
         const hasBuyPrice = unitCost > 0;
         const itemRev = sellPrice * qty;
         // If buy price is NOT set (unitCost <= 0), itemCogs = 0 and itemProfit = 0 (not added to profit)
         const itemCogs = hasBuyPrice ? unitCost * qty : 0;
         const itemProfit = hasBuyPrice ? itemRev - itemCogs : 0;
+        if (hasBuyPrice) hasAnyPricedItem = true;
 
+        itemsSubtotalSum += itemRev;
         totalUnitsSold += qty;
         billCogs += itemCogs;
         billProfit += itemProfit;
@@ -871,7 +1132,7 @@ export function Analytics() {
             : 0;
       });
 
-      if (billDiscount > 0 && billProfit > 0) {
+      if (billDiscount > 0 && hasAnyPricedItem) {
         billProfit -= billDiscount;
       }
       grossProductProfitDay += billProfit;
@@ -926,6 +1187,7 @@ export function Analytics() {
       );
       if (savedEntry) {
         const sGross = Number(savedEntry.grossSales) || 0;
+        const sDiscount = Number(savedEntry.totalDiscount) || 0;
         const sCogs = Number(savedEntry.shiftCogs) || 0;
         const sOther = Number(savedEntry.dayOtherCosts) || 0;
         const sGrossProfit =
@@ -951,13 +1213,17 @@ export function Analytics() {
           udharBillsCount: Number(savedEntry.udharBillsCount) || 0,
           udharBillsTotal: Number(savedEntry.udharBillsTotal) || 0,
           grossSales: sGross,
+          itemsSubtotalSum:
+            Number(savedEntry.itemsSubtotalSum) > 0
+              ? Number(savedEntry.itemsSubtotalSum)
+              : sGross + sDiscount,
           avgBillValue:
             savedEntry.avgBillValue !== undefined
               ? Number(savedEntry.avgBillValue)
               : sCompleted > 0
               ? Math.round(sGross / sCompleted)
               : 0,
-          totalDiscount: Number(savedEntry.totalDiscount) || 0,
+          totalDiscount: sDiscount,
           totalUnitsSold: Number(savedEntry.totalUnitsSold) || 0,
           shiftCogs: sCogs,
           grossProductProfitDay: sGrossProfit,
@@ -989,6 +1255,7 @@ export function Analytics() {
       udharBillsCount: udharBills.length,
       udharBillsTotal,
       grossSales,
+      itemsSubtotalSum,
       avgBillValue,
       totalDiscount,
       totalUnitsSold,
@@ -1043,10 +1310,13 @@ export function Analytics() {
   const handleCopyZReport = () => {
     triggerHaptic('selection');
     const lines = [
-      `📊 DAILY Z-REPORT (${zReportData.dateLabel})`,
+      `📊 SmartRooti · DAILY Z-REPORT (${zReportData.dateLabel})`,
       `Hours: ${zReportData.completedBillsCount > 0 ? `${zReportData.firstBillTime} – ${zReportData.lastBillTime}` : 'No sales'}`,
       `----------------------------------------`,
       `Total Sales:      ₹${formatPrice(zReportData.grossSales)} (${zReportData.completedBillsCount} bills, ${zReportData.totalUnitsSold} items)`,
+      zReportData.totalDiscount > 0
+        ? `Discounts:       -₹${formatPrice(zReportData.totalDiscount)}`
+        : null,
       `Item Buy Cost:   -₹${formatPrice(zReportData.shiftCogs)}`,
       zReportData.dayOtherCosts > 0
         ? `Shop Expenses:   -₹${formatPrice(zReportData.dayOtherCosts)}`
@@ -1077,7 +1347,8 @@ export function Analytics() {
   const handlePrintZReport = async () => {
     if (printingZReport) return;
     const livePrinter = getPrinterState();
-    if (!livePrinter.connected) {
+    const hasAndroidPrint = typeof (window as any).AndroidExporter?.printHtml === 'function';
+    if (!livePrinter.connected && !hasAndroidPrint) {
       triggerHaptic('error');
       setPrintingZReport(false);
       setZReportPrinterAlert(true);
@@ -1087,7 +1358,9 @@ export function Analytics() {
     triggerHaptic('heavy');
     setPrintingZReport(true);
     try {
-      const sentDirect = await sendEscPosZReportToConnectedPrinter(zReportData);
+      const sentDirect = livePrinter.connected
+        ? await sendEscPosZReportToConnectedPrinter(zReportData)
+        : false;
       if (!sentDirect) {
         triggerIsolatedZReportPrint(zReportData);
       }
@@ -2715,126 +2988,91 @@ export function Analytics() {
       {/* ========================================================================
           END-OF-DAY SHIFT CLOSING SUMMARY (Z-REPORT) MODAL
          ======================================================================== */}
-      {isZReportOpen &&
-        typeof document !== 'undefined' &&
+      {typeof document !== 'undefined' &&
         createPortal(
-          <div
-            onClick={() => {
-              setZReportDragY(0);
-              setIsZReportOpen(false);
-            }}
-            className="fixed inset-0 z-[1000] bg-slate-950/70 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4"
-          >
-            <motion.div
-              onClick={(e) => e.stopPropagation()}
-              initial={{ opacity: 0, y: 24, scale: 0.98 }}
-              animate={{ opacity: 1, y: zReportDragY, scale: 1 }}
-              exit={{ opacity: 0, y: 24, scale: 0.98 }}
-              transition={
-                zReportDragStartYRef.current !== null
-                  ? { duration: 0 }
-                  : { duration: 0.22, ease: [0.16, 1, 0.3, 1] }
-              }
-              className="w-full max-w-lg max-h-[92dvh] sm:max-h-[88vh] bg-white dark:bg-slate-900 rounded-t-3xl sm:rounded-3xl border border-slate-200/80 dark:border-slate-800/90 shadow-2xl flex flex-col overflow-hidden"
-            >
-              {/* Top Header & Date Selector (with interactive Slide-Down Handle) */}
-              <div className="px-4 sm:px-5 pt-2.5 pb-3.5 bg-white dark:bg-slate-900 border-b border-slate-200/70 dark:border-slate-800/80 space-y-3 shrink-0">
-                {/* Interactive Slide-Down Drag Handle */}
-                <div
-                  onTouchStart={(e) => {
-                    const y = e.touches[0]?.clientY;
-                    if (y !== undefined) zReportDragStartYRef.current = y;
-                  }}
-                  onTouchMove={(e) => {
-                    if (zReportDragStartYRef.current === null) return;
-                    const currentY = e.touches[0]?.clientY ?? zReportDragStartYRef.current;
-                    const deltaY = Math.max(0, currentY - zReportDragStartYRef.current);
-                    setZReportDragY(deltaY);
-                  }}
-                  onTouchEnd={() => {
-                    const finalY = zReportDragY;
-                    zReportDragStartYRef.current = null;
-                    if (finalY > 65) {
+          <AnimatePresence>
+            {isZReportOpen && (
+              <div
+                key="z-report-modal"
+                className="fixed inset-0 z-[1000] flex items-end sm:items-center justify-center p-0 sm:p-4"
+              >
+                <motion.div
+                  initial={perfMode ? false : { opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={perfMode ? undefined : { opacity: 0 }}
+                  transition={perfMode ? { duration: 0 } : Z_REPORT_BACKDROP_TRANSITION}
+                  onClick={() => setIsZReportOpen(false)}
+                  className="absolute inset-0 bg-slate-950/70 backdrop-blur-md transform-gpu"
+                />
+                <motion.div
+                  drag="y"
+                  dragControls={zReportDragControls}
+                  dragListener={false}
+                  dragConstraints={{ top: 0, bottom: 0 }}
+                  dragElastic={{ top: 0.02, bottom: 0.85 }}
+                  dragTransition={{ bounceStiffness: 420, bounceDamping: 36 }}
+                  onDragEnd={(_, info) => {
+                    if (info.offset.y > 72 || (info.offset.y > 28 && info.velocity.y > 320)) {
                       triggerHaptic('medium');
-                      setZReportDragY(0);
                       setIsZReportOpen(false);
-                    } else {
-                      setZReportDragY(0);
                     }
                   }}
-                  onPointerDown={(e) => {
-                    zReportDragStartYRef.current = e.clientY;
-                    try {
-                      e.currentTarget.setPointerCapture(e.pointerId);
-                    } catch {}
-                  }}
-                  onPointerMove={(e) => {
-                    if (zReportDragStartYRef.current === null || e.buttons !== 1) return;
-                    const deltaY = Math.max(0, e.clientY - zReportDragStartYRef.current);
-                    setZReportDragY(deltaY);
-                  }}
-                  onPointerUp={(e) => {
-                    const finalY = zReportDragY;
-                    zReportDragStartYRef.current = null;
-                    try {
-                      e.currentTarget.releasePointerCapture(e.pointerId);
-                    } catch {}
-                    if (finalY > 65) {
-                      triggerHaptic('medium');
-                      setZReportDragY(0);
-                      setIsZReportOpen(false);
-                    } else {
-                      setZReportDragY(0);
-                    }
-                  }}
-                  className="w-full py-1.5 flex items-center justify-center cursor-grab active:cursor-grabbing touch-none select-none"
+                  variants={perfMode ? undefined : Z_REPORT_SHEET_VARIANTS}
+                  initial={perfMode ? false : 'hidden'}
+                  animate={perfMode ? undefined : 'visible'}
+                  exit={perfMode ? undefined : 'exit'}
+                  onClick={(e) => e.stopPropagation()}
+                  className="relative z-10 w-full max-w-lg max-h-[92dvh] sm:max-h-[88vh] bg-white dark:bg-slate-900 rounded-t-3xl sm:rounded-3xl border border-slate-200/80 dark:border-slate-800/90 shadow-2xl flex flex-col overflow-hidden transform-gpu will-change-transform"
                 >
-                  <div className="w-11 h-1.5 bg-slate-300 dark:bg-slate-700 rounded-full" />
-                </div>
+                  {/* Top Header & Date Selector (with GPU-accelerated Slide-Down Drag Area) */}
+                  <div className="px-4 sm:px-5 pt-2.5 pb-3.5 bg-white dark:bg-slate-900 border-b border-slate-200/70 dark:border-slate-800/80 space-y-3 shrink-0">
+                    <div
+                      onPointerDown={(e) => zReportDragControls.start(e)}
+                      className="cursor-grab active:cursor-grabbing touch-none select-none space-y-2.5"
+                    >
+                      {/* Drag Pill */}
+                      <div className="w-full pt-1 pb-0.5 flex items-center justify-center">
+                        <div className="w-11 h-1.5 bg-slate-300 dark:bg-slate-700 rounded-full" />
+                      </div>
 
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="w-10 h-10 rounded-2xl bg-indigo-500/10 dark:bg-indigo-500/15 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
-                      <FileText size={18} />
-                    </div>
-                    <div className="min-w-0">
-                      <h2 className="text-lg font-extrabold tracking-tight text-slate-900 dark:text-white truncate">
-                        Daily <span className="text-indigo-600 dark:text-indigo-400">Z-Report</span>
-                      </h2>
-                      <p className="text-xs font-medium text-slate-500 dark:text-slate-400 truncate mt-0.5">
-                        {zReportData.dateLabel}
-                        {zReportData.completedBillsCount > 0
-                          ? ` · ${zReportData.firstBillTime} – ${zReportData.lastBillTime}`
-                          : ' · No bills yet'}
-                      </p>
-                    </div>
-                  </div>
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-10 h-10 rounded-2xl bg-indigo-500/10 dark:bg-indigo-500/15 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                            <FileText size={18} />
+                          </div>
+                          <div className="min-w-0">
+                            <h2 className="text-lg font-extrabold tracking-tight text-slate-900 dark:text-white truncate">
+                              Daily <span className="text-indigo-600 dark:text-indigo-400">Z-Report</span>
+                            </h2>
+                            <p className="text-xs font-medium text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                              {zReportData.dateLabel}
+                              {zReportData.completedBillsCount > 0
+                                ? ` · ${zReportData.firstBillTime} – ${zReportData.lastBillTime}`
+                                : ' · No bills yet'}
+                            </p>
+                          </div>
+                        </div>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setZReportDragY(0);
-                      setIsZReportOpen(false);
-                    }}
-                    aria-label="Close Z-Report"
-                    className="w-9 h-9 shrink-0 aspect-square rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
+                        <button
+                          type="button"
+                          onPointerDown={(e) => e.stopPropagation()}
+                          onClick={() => setIsZReportOpen(false)}
+                          aria-label="Close Z-Report"
+                          className="w-9 h-9 shrink-0 aspect-square rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 flex items-center justify-center hover:bg-slate-200 dark:hover:bg-slate-700 hover:text-slate-900 dark:hover:text-white transition-colors cursor-pointer"
+                        >
+                          <X size={16} />
+                        </button>
+                      </div>
+                    </div>
 
                 {/* Simple Date Switcher */}
                 <div className="space-y-2">
                   <div className="flex items-center gap-1.5">
                     <button
                       type="button"
-                      onClick={() => stepZReportDate(1)}
-                      disabled={
-                        zReportDatePreset === 'today' ||
-                        zReportData.targetIsoDate === getAppBusinessIsoDate()
-                      }
-                      aria-label="Newer day (towards Today)"
-                      className="w-9 h-9 shrink-0 aspect-square rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-35 disabled:pointer-events-none text-slate-700 dark:text-slate-200 font-bold text-sm flex items-center justify-center active:scale-95 transition-all cursor-pointer"
+                      onClick={() => stepZReportDate(-1)}
+                      aria-label="Previous day"
+                      className="w-9 h-9 shrink-0 aspect-square rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-sm flex items-center justify-center active:scale-95 transition-all cursor-pointer"
                     >
                       ‹
                     </button>
@@ -2890,7 +3128,7 @@ export function Analytics() {
                           transform: `translate3d(${
                             (['today', 'yesterday', 'custom'] as const).indexOf(zReportDatePreset) * 100
                           }%, 0, 0)`,
-                          transition: 'transform 260ms cubic-bezier(0.22, 1, 0.36, 1)',
+                          transition: perfMode ? 'none' : 'transform 260ms cubic-bezier(0.22, 1, 0.36, 1)',
                         }}
                         className="absolute top-1 bottom-1 left-1 bg-indigo-600 rounded-lg shadow-xs pointer-events-none will-change-transform"
                       />
@@ -2925,9 +3163,13 @@ export function Analytics() {
 
                     <button
                       type="button"
-                      onClick={() => stepZReportDate(-1)}
-                      aria-label="Previous day (towards Yesterday)"
-                      className="w-9 h-9 shrink-0 aspect-square rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-sm flex items-center justify-center active:scale-95 transition-all cursor-pointer"
+                      onClick={() => stepZReportDate(1)}
+                      disabled={
+                        zReportDatePreset === 'today' ||
+                        zReportData.targetIsoDate === getAppBusinessIsoDate()
+                      }
+                      aria-label="Next day"
+                      className="w-9 h-9 shrink-0 aspect-square rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-35 disabled:pointer-events-none text-slate-700 dark:text-slate-200 font-bold text-sm flex items-center justify-center active:scale-95 transition-all cursor-pointer"
                     >
                       ›
                     </button>
@@ -2940,8 +3182,13 @@ export function Analytics() {
                       </span>
                       <input
                         type="date"
+                        max={getAppBusinessIsoDate()}
                         value={zReportCustomDate}
-                        onChange={(e) => setZReportCustomDate(e.target.value)}
+                        onChange={(e) => {
+                          const todayIso = getAppBusinessIsoDate();
+                          const nextVal = e.target.value;
+                          setZReportCustomDate(nextVal && nextVal > todayIso ? todayIso : nextVal);
+                        }}
                         className="h-8 px-2.5 rounded-lg text-xs font-mono tabular-nums font-bold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
                       />
                     </div>
@@ -2950,7 +3197,7 @@ export function Analytics() {
               </div>
 
               {/* Scrollable Report Content */}
-              <div className="p-4 sm:p-5 overflow-y-auto space-y-4 flex-1 bg-slate-50/70 dark:bg-slate-950/60">
+              <div className="p-4 sm:p-5 overflow-y-auto overscroll-contain space-y-4 flex-1 bg-slate-50/70 dark:bg-slate-950/60">
                 {/* 1. Hero Cards: Final Profit & Cash in Drawer */}
                 <div className="grid grid-cols-2 gap-3">
                   {/* Final Profit / Loss Card */}
@@ -3457,6 +3704,7 @@ export function Analytics() {
                           if (connected) {
                             setZReportPrinterAlert(false);
                             triggerHaptic('success');
+                            void handlePrintZReport();
                           } else {
                             triggerHaptic('error');
                           }
@@ -3497,18 +3745,20 @@ export function Analytics() {
                   <button
                     type="button"
                     onClick={handlePrintZReport}
-                    disabled={printingZReport && printerState.connected}
+                    disabled={printingZReport}
                     className="h-11 px-4 rounded-2xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-60 text-slate-700 dark:text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 active:scale-[0.98] transition-all cursor-pointer whitespace-nowrap"
                   >
                     <Printer size={15} />
                     <span>
-                      {printingZReport && printerState.connected ? 'Printing...' : 'Print'}
+                      {printingZReport ? 'Printing...' : 'Print'}
                     </span>
                   </button>
                 </div>
               </div>
-            </motion.div>
-          </div>,
+                </motion.div>
+              </div>
+            )}
+          </AnimatePresence>,
           document.body
         )}
     </motion.div>

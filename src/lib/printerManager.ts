@@ -264,22 +264,44 @@ export async function sendEscPosToConnectedPrinter(bill: Bill): Promise<boolean>
     const d = new Date(bill.date);
     const dateStr = d.toLocaleDateString();
     const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const items = Array.isArray(bill.items) ? bill.items : [];
+    const totalUnits = items.reduce((s, i) => s + (Number(i.quantity) || 0), 0);
+    const subtotal = items.reduce(
+      (s, i) => s + (Number(i.quantity) || 0) * (Number(i.price) || 0),
+      0
+    );
+    const discountAmt = Math.max(0, Number((bill as any).discount) || 0);
+    const statusText = bill.isUdhar
+      ? 'UDHAR (UNPAID)'
+      : bill.status === 'on_hold'
+      ? 'ON HOLD'
+      : 'PAID';
 
     const lines: string[] = [
       '\x1B\x40', // Initialize printer
       '\x1B\x61\x01', // Center align
       '\x1B\x45\x01', // Bold ON
-      'SMART POS\n',
+      '\x1B\x21\x30', // Double width + height
+      'SmartRooti\n',
+      '\x1B\x21\x00', // Reset text size
       '\x1B\x45\x00', // Bold OFF
-      'Official Sales Receipt\n',
-      '--------------------------------\n',
+      'OFFICIAL SALES RECEIPT\n',
+      '================================\n',
       '\x1B\x61\x00', // Left align
-      `Receipt: #${shortId}\n`,
-      `Date: ${dateStr} ${timeStr}\n`,
-      '--------------------------------\n',
+      `Receipt: #${shortId}   [${statusText}]\n`,
+      `Date:    ${dateStr} ${timeStr}\n`,
     ];
 
-    (bill.items || []).forEach((item) => {
+    if (bill.customerName) {
+      lines.push(`Cust:    ${bill.customerName}\n`);
+    }
+    if (bill.customerPhone) {
+      lines.push(`Phone:   ${bill.customerPhone}\n`);
+    }
+
+    lines.push('--------------------------------\n');
+
+    items.forEach((item) => {
       const qty = Number(item.quantity) || 0;
       const price = Number(item.price) || 0;
       const lineTotal = formatPrice(qty * price);
@@ -287,14 +309,27 @@ export async function sendEscPosToConnectedPrinter(bill: Bill): Promise<boolean>
       lines.push(`  ${qty} x Rs.${formatPrice(price)} = Rs.${lineTotal}\n`);
     });
 
+    lines.push('--------------------------------\n');
+    lines.push(`Items: ${items.length} (${totalUnits} units)\n`);
+    if (discountAmt > 0) {
+      lines.push(`Subtotal:     Rs.${formatPrice(subtotal)}\n`);
+      lines.push(`Discount:    -Rs.${formatPrice(discountAmt)}\n`);
+    }
+
+    const totalLabel = bill.isUdhar
+      ? 'UDHAR DUE'
+      : bill.status === 'on_hold'
+      ? 'HOLD TOTAL'
+      : 'TOTAL PAID';
+
     lines.push(
-      '--------------------------------\n',
+      '================================\n',
       '\x1B\x45\x01',
-      `TOTAL PAID: Rs.${formatPrice(bill.total)}\n`,
+      `${totalLabel}: Rs.${formatPrice(bill.total)}\n`,
       '\x1B\x45\x00',
-      '--------------------------------\n',
+      '================================\n',
       '\x1B\x61\x01',
-      'Thank you for your business!\n\n\n'
+      'Thank you for shopping with\nSmartRooti!\n\n\n'
     );
 
     const payload = encoder.encode(lines.join(''));
@@ -322,32 +357,63 @@ export async function sendEscPosZReportToConnectedPrinter(zReportData: any): Pro
       '\x1B\x40', // Initialize printer
       '\x1B\x61\x01', // Center align
       '\x1B\x45\x01', // Bold ON
-      'SMART POS - Z-REPORT\n',
+      '\x1B\x21\x30', // Double width + height
+      'SmartRooti\n',
+      '\x1B\x21\x00', // Reset size
+      'DAILY Z-REPORT\n',
       '\x1B\x45\x00', // Bold OFF
       `${zReportData.dateLabel}\n`,
-      '--------------------------------\n',
+      `${zReportData.completedBillsCount > 0 ? `${zReportData.firstBillTime} - ${zReportData.lastBillTime}` : 'No completed bills'}\n`,
+      '================================\n',
       '\x1B\x61\x00', // Left align
-      `Total Sales:   Rs.${formatPrice(zReportData.grossSales || 0)}\n`,
-      `Bills Done:    ${zReportData.completedBillsCount || 0} (${zReportData.totalUnitsSold || 0} items)\n`,
-      `Buy Cost:     -Rs.${formatPrice(zReportData.shiftCogs || 0)}\n`,
-      `Shop Costs:   -Rs.${formatPrice(zReportData.dayOtherCosts || 0)}\n`,
+      `Total Sales:  Rs.${formatPrice(zReportData.grossSales || 0)}\n`,
+      `Bills Done:   ${zReportData.completedBillsCount || 0} (${zReportData.totalUnitsSold || 0} items)\n`,
+      `Avg Bill:     Rs.${formatPrice(zReportData.avgBillValue || 0)}\n`,
+    ];
+
+    if ((zReportData.totalDiscount || 0) > 0) {
+      lines.push(`Discounts:   -Rs.${formatPrice(zReportData.totalDiscount)}\n`);
+    }
+
+    lines.push(
+      `Buy Cost:    -Rs.${formatPrice(zReportData.shiftCogs || 0)}\n`,
+      `Shop Costs:  -Rs.${formatPrice(zReportData.dayOtherCosts || 0)}\n`,
       '--------------------------------\n',
       '\x1B\x45\x01',
       `${(zReportData.netShiftProfit || 0) >= 0 ? 'FINAL PROFIT' : 'NET LOSS'}: Rs.${formatPrice(Math.abs(zReportData.netShiftProfit || 0))}\n`,
       `CASH DRAWER:  Rs.${formatPrice(zReportData.expectedCashInDrawer || 0)}\n`,
       '\x1B\x45\x00',
-      '--------------------------------\n',
-    ];
+      '================================\n'
+    );
+
+    if ((zReportData.udharBillsCount || 0) > 0 || (zReportData.heldBillsCount || 0) > 0) {
+      lines.push('PENDING ACCOUNTS:\n');
+      if (zReportData.udharBillsCount > 0) {
+        lines.push(` Unpaid Udhar (${zReportData.udharBillsCount}): Rs.${formatPrice(zReportData.udharBillsTotal || 0)}\n`);
+      }
+      if (zReportData.heldBillsCount > 0) {
+        lines.push(` On Hold (${zReportData.heldBillsCount}):      Rs.${formatPrice(zReportData.heldBillsTotal || 0)}\n`);
+      }
+      lines.push('--------------------------------\n');
+    }
+
+    if (Array.isArray(zReportData.cashiers) && zReportData.cashiers.length > 0) {
+      lines.push('STAFF SUMMARY:\n');
+      zReportData.cashiers.forEach((c: any) => {
+        lines.push(` ${c.name} (${c.bills}): Rs.${formatPrice(c.sales || 0)}\n`);
+      });
+      lines.push('--------------------------------\n');
+    }
 
     if (Array.isArray(zReportData.soldItems) && zReportData.soldItems.length > 0) {
       lines.push('ITEMS SOLD:\n');
-      zReportData.soldItems.slice(0, 15).forEach((it: any) => {
+      zReportData.soldItems.slice(0, 20).forEach((it: any) => {
         lines.push(` ${it.qty}x ${it.name} - Rs.${formatPrice(it.revenue || 0)}\n`);
       });
       lines.push('--------------------------------\n');
     }
 
-    lines.push('\x1B\x61\x01', 'End of Day Summary\n\n\n');
+    lines.push('\x1B\x61\x01', 'SmartRooti · Shift Closing\nVerified: ______________\n\n\n');
 
     const payload = encoder.encode(lines.join(''));
     const chunkSize = 180;

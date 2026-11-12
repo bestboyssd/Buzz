@@ -3,6 +3,8 @@ package com.smartrooti.billing;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Environment;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.view.View;
 import android.view.WindowManager;
 import android.graphics.Color;
@@ -546,6 +548,113 @@ public class MainActivity extends BridgeActivity {
                 return false;
             }
         }
+
+        @JavascriptInterface
+        public boolean setNotificationsEnabled(boolean enabled) {
+            try {
+                BuzzNotificationWorker.setNotificationsEnabled(getApplicationContext(), enabled);
+                if (enabled) {
+                    BuzzRealtimeSyncService.startIfPermitted(MainActivity.this);
+                } else {
+                    BuzzRealtimeSyncService.stopService(MainActivity.this);
+                }
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean syncNotificationContext(
+            String userUid,
+            String userEmail,
+            boolean isAdmin,
+            boolean isRealAdmin,
+            String deviceId
+        ) {
+            try {
+                BuzzNotificationWorker.syncContext(
+                    getApplicationContext(),
+                    userUid,
+                    userEmail,
+                    isAdmin,
+                    isRealAdmin,
+                    deviceId
+                );
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean markAlertHandled(String kind, String key, long timestamp) {
+            try {
+                BuzzNotificationWorker.markAlertHandled(
+                    getApplicationContext(),
+                    kind,
+                    key,
+                    timestamp
+                );
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean wasAlertHandled(String kind, String key, long timestamp) {
+            try {
+                return BuzzNotificationWorker.wasAlertHandled(
+                    getApplicationContext(),
+                    kind,
+                    key,
+                    timestamp
+                );
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean isIgnoringBatteryOptimizations() {
+            try {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                return pm == null || pm.isIgnoringBatteryOptimizations(getPackageName());
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public boolean requestIgnoreBatteryOptimizations() {
+            try {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
+                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                if (pm != null && pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                    return true;
+                }
+                android.content.Intent intent = new android.content.Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getPackageName())
+                );
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(intent);
+                return true;
+            } catch (Exception e) {
+                try {
+                    android.content.Intent fallbackIntent = new android.content.Intent(
+                        Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+                    );
+                    fallbackIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(fallbackIntent);
+                    return true;
+                } catch (Exception ignored) {
+                    return false;
+                }
+            }
+        }
     }
 
     @Override
@@ -573,8 +682,11 @@ public class MainActivity extends BridgeActivity {
         } catch (Exception ignored) {
         }
 
-        // Ensure high-priority notification channel exists on Android 8+
+        // Ensure high-priority notification channel & baseline timestamp exist on Android 8+
         BuzzNotificationWorker.ensureChannel(this);
+        BuzzNotificationWorker.ensureBaselineInitialized(this);
+        BuzzRealtimeSyncService.ensureLiveSyncChannel(this);
+        BuzzRealtimeSyncService.startIfPermitted(this);
 
         // Request POST_NOTIFICATIONS runtime permission on Android 13+ (API 33+)
         if (Build.VERSION.SDK_INT >= 33) {
@@ -648,6 +760,7 @@ public class MainActivity extends BridgeActivity {
             }
             bgPollExecutor = null;
         }
+        BuzzRealtimeSyncService.startIfPermitted(this);
 
         // If user just granted "Install unknown apps" permission and returned to Buzz POS, automatically launch installer
         try {

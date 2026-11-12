@@ -160,9 +160,9 @@ export function AllBills() {
             )}
         </div>
 
-        <div className="text-slate-800 dark:text-slate-200 flex-1 flex flex-col">
+        <div className="text-slate-800 dark:text-slate-200 flex-1 flex flex-col [overflow-anchor:none]">
           {filtered.length === 0 ? (
-             <div className="p-8 text-center text-slate-400 dark:text-slate-500 glass-card flex-1 flex flex-col items-center justify-center gap-2">
+             <div className="p-8 text-center text-slate-400 dark:text-slate-500 bg-white dark:bg-[#1b1f2b] border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none flex-1 flex flex-col items-center justify-center gap-2">
                <Receipt className="mx-auto mb-1 opacity-50" size={36} />
                <p className="font-bold text-slate-700 dark:text-slate-300 text-sm">No bills found</p>
                <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -208,7 +208,7 @@ export function AllBills() {
                         }
                         key={bill.id ? `${bill.id}_${idx}` : `bill_${group.key}_${idx}`} 
                         onClick={() => { triggerHaptic('heavy'); setSelectedBill(bill); }} 
-                        className="glass-card p-4 flex items-center justify-between transition-colors cursor-pointer group transform-gpu"
+                        className="glass-card p-4 flex items-center justify-between cursor-pointer group transform-gpu"
                       >
                         <div className="flex gap-4 items-center min-w-0">
                           <div className="w-12 h-12 shrink-0 rounded-2xl bg-indigo-50/80 dark:bg-indigo-500/10 flex items-center justify-center text-indigo-400 group-hover:scale-105 transition-transform text-xs font-bold font-mono">

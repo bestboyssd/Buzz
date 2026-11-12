@@ -111,6 +111,32 @@ export function Settings() {
   const [printerState, setPrinterState] = useState<PrinterState>(() =>
     getPrinterState()
   );
+  const [batteryUnrestricted, setBatteryUnrestricted] = useState<boolean>(() => {
+    try {
+      const nativeExporter = (window as any).AndroidExporter;
+      if (nativeExporter && typeof nativeExporter.isIgnoringBatteryOptimizations === "function") {
+        return Boolean(nativeExporter.isIgnoringBatteryOptimizations());
+      }
+    } catch {}
+    return true;
+  });
+
+  useEffect(() => {
+    const syncBatteryState = () => {
+      try {
+        const nativeExporter = (window as any).AndroidExporter;
+        if (nativeExporter && typeof nativeExporter.isIgnoringBatteryOptimizations === "function") {
+          setBatteryUnrestricted(Boolean(nativeExporter.isIgnoringBatteryOptimizations()));
+        }
+      } catch {}
+    };
+    window.addEventListener("focus", syncBatteryState);
+    window.addEventListener("appResumed", syncBatteryState);
+    return () => {
+      window.removeEventListener("focus", syncBatteryState);
+      window.removeEventListener("appResumed", syncBatteryState);
+    };
+  }, []);
 
   useEffect(() => {
     return subscribePrinterState((state) => {
@@ -231,6 +257,12 @@ export function Settings() {
 
   const toggleNotifications = async (checked: boolean) => {
     triggerHaptic("medium");
+    try {
+      const nativeExporter = (window as any).AndroidExporter;
+      if (nativeExporter && typeof nativeExporter.setNotificationsEnabled === "function") {
+        nativeExporter.setNotificationsEnabled(Boolean(checked));
+      }
+    } catch {}
     if (checked) {
       setNotifications(true);
       localStorage.setItem(getStorageKey("notifications"), "true");
@@ -450,7 +482,7 @@ export function Settings() {
                 </motion.div>
               }
               label="Notifications"
-              description="Alerts for sales and low stock"
+              description="Instant alerts for stock drops & bill conflicts"
               action={
                 <Switch
                   checked={notifications}
@@ -458,6 +490,38 @@ export function Settings() {
                 />
               }
             />
+            {Capacitor.isNativePlatform() && (
+              <SettingItem
+                icon={<Zap size={20} className={batteryUnrestricted ? "text-emerald-500" : "text-amber-500"} />}
+                label="Instant Background Alerts"
+                badge={
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border ${
+                      batteryUnrestricted
+                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25"
+                        : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25"
+                    }`}
+                  >
+                    {batteryUnrestricted ? "Unrestricted" : "Battery Restricted"}
+                  </span>
+                }
+                description={
+                  batteryUnrestricted
+                    ? "Background sync runs unimpeded even when closed"
+                    : "Tap to allow Unrestricted battery for instant alerts"
+                }
+                action={<ChevronRight size={20} className="text-slate-400" />}
+                onClick={() => {
+                  triggerHaptic("light");
+                  try {
+                    const nativeExporter = (window as any).AndroidExporter;
+                    if (nativeExporter && typeof nativeExporter.requestIgnoreBatteryOptimizations === "function") {
+                      nativeExporter.requestIgnoreBatteryOptimizations();
+                    }
+                  } catch {}
+                }}
+              />
+            )}
             <SettingItem
               icon={<Smartphone size={20} className="text-blue-500" />}
               label="Keep Screen On"

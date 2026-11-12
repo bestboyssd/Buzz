@@ -175,6 +175,45 @@ async function checkBackgroundNotifications() {
       }
     }
   }
+
+  // 3. Check Real-Time Stock Alerts Feed (Out of Stock & Critical Low Stock)
+  const stockFeed = await fetchSettingDoc("stock_alerts_feed");
+  if (stockFeed && Array.isArray(stockFeed.latestAlerts)) {
+    const knownStockIds = Array.isArray(notifConfig.notifiedStockIds) ? notifConfig.notifiedStockIds : [];
+    for (const ev of stockFeed.latestAlerts) {
+      if (!ev || !ev.id) continue;
+      const ts = Number(ev.timestamp) || 0;
+      if (ts <= cutoff) continue;
+      const evId = String(ev.id);
+      if (ev.sourceDeviceId && notifConfig.deviceId && ev.sourceDeviceId === notifConfig.deviceId) {
+        continue;
+      }
+      if (!swNotifiedIds.has(evId) && !knownStockIds.includes(evId)) {
+        swNotifiedIds.add(evId);
+        const type = ev.type || "low_stock";
+        const name = ev.productName || "Product";
+        const stock = Number(ev.stock) || 0;
+        const title =
+          type === "out_of_stock"
+            ? "🚫 Out of Stock Alert"
+            : type === "critical_low"
+            ? "⚠️ Critical Low Stock"
+            : "📉 Low Stock Alert";
+        const body =
+          type === "out_of_stock"
+            ? `"${name}" is now completely out of stock!`
+            : `"${name}" has only ${stock} item${stock === 1 ? "" : "s"} left in stock.`;
+        await self.registration.showNotification(title, {
+          body,
+          icon: "/pwa-192x192.png",
+          badge: "/pwa-192x192.png",
+          tag: evId,
+          renotify: true,
+          vibrate: [200, 80, 200],
+        });
+      }
+    }
+  }
 }
 
 self.addEventListener("message", (event) => {

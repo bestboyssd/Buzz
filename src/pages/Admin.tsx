@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import {
   Shield,
   ShieldOff,
@@ -190,6 +190,7 @@ function M3RefreshIndicator({
 
 export function Admin() {
   const navigate = useNavigate();
+  const location = useLocation();
   const {
     user,
     isAdmin,
@@ -287,6 +288,18 @@ export function Admin() {
     }
   });
   const [quickCostDrafts, setQuickCostDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(location.search);
+      if (params.get("view") === "costs") {
+        setIsViewingProductCosts(true);
+        if (params.get("filter") === "unset") {
+          setCostFilter("unset");
+        }
+      }
+    } catch {}
+  }, [location.search]);
 
   useEffect(() => {
     const handleOpenBuyCosts = () => {
@@ -3933,6 +3946,130 @@ export function Admin() {
     }
   };
 
+  const closeProductCostsView = () => {
+    setIsViewingProductCosts(false);
+    setSearchQuery("");
+    setCostFilter("all");
+    if (window.location.search.includes("view=costs")) {
+      navigate("/admin", { replace: true });
+    }
+  };
+
+  const adminBackStateRef = useRef({
+    effectiveIsAuthenticated,
+    isAIAssistantOpen,
+    actionErrorMessage,
+    actionSuccessMessage,
+    showClearConflictsConfirm,
+    clearingConflicts,
+    showClearLogsConfirm,
+    clearingLogs,
+    accountToDelete,
+    isDeletingAccount,
+    editingAccount,
+    deleteConfMode,
+    isProcessing,
+    logoutConfirm,
+    showBroadcastModal,
+    sendingBroadcast,
+    showBackupModal,
+    isViewingProductCosts,
+    isViewingAccounts,
+    isViewingActivityLogs,
+    isViewingSyncConflicts,
+    isChangingPin,
+  });
+  adminBackStateRef.current = {
+    effectiveIsAuthenticated,
+    isAIAssistantOpen,
+    actionErrorMessage,
+    actionSuccessMessage,
+    showClearConflictsConfirm,
+    clearingConflicts,
+    showClearLogsConfirm,
+    clearingLogs,
+    accountToDelete,
+    isDeletingAccount,
+    editingAccount,
+    deleteConfMode,
+    isProcessing,
+    logoutConfirm,
+    showBroadcastModal,
+    sendingBroadcast,
+    showBackupModal,
+    isViewingProductCosts,
+    isViewingAccounts,
+    isViewingActivityLogs,
+    isViewingSyncConflicts,
+    isChangingPin,
+  };
+
+  // Intercept Android hardware back button across all Admin sub-views (Buy Prices, Accounts, Logs, Sync Conflicts, PIN) & modals
+  useEffect(() => {
+    const handleAndroidBack = (e: Event) => {
+      const s = adminBackStateRef.current;
+      if (!s.effectiveIsAuthenticated || s.isAIAssistantOpen) return;
+
+      if (s.actionErrorMessage) {
+        e.preventDefault();
+        setActionErrorMessage("");
+      } else if (s.actionSuccessMessage) {
+        e.preventDefault();
+        setActionSuccessMessage("");
+      } else if (s.showClearConflictsConfirm) {
+        e.preventDefault();
+        if (!s.clearingConflicts) setShowClearConflictsConfirm(false);
+      } else if (s.showClearLogsConfirm) {
+        e.preventDefault();
+        if (!s.clearingLogs) setShowClearLogsConfirm(false);
+      } else if (s.accountToDelete) {
+        e.preventDefault();
+        if (!s.isDeletingAccount) setAccountToDelete(null);
+      } else if (s.editingAccount) {
+        e.preventDefault();
+        setEditingAccount(null);
+      } else if (s.deleteConfMode !== "none") {
+        e.preventDefault();
+        if (!s.isProcessing) {
+          setDeleteConfMode("none");
+          setDangerConfirmText("");
+        }
+      } else if (s.logoutConfirm) {
+        e.preventDefault();
+        if (!s.isProcessing) setLogoutConfirm(false);
+      } else if (s.showBroadcastModal) {
+        e.preventDefault();
+        if (!s.sendingBroadcast) setShowBroadcastModal(false);
+      } else if (s.showBackupModal) {
+        e.preventDefault();
+        if (!s.isProcessing) setShowBackupModal(false);
+      } else if (s.isViewingProductCosts) {
+        e.preventDefault();
+        closeProductCostsView();
+      } else if (s.isViewingAccounts) {
+        e.preventDefault();
+        setIsViewingAccounts(false);
+        setSearchQuery("");
+      } else if (s.isViewingActivityLogs) {
+        e.preventDefault();
+        setIsViewingActivityLogs(false);
+        setSearchQuery("");
+        setActivityFilter("all");
+      } else if (s.isViewingSyncConflicts) {
+        e.preventDefault();
+        setIsViewingSyncConflicts(false);
+        setSearchQuery("");
+        setConflictFilter("all");
+      } else if (s.isChangingPin) {
+        e.preventDefault();
+        handleCloseChangePin();
+      }
+    };
+
+    window.addEventListener("androidBackPress", handleAndroidBack);
+    return () => window.removeEventListener("androidBackPress", handleAndroidBack);
+  }, []);
+
   if (authLoading) {
     return null; // Or a transparent loader
   }
@@ -4598,6 +4735,15 @@ export function Admin() {
                         const conflictItemsList =
                           conflict.conflictingItems || conflict.conflicts || [];
 
+                        const totalItemsCount = (conflict.items || []).reduce(
+                          (s, i) => s + (Number(i.quantity) || 0),
+                          0
+                        );
+                        const cashierInitial = String(conflict.userName || "C")
+                          .trim()
+                          .charAt(0)
+                          .toUpperCase();
+
                         return (
                           <motion.div
                             layout="position"
@@ -4612,17 +4758,25 @@ export function Admin() {
                               mass: 0.65,
                               delay: Math.min(idx * 0.035, 0.22),
                             }}
-                            className={`p-4 glass-card rounded-[24px] flex flex-col gap-3 border ${
+                            className={`bg-white dark:bg-[#181c28] rounded-[24px] overflow-hidden border shadow-[0_2px_10px_rgba(15,23,42,0.04)] dark:shadow-[0_10px_28px_-12px_rgba(0,0,0,0.65)] transition-colors ${
                               isUnresolved
-                                ? "border-amber-500/35 dark:border-amber-500/30"
-                                : "border-slate-200/70 dark:border-white/[0.07]"
+                                ? "border-amber-500/40 dark:border-amber-400/30"
+                                : "border-slate-200/80 dark:border-white/[0.08]"
                             }`}
                           >
-                            {/* Top Status & Timestamp Row */}
-                            <div className="flex items-center justify-between gap-2">
+                            {/* Top Status & Bill Header Band */}
+                            <div
+                              className={`px-4 py-2.5 flex items-center justify-between gap-2 border-b ${
+                                isUnresolved
+                                  ? "bg-amber-500/[0.06] dark:bg-amber-500/[0.07] border-amber-500/15 dark:border-amber-400/15"
+                                  : isForceApproved
+                                  ? "bg-indigo-500/[0.05] dark:bg-indigo-500/[0.06] border-indigo-500/15"
+                                  : "bg-emerald-500/[0.05] dark:bg-emerald-500/[0.06] border-emerald-500/15"
+                              }`}
+                            >
                               <div className="flex items-center gap-2 min-w-0">
                                 <span
-                                  className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider ${
+                                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider shrink-0 ${
                                     isUnresolved
                                       ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30"
                                       : isForceApproved
@@ -4630,6 +4784,15 @@ export function Admin() {
                                       : "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30"
                                   }`}
                                 >
+                                  <span
+                                    className={`w-1.5 h-1.5 rounded-full ${
+                                      isUnresolved
+                                        ? "bg-amber-500 dark:bg-amber-400"
+                                        : isForceApproved
+                                        ? "bg-indigo-500 dark:bg-indigo-400"
+                                        : "bg-emerald-500 dark:bg-emerald-400"
+                                    }`}
+                                  />
                                   {isUnresolved
                                     ? "Unresolved"
                                     : isForceApproved
@@ -4638,28 +4801,30 @@ export function Admin() {
                                     ? "Synced on Retry"
                                     : "Void Confirmed"}
                                 </span>
-                                <span className="text-xs font-mono font-bold text-slate-500 dark:text-slate-400 truncate">
+                                <span className="px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/[0.08] text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 truncate">
                                   #{String(conflict.billId || "").slice(-6).toUpperCase()}
                                 </span>
                               </div>
 
                               <div className="flex items-center gap-2 shrink-0">
-                                <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono font-semibold">
-                                  {detectedTime
-                                    ? new Date(detectedTime).toLocaleTimeString([], {
-                                        hour: "2-digit",
-                                        minute: "2-digit",
-                                      })
-                                    : ""}
-                                </span>
+                                {detectedTime && (
+                                  <span className="inline-flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400 font-mono font-semibold">
+                                    <Clock size={11} className="opacity-75" />
+                                    {new Date(detectedTime).toLocaleTimeString([], {
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })}
+                                  </span>
+                                )}
                                 {isRealAdmin && (
                                   <button
                                     type="button"
                                     onClick={() =>
                                       handleDeleteSingleConflict(conflict.id)
                                     }
-                                    className="w-6 h-6 rounded-full flex items-center justify-center text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer"
+                                    className="w-7 h-7 rounded-full flex items-center justify-center bg-slate-100/80 dark:bg-white/[0.06] text-slate-500 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/15 transition-colors cursor-pointer"
                                     title="Delete conflict log"
+                                    aria-label="Delete conflict log"
                                   >
                                     <X size={13} />
                                   </button>
@@ -4667,94 +4832,127 @@ export function Admin() {
                               </div>
                             </div>
 
-                            {/* Cashier & Bill Total */}
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="min-w-0">
-                                <p className="text-xs font-bold text-slate-800 dark:text-slate-100 truncate">
-                                  Billed offline by {conflict.userName || "Cashier"}
-                                </p>
-                                <p className="text-[11px] text-slate-400 dark:text-slate-500 truncate">
-                                  {conflict.userEmail || "Offline session"}
-                                </p>
-                              </div>
-                              <div className="text-right shrink-0">
-                                <span className="text-sm font-black font-mono text-slate-900 dark:text-white">
-                                  ₹{formatPrice(Number(conflict.total) || 0)}
-                                </span>
-                                <span className="block text-[10px] font-semibold text-slate-400 dark:text-slate-500">
-                                  {(conflict.items || []).reduce(
-                                    (s, i) => s + (Number(i.quantity) || 0),
-                                    0
-                                  )}{" "}
-                                  items
-                                </span>
-                              </div>
-                            </div>
-
-                            {/* Conflicting Stock Breakdown */}
-                            <div className="rounded-2xl bg-rose-500/[0.06] dark:bg-rose-500/[0.08] border border-rose-500/20 p-3 space-y-2">
-                              <div className="flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-wider text-rose-600 dark:text-rose-400">
-                                <AlertTriangle size={12} />
-                                <span>Concurrent Stock Discrepancy</span>
-                              </div>
-                              <div className="space-y-1.5">
-                                {conflictItemsList.map((cItem, cIdx) => (
-                                  <div
-                                    key={`${cItem.productId}_${cIdx}`}
-                                    className="flex items-center justify-between gap-2 text-xs bg-white/70 dark:bg-slate-900/70 px-2.5 py-1.5 rounded-xl border border-rose-500/15"
-                                  >
-                                    <span className="font-bold text-slate-800 dark:text-slate-200 truncate">
-                                      {cItem.name || cItem.productName}
-                                    </span>
-                                    <div className="flex items-center gap-1.5 shrink-0 font-mono text-[11px]">
-                                      <span className="px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-600 dark:text-rose-300 font-bold">
-                                        Billed: {cItem.requestedQty}
-                                      </span>
-                                      <span className="px-1.5 py-0.5 rounded bg-slate-200/80 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-bold">
-                                        In Stock: {cItem.availableStock}
-                                      </span>
-                                    </div>
+                            <div className="p-4 space-y-3.5">
+                              {/* Cashier Context & Bill Total Card */}
+                              <div className="flex items-center justify-between gap-3">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-9 h-9 rounded-xl bg-slate-100 dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/[0.08] flex items-center justify-center text-xs font-black text-indigo-600 dark:text-indigo-300 shrink-0">
+                                    {cashierInitial || <User size={14} />}
                                   </div>
-                                ))}
-                              </div>
-                            </div>
+                                  <div className="min-w-0">
+                                    <p className="text-xs sm:text-[13px] font-bold text-slate-900 dark:text-slate-100 truncate">
+                                      {conflict.userName || "Cashier"}
+                                    </p>
+                                    <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                      {conflict.userEmail || "Offline session"}
+                                    </p>
+                                  </div>
+                                </div>
 
-                            {/* Resolution Actions or Resolution Audit */}
-                            {isUnresolved ? (
-                              <div className="grid grid-cols-2 gap-2 pt-1">
-                                <button
-                                  type="button"
-                                  disabled={isResolving}
-                                  onClick={() => handleResolveConflictVoid(conflict)}
-                                  className="py-2.5 px-3 rounded-xl bg-slate-200/80 hover:bg-slate-300/80 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-extrabold text-[11px] transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-                                >
-                                  <Check size={13} />
-                                  <span>Confirm Voided</span>
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={isResolving}
-                                  onClick={() =>
-                                    handleResolveConflictForceApprove(conflict)
-                                  }
-                                  className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-[11px] shadow-sm shadow-indigo-600/20 transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-                                >
-                                  <Receipt size={13} />
-                                  <span>Force Approve Bill</span>
-                                </button>
+                                <div className="px-3 py-1.5 rounded-xl bg-slate-50 dark:bg-white/[0.04] border border-slate-200/80 dark:border-white/[0.07] text-right shrink-0">
+                                  <span className="text-sm font-black font-mono tabular-nums text-slate-900 dark:text-white block leading-tight">
+                                    ₹{formatPrice(Number(conflict.total) || 0)}
+                                  </span>
+                                  <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 tabular-nums block mt-0.5">
+                                    {totalItemsCount}{" "}
+                                    {totalItemsCount === 1 ? "item" : "items"}
+                                  </span>
+                                </div>
                               </div>
-                            ) : (
-                              <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 dark:text-slate-500 border-t border-slate-100 dark:border-white/[0.06] pt-2">
-                                <span>
-                                  Resolved by {conflict.resolvedBy || "Admin"}
-                                </span>
-                                <span>
-                                  {conflict.resolvedAt
-                                    ? formatDateToDMY(conflict.resolvedAt)
-                                    : ""}
-                                </span>
+
+                              {/* Conflicting Stock Breakdown Panel */}
+                              <div className="rounded-2xl bg-rose-50/75 dark:bg-[#22151c] border border-rose-200/80 dark:border-rose-500/20 overflow-hidden">
+                                <div className="px-3 py-2 border-b border-rose-200/70 dark:border-rose-500/15 flex items-center justify-between gap-2 bg-rose-500/[0.06] dark:bg-rose-500/[0.08]">
+                                  <div className="flex items-center gap-1.5 text-[10px] font-extrabold uppercase tracking-wider text-rose-700 dark:text-rose-300">
+                                    <AlertTriangle size={12} />
+                                    <span>Stock Discrepancy</span>
+                                  </div>
+                                  <span className="text-[10px] font-bold font-mono text-rose-600/85 dark:text-rose-300/85">
+                                    {conflictItemsList.length}{" "}
+                                    {conflictItemsList.length === 1 ? "product" : "products"}
+                                  </span>
+                                </div>
+
+                                <div className="divide-y divide-rose-200/60 dark:divide-rose-500/10">
+                                  {conflictItemsList.map((cItem, cIdx) => {
+                                    const billedQty = Number(cItem.requestedQty) || 0;
+                                    const availQty = Number(cItem.availableStock) || 0;
+                                    const shortage = Math.max(0, billedQty - availQty);
+
+                                    return (
+                                      <div
+                                        key={`${cItem.productId}_${cIdx}`}
+                                        className="flex items-center justify-between gap-2.5 px-3 py-2.5 bg-white/60 dark:bg-slate-950/35"
+                                      >
+                                        <div className="min-w-0 flex-1">
+                                          <span className="text-xs font-bold text-slate-900 dark:text-slate-100 block truncate">
+                                            {cItem.name || cItem.productName}
+                                          </span>
+                                          {shortage > 0 && (
+                                            <span className="text-[10px] font-semibold font-mono text-rose-600 dark:text-rose-400 block mt-0.5">
+                                              Short by {shortage}
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        <div className="flex items-center gap-1.5 shrink-0 font-mono tabular-nums text-[11px]">
+                                          <span className="px-2 py-0.5 rounded-lg bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-500/25 font-bold">
+                                            Billed {billedQty}
+                                          </span>
+                                          <span className="px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-slate-800/90 text-slate-700 dark:text-slate-300 border border-slate-200/80 dark:border-white/10 font-bold">
+                                            Stock {availQty}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
                               </div>
-                            )}
+
+                              {/* Resolution Actions or Resolution Audit */}
+                              {isUnresolved ? (
+                                <div className="grid grid-cols-2 gap-2.5 pt-0.5">
+                                  <button
+                                    type="button"
+                                    disabled={isResolving}
+                                    onClick={() => handleResolveConflictVoid(conflict)}
+                                    className="h-10 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-white/[0.06] dark:hover:bg-white/[0.11] text-slate-800 dark:text-slate-200 border border-slate-200/90 dark:border-white/[0.08] font-bold text-xs transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                                  >
+                                    <Check size={14} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                    <span>Confirm Voided</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isResolving}
+                                    onClick={() =>
+                                      handleResolveConflictForceApprove(conflict)
+                                    }
+                                    className="h-10 px-3 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-bold text-xs shadow-md shadow-indigo-600/25 transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 border border-indigo-400/25"
+                                  >
+                                    {isResolving ? (
+                                      <RefreshCw size={13} className="animate-spin shrink-0" />
+                                    ) : (
+                                      <Receipt size={13} className="shrink-0" />
+                                    )}
+                                    <span>Force Approve</span>
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 dark:text-slate-400 border-t border-slate-100 dark:border-white/[0.06] pt-2.5">
+                                  <span>
+                                    Resolved by{" "}
+                                    <strong className="text-slate-700 dark:text-slate-200">
+                                      {conflict.resolvedBy || "Admin"}
+                                    </strong>
+                                  </span>
+                                  <span className="font-mono">
+                                    {conflict.resolvedAt
+                                      ? formatDateToDMY(conflict.resolvedAt)
+                                      : ""}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
                           </motion.div>
                         );
                       })}
@@ -5324,7 +5522,11 @@ export function Admin() {
                 <motion.button
                   whileHover={{ scale: 1.06 }}
                   whileTap={{ scale: 0.9 }}
-                  onClick={() => setIsViewingAccounts(false)}
+                  onClick={() => {
+                    triggerHaptic("light");
+                    setIsViewingAccounts(false);
+                    setSearchQuery("");
+                  }}
                   className="m3-icon-btn flex-shrink-0 pointer-events-auto"
                 >
                   <ArrowLeft size={18} />
@@ -6154,12 +6356,7 @@ export function Admin() {
                   type="button"
                   onClick={() => {
                     triggerHaptic("light");
-                    setIsViewingProductCosts(false);
-                    setSearchQuery("");
-                    setCostFilter("all");
-                    if (window.location.search.includes("view=costs")) {
-                      navigate("/admin", { replace: true });
-                    }
+                    closeProductCostsView();
                   }}
                   className="m3-icon-btn flex-shrink-0 pointer-events-auto"
                 >

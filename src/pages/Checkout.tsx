@@ -62,6 +62,22 @@ export function Checkout() {
   const holdTimerRef = useRef<number | null>(null);
   const holdTriggeredRef = useRef<boolean>(false);
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
+  const redirectTimerRef = useRef<number | null>(null);
+  const checkoutCompletedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (!showHoldModal && !errorMessage) return;
+    const handleAndroidBack = (e: Event) => {
+      e.preventDefault();
+      if (showHoldModal) {
+        setShowHoldModal(false);
+      } else if (errorMessage) {
+        setErrorMessage("");
+      }
+    };
+    window.addEventListener('androidBackPress', handleAndroidBack);
+    return () => window.removeEventListener('androidBackPress', handleAndroidBack);
+  }, [showHoldModal, errorMessage]);
 
   const clearHoldTimer = () => {
     if (holdTimerRef.current !== null) {
@@ -84,6 +100,14 @@ export function Checkout() {
     window.addEventListener('maxBillLimitReached', handleMaxBillLimit);
     return () => {
       clearHoldTimer();
+      if (redirectTimerRef.current !== null) {
+        window.clearTimeout(redirectTimerRef.current);
+        redirectTimerRef.current = null;
+        if (checkoutCompletedRef.current) {
+          checkoutCompletedRef.current = false;
+          clearCart();
+        }
+      }
       setCheckoutInProgress(false);
       window.removeEventListener('maxBillLimitReached', handleMaxBillLimit);
       if (errTimer) window.clearTimeout(errTimer);
@@ -313,8 +337,14 @@ export function Checkout() {
       });
       setIsSuccess(true);
       setIsSubmitting(false);
+      checkoutCompletedRef.current = true;
 
-      setTimeout(() => {
+      if (redirectTimerRef.current !== null) {
+        window.clearTimeout(redirectTimerRef.current);
+      }
+      redirectTimerRef.current = window.setTimeout(() => {
+        redirectTimerRef.current = null;
+        checkoutCompletedRef.current = false;
         clearCart();
         setCheckoutInProgress(false);
         setIsSuccess(false);
@@ -396,15 +426,15 @@ export function Checkout() {
             {cart.length === 0 && !isSuccess ? (
               <motion.div
                 key="empty-cart"
-                initial={perfMode ? false : { opacity: 0, y: 14, scale: 0.96 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={perfMode ? undefined : { opacity: 0, scale: 0.96 }}
+                initial={perfMode ? false : { opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={perfMode ? undefined : { opacity: 0 }}
                 transition={
                   perfMode
                     ? { duration: 0 }
-                    : { type: 'spring', stiffness: 400, damping: 29, mass: 0.72, delay: 0.04 }
+                    : { type: 'spring', stiffness: 420, damping: 32, mass: 0.65, delay: 0.03 }
                 }
-                className="glass-card flex-1 flex flex-col items-center justify-center p-8 text-center text-slate-500 dark:text-slate-400 gap-3"
+                className="bg-white dark:bg-[#1b1f2b] border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none flex-1 flex flex-col items-center justify-center p-8 text-center text-slate-500 dark:text-slate-400 gap-3 transform-gpu"
               >
                 <div className="w-16 h-16 rounded-2xl bg-slate-100 dark:bg-slate-800/80 flex items-center justify-center text-slate-400 dark:text-slate-500 mb-1">
                   <ShoppingCart size={32} />

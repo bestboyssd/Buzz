@@ -1,29 +1,29 @@
-# Handover & Architecture Guide — Buzz POS (`v1.0.0`)
+# Handover & Architecture Guide — Buzz POS (`v1.2.3`)
 
 > [!WARNING]
 > ### 🛑 CRITICAL AGENT RULES — READ FIRST
 > 1. **DO NOT MODIFY THE UI UNSOLICITED**: Do not make visual adjustments, layout restructures, or cosmetic styling changes unless explicitly instructed by the user.
 > 2. **NO AUTHENTICATION BYPASSES**: Never add anonymous login fallbacks (`signInAnonymously`), fake admin accounts (`Demo Admin (Bypass)`), or unauthenticated database access in `Login.tsx`, `AuthContext.tsx`, or `firestore.rules`.
 > 3. **SINGLE UNIFIED DATABASE**: Always connect to the existing shared Cloud Firestore database (`ai-studio-remixbuzzv111-8ceddc6a-4499-4e60-a805-dedb47b5266b` in project `tidy-byte-g5xj8`). Never create or switch to a blank database.
-> 4. **100% SERVER-SIDE GEMINI API**: All Gemini AI calls (`@google/genai`) MUST execute on the backend server (`server.ts`). Never import `@google/genai` or expose API keys in browser code (`src/*`).
+> 4. **GEMINI AI TRANSPORT POLICY**: Native APK and browser clients call Gemini REST directly (`src/lib/geminiApi.ts` with hedged low-latency failover), with `/api/gemini/*` (`server.ts`) and Firestore RPC (`settings/ai_rpc_req_*`) retained as fallbacks. Keep embedded/runtime keys scoped and never break native standalone APK offline-capable AI execution.
 > 5. **CONTEXT WINDOW MONITORING**: Always notify the user when your context window is getting close to full or if a context compaction occurs so they can migrate smoothly.
 
 ---
 
 ## 📱 1. Application Overview & Tech Stack
-* **App Name**: Buzz (`Buzz - v1.0.0`)
+* **App Name**: Buzz (`Buzz - v1.2.3`)
 * **Android Package / Namespace**: `com.smartrooti.billing`
-* **Version**: `1.0.0` (`versionCode 100`, `versionName "1.0.0"`) synchronized across:
-  * `metadata.json` (`"name": "Buzz - v1.0.0"`)
-  * `package.json` (`"version": "1.0.0"`)
-  * `index.html` (`<title>Buzz - v1.0.0</title>`)
-  * `android/app/build.gradle` (`versionCode 100`, `versionName "1.0.0"`)
-  * `src/pages/Settings.tsx` (`getAppVersion()` parses `metadata.json`)
+* **Version**: `1.2.3` (`versionCode 123`, `versionName "1.2.3"`) synchronized across:
+  * `metadata.json` (`"name": "Buzz - v1.2.3"`)
+  * `package.json` (`"version": "1.2.3"`)
+  * `index.html` (`<title>Buzz - v1.2.3</title>`)
+  * `android/app/build.gradle` (`versionCode 123`, `versionName "1.2.3"`)
+  * `src/pages/Settings.tsx` (`getAppVersion()` resolves via `versionCheck.ts` / `package.json` / `metadata.json`)
 * **Core Tech Stack**:
   * **Frontend**: React 19 + TypeScript + Vite 6 + Tailwind CSS v4 + `motion/react` + `lucide-react` + `recharts`.
-  * **Backend**: Node.js + Express (`server.ts`, run via `tsx server.ts` on port `3000`). Serves API routes (`/api/*`) and mounts Vite middleware in development or static `dist/` in production.
-  * **Database & Auth**: Google Firebase (`firebase` JS SDK v12) with Firestore multi-tab IndexedDB persistence (`persistentLocalCache` + `persistentMultipleTabManager`) supplemented by local Dexie/SQLite caching (`src/lib/sqliteAdapter.ts`).
-  * **Mobile Wrapper**: Capacitor 8 (`@capacitor/core`, `@capacitor/android`, `@capacitor-firebase/authentication`, `@capacitor/local-notifications`, `@capacitor/haptics`, `@capacitor/status-bar`).
+  * **Backend (Optional Local/Preview Host)**: Node.js + Express (`server.ts`, run via `tsx server.ts` on port `3000`). Serves API routes (`/api/*`) and mounts Vite middleware in development or static `dist/` in production.
+  * **Database & Auth**: Google Firebase (`firebase` JS SDK v12) with Firestore multi-tab IndexedDB persistence (`persistentLocalCache` + `persistentMultipleTabManager` + `experimentalForceLongPolling` on native Android) supplemented by local Dexie/SQLite caching (`src/lib/sqliteAdapter.ts`).
+  * **Mobile Wrapper & Background Engine**: Capacitor 8 (`@capacitor/core`, `@capacitor/android`, `@capacitor-firebase/authentication`, `@capacitor/local-notifications`, `@capacitor/haptics`, `@capacitor/status-bar`, `@capacitor-community/sqlite`, `@capacitor-community/keep-awake`) plus native Java classes `MainActivity.java`, `BuzzRealtimeSyncService.java` (`START_STICKY` foreground service), and `BuzzNotificationWorker.java` (WorkManager + REST polling).
 
 ---
 
@@ -84,8 +84,10 @@
    * `blocked_accounts`: `{ uids: string[], emails: string[], updatedAt: number }` — Global blacklist checked in real time by `AuthContext.tsx`.
    * `deleted_accounts`: `{ uids: string[], emails: string[], updatedAt: number }` — Tracks deleted accounts so active sessions are immediately signed out, while allowing clean re-registration on next explicit sign-in.
    * `security` / `admin_pin`: Stores the 4-digit Admin PIN (`pin` field, default `"5566"`).
-   * `broadcast_notifications`: Real-time admin broadcast banner/push payload.
-   * `ai_rpc_req_{id}`: Transient server-side Gemini RPC documents (created by client when direct HTTP is blocked on native APK, processed and deleted by `server.ts`).
+   * `admin_broadcast_notification`: Real-time admin broadcast banner/push payload (`targetAudience`: `'all' | 'admins' | 'users'`, `senderUid`, `timestamp`, `acknowledgedBy`).
+   * `global_security_message`: Latest admin security alert document + `events` array (`pin_login_bypass`, `failed_pin_lockout`, `acknowledgedBy`).
+   * `stock_alerts_feed`: Cross-device instant stock transition feed (`latestAlerts` with `out_of_stock`, `critical_low`, `low_stock` events and `sourceDeviceId`) so backgrounded/remote phones alert immediately without waiting for next app open.
+   * `ai_rpc_req_{id}`: Transient server-side Gemini RPC documents (fallback path processed and deleted by `server.ts` when active).
 
 5. **`activity_logs/{logId}`**:
    * `action`: `string` (e.g., `'stock_edit'`, `'bill_created'`, `'bill_deleted'`, `'failed_login'`, `'role_changed'`, `'backup_created'`, `'data_purged'`, etc.)
@@ -122,13 +124,19 @@
 * **`src/lib/CartContext.tsx`**:
   * Manages active POS cart items, custom unit price overrides, discounts, hold-bill slots (`held_bills_v1`), and `MAX_BILL_AMOUNT = 10000` enforcement.
 * **`src/lib/geminiApi.ts` & `server.ts`**:
-  * Client (`src/lib/geminiApi.ts`) communicates exclusively with `server.ts` via `/api/gemini/chat-stream` (SSE), `/api/gemini/chat`, `/api/gemini/transcribe`, `/api/gemini/tts`, or the Firestore RPC fallback (`settings/ai_rpc_req_*`).
-  * Supports bilingual (English + Bengali / Banglish) store intelligence, live inventory/profit context injection, and structured `<ACTION>{...}</ACTION>` tags (`CREATE_BILL`, `DELETE_BILL`, `ADD_PRODUCT`, `UPDATE_STOCK`, `UPDATE_PRICE`, `DELETE_PRODUCT`, `ADD_OTHER_COST`, `DELETE_OTHER_COST`).
+  * `src/lib/geminiApi.ts` executes Gemini requests directly against the Gemini v1beta REST API (streaming SSE + hedged parallel text/vision failover across `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, and `gemini-3.5-flash`, plus TTS/transcription) so the standalone Android APK and web client respond in ~1–2s with zero dependency on a running local server; `/api/gemini/*` (`server.ts`) and Firestore RPC (`settings/ai_rpc_req_*`) remain as fallback paths.
+  * Supports bilingual (English + Bengali / Banglish) store intelligence, live inventory/profit context injection, vision analysis, and structured `<ACTION>{...}</ACTION>` tags (`UPDATE_STOCK`, `UPDATE_PRICE`, `UPDATE_PRODUCT_IMAGE`, `ADD_PRODUCT`, `DELETE_PRODUCT`, `UPDATE_BILL`, `DELETE_BILL`, `PURGE_STORE_DATA`, `ADD_TRANSACTION`, `ADD_EXPENSE`, `DELETE_EXPENSE`, `UPDATE_ROLE`).
+* **`src/lib/stockAlerts.ts`**:
+  * Instant threshold transition detection (`classifyStockTransition` -> `out_of_stock`, `critical_low`, `low_stock`), local deduplication (`wasStockTransitionRecentlyHandled`), and Firestore `settings/stock_alerts_feed` publishing.
+* **`src/lib/versionCheck.ts`**:
+  * GitHub Releases version check & in-app APK updater (`bestboyssd/Buzz`) with 3-day grace period / mandatory update modal and native `AndroidExporter` APK downloader/installer bridge.
+* **`src/lib/capacitor.ts`**:
+  * Native Capacitor lifecycle hooks, `appResumed` dispatch, and 4-layer Android hardware back-button handler (`androidBackPress` cancelable event for modals/drawers/subviews, secondary tab return to `/`, and double-press exit on Home).
 * **`src/lib/utils.ts`**:
   * `MAX_BILL_AMOUNT = 10000`, `MAX_PRODUCT_STOCK = 2000`, `formatPrice()`.
   * `getBillCalendarIsoDate()`: Standard `00:00:00` midnight calendar boundary for bills (`YYYY-MM-DD`).
   * `getAppBusinessDate()` / `getAppBusinessIsoDate()`: 1:00 AM shift cutoff helper used in Analytics.
-  * `showLocalNotification()`: Sequential, deduplicated notification queue supporting Capacitor `LocalNotifications`, native `AndroidExporter`, and Web Service Worker notifications.
+  * `showLocalNotification()`: Sequential, deterministically keyed & deduplicated notification dispatcher supporting native `AndroidExporter` (with shared `BuzzNativeAlertPrefs` sync), Capacitor `LocalNotifications`, and Web Service Worker notifications (`public/sw-notifications.js` on non-native web/PWA).
 * **`src/lib/printerManager.ts`**:
   * Manages Bluetooth / WebSerial / USB / Network ESC/POS thermal printers and isolated iframe thermal receipt/Z-Report printing.
 
@@ -148,8 +156,8 @@
   * Houses quick links to Analytics (`/analytics`), All Bills (`/all-bills`), Other Costs (`expense` / `borrow` / `due` / `other`), Registered User Accounts governance (Lock/Unlock, Promote/Revoke Admin, Delete Account), Activity Logs (`All`, `Stock Edit`, `Failed Login`, `Role Changed`, `Backup`), Security Alerts, Sync Conflicts, and Data Management (Export/Import JSON Snapshot, Direct Cloud Recovery from `buzz-8521`, and Database Purge with `DELETE` confirmation).
 * **`src/pages/Analytics.tsx` (`/analytics`)**:
   * Comprehensive financial analytics, net profit & margin breakdowns, FIFO/effective cost calculations, top-selling products, hourly/daily/monthly charts, Z-Report thermal printing, and embedded AI insights.
-* **`src/pages/Settings.tsx` (`/settings`)** & **`src/pages/PrivacyPolicy.tsx` (`/privacy-policy`)**:
-  * Profile customization, theme toggle (Dark/Light/System), notification toggle, thermal printer connection manager, and Privacy Policy (with "Last Updated" date hardcoded to **`1/7/2026`**).
+* **`src/pages/Settings.tsx` (`/settings`)** & **`src/pages/PrivacyPolicy.tsx` (`/privacy`)**:
+  * Profile customization, theme toggle (Dark/Light/System), notification toggle, performance mode toggle, battery optimization prompt, thermal printer connection manager, in-app update trigger, and Privacy Policy.
 
 ---
 
@@ -170,21 +178,19 @@
    * **Ban -> Delete -> Re-Create Flow**: When an Admin deletes a user account (`handleDeleteUserAccount` in `Admin.tsx`), all matching `profile_*` and `attempts_*` docs across all UIDs for that email are deleted, the user's UIDs and email are removed from `settings/blocked_accounts`, and a monotonic deletion timestamp (`now = Math.max(Date.now(), maxExistingTs + 1000)`) is recorded in `settings/deleted_accounts`.
    * **Fresh Account Re-Creation**: When a deleted user explicitly clicks "Continue with Google" (`signInWithGoogle()`), `AuthContext.tsx` queries fresh server documents (`getDocFromServer`), sees `wasDeleted = deletedAt > 0 && docRecreatedAt <= deletedAt`, ignores any stale local `is_blocked_cached_${uid}` flag, wipes all local cache keys (`wipeLocalAccountCache`), restores their original Google provider `displayName` and `photoURL` via `updateProfile()` (clearing any old custom name/photo from `Account.tsx`), deletes any stale duplicate `profile_*` docs for that email, removes the user from `deleted_accounts` and `blocked_accounts`, and writes a brand-new `profile_${uid}` document with `recreatedAt: Math.max(Date.now(), deletedAt + 1000)`.
    * **Preventing Zombie Resurrection**: `Admin.tsx` (`buildUnifiedAccountsList`) and `AuthContext.tsx` compare `docRecreatedAt <= deletedAt` (rather than `updatedAt <= deletedAt`) so background presence heartbeats or cross-device clock skew can never resurrect a deleted profile document.
-6. **100% Server-Side Gemini AI & Sub-2-Second Mobile Transport (`server.ts`, `src/lib/geminiApi.ts`, `AdminAIAssistant.tsx`)**:
-   * `server.ts` uses `process.env.GEMINI_API_KEY` with `httpOptions: { headers: { "User-Agent": "aistudio-build" } }`.
-   * **Active Models**: `PRIMARY_AI_MODEL = "gemini-3.1-flash-lite"` (~0.8s latency), `BACKUP_AI_MODEL = "gemini-3.8-flash"`, `TERTIARY_AI_MODEL = "gemini-flash-latest"`, with fast per-model failover so requests complete in ~1.1s.
-   * **Strict Zero-Preset-Message Policy**: Never return preset or deterministic canned messages (such as `"Store Snapshot: X products in catalog..."`) when the user talks to Buzz AI. Every user message or command must be answered by the live Gemini AI (`server.ts` -> `/api/gemini/chat-stream`, `/api/gemini/chat`, or the server-side Firestore RPC listener `settings/ai_rpc_req_*`).
-   * **Native Android / Mobile Transport (`askViaFirestoreBridge` + `handleRpcDocument`)**:
-     * **Clock-Skew Guardrail (`server.ts`)**: Never compare client `data.createdAt` against server `Date.now()` when filtering `status === "pending"` `ai_rpc_req_*` documents in `server.ts`! The server container clock and a real mobile phone's clock can differ, which would cause `server.ts` to misclassify fresh mobile RPC requests as stale and delete them before processing. `server.ts` uses both a self-healing `onSnapshot(collection(db, "settings"))` listener and a 2-second `getDocs` backup poll.
-     * **Long-Polling Bypass (`src/lib/geminiApi.ts`)**: On mobile/native devices (`isMobileClientDevice()` / `shouldPreferFirestoreBridge()`), `askGeminiAssistantStream` launches `askViaFirestoreBridge` immediately, and `askViaFirestoreBridge` (as well as `transcribeViaFirestoreBridge` and `ttsViaFirestoreBridge`) polls `getDocFromServer(reqRef)` every 650ms alongside `onSnapshot(reqRef)` so Android WebViews with `experimentalForceLongPolling` receive server responses in ~1s without waiting for long-poll stream re-registration.
+6. **Gemini AI Transport & Native APK Speed (`src/lib/geminiApi.ts`, `server.ts`, `AdminAIAssistant.tsx`)**:
+   * **Active Models & Hedged Failover (`src/lib/geminiApi.ts`)**: Primary text model `gemini-3.5-flash-lite` hedged with `gemini-3.1-flash-lite` and `gemini-3.5-flash`; vision/attachment primary `gemini-3.1-flash-lite` hedged with `gemini-3.5-flash-lite` (~1–2s response directly from standalone Android APKs and browsers via `generativelanguage.googleapis.com`).
+   * **Strict Zero-Preset-Message Policy**: Never return preset or deterministic canned messages (such as `"Store Snapshot: X products in catalog..."`) when the user talks to Buzz AI. Every user message or command must be answered by the live Gemini AI.
+   * **Backend `/api/gemini/*` & Firestore RPC Fallback**: When `server.ts` is running (`npm run dev` / Docker), `/api/gemini/chat-stream`, `/api/gemini/chat`, `/api/gemini/transcribe`, `/api/gemini/tts` and the `settings/ai_rpc_req_*` listener stay available as server-side fallbacks. Note: never compare client `data.createdAt` against server `Date.now()` when filtering `status === "pending"` `ai_rpc_req_*` documents due to device clock skew; attach Express SSE disconnect cleanup only to `res.on("close", ...)` (never `req.on("close", ...)`).
    * **Installed PWA Service Worker (`vite.config.ts`)**: `workbox` is configured with `navigateFallbackDenylist: [/^\/api\//, /^\/health/]` and `NetworkOnly` runtime caching for `/api/*` so installed phone PWAs never intercept or buffer `/api/gemini/chat-stream` SSE responses.
-   * Note on Express SSE streaming in Node 20+: Always attach client-disconnect cleanup to `res.on("close", ...)` (checking `if (!res.writableEnded)`), **never** `req.on("close", ...)`, because `req` emits `"close"` as soon as `express.json()` finishes parsing the request body.
-7. **Mobile Microphone, Native TTS & Native Printing (`AdminAIAssistant.tsx`, `MainActivity.java`, `printerManager.ts`)**:
+7. **Mobile Microphone, Native TTS, Native Printing & Instant Deduplicated Notifications (`AdminAIAssistant.tsx`, `MainActivity.java`, `BuzzRealtimeSyncService.java`, `BuzzNotificationWorker.java`, `printerManager.ts`)**:
    * **Android Microphone Hardware Lock**: On Android phones (`isMobileDevice`), never call `navigator.mediaDevices.getUserMedia()` concurrently with `SpeechRecognition` (`webkitSpeechRecognition`), because Android's audio HAL only allows one active audio capture client per app (`getUserMedia` locks the mic and causes `SpeechRecognition` to immediately fail). Use `getUserMedia` only on desktop or when recording via `MediaRecorder` fallback.
    * **Native Android Print Bridge**: `MainActivity.java` exposes `window.AndroidExporter.printHtml(jobName, htmlContent)` backed by Android's `PrintManager`, wired into `BillReceiptModal.tsx`, `Analytics.tsx`, and `printerManager.ts` so receipt and Z-Report printing work natively inside the installed Android APK.
-8. **Edge-to-Edge Android Layout & App-Wide Spring Choreography**:
+   * **Instant Background & Cross-Device Alerts (Single Delivery Guarantee)**: `BuzzRealtimeSyncService` (`foregroundServiceType="remoteMessaging"`) + `BuzzNotificationWorker` poll Firestore REST (`admin_broadcast_notification`, `global_security_message`, `stock_alerts_feed`, `sync_conflicts`) in the background (every 6s active / 15s idle), sharing user context and notified keys/timestamps with JS via `AndroidExporter.syncNotificationContext` and `AndroidExporter.markAlertHandled` so JS listeners and native background workers never emit duplicate phone notifications.
+8. **Edge-to-Edge Android Layout, Hardware Back Navigation & Spring Choreography**:
    * `MainActivity.java` sets `setDecorFitsSystemWindows(false)` and transparent status/navigation bars.
    * `App.tsx` applies `env(safe-area-inset-top)` padding, and `BottomNav.tsx` uses `bottom: calc(1.1rem + env(safe-area-inset-bottom))`.
-   * Cohesive 60/120fps spring physics (`stiffness: 460–500, damping: 28–32, mass: 0.65–0.72`), blur-morphing sheet transitions, staggered list/field entrances, and tactile button micro-interactions (`whileHover`, `whileTap`, icon rotations) are implemented across `ProfileMenu.tsx`, `Products.tsx`, `AdminAIAssistant.tsx`, `BillReceiptModal.tsx`, `BottomNav.tsx`, `Home.tsx`, `Checkout.tsx`, `History.tsx`, `AllBills.tsx`, `OtherCosts.tsx`, `Account.tsx`, `Settings.tsx`, and `Admin.tsx`.
+   * Hardware Back (`capacitor.ts` -> `androidBackPress`) is intercepted by open drawers/modals/Admin sub-views (Buzz AI, Buy Prices, Accounts, Activity Logs, Sync Conflicts, Z-Report, Receipt & Stock modals) before tab/history navigation.
+   * Cohesive 60/120fps spring physics (respecting `performanceMode` when enabled) are implemented across the app's pages and modals.
 
 

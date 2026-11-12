@@ -32,11 +32,107 @@ export function formatPrice(price: number | string | undefined | null): string {
 
 const recentNotificationsMemory = new Map<string, number>();
 const DEDUPE_WINDOW_MS = 4000;
+const KEYED_DEDUPE_WINDOW_MS = 180000; // 3 minutes for explicit dedupe tags
 let notificationSeqCounter = 0;
 let channelInitialized = false;
 let notificationQueuePromise: Promise<void> = Promise.resolve();
 
 const HIGH_PRIORITY_CHANNEL_ID = 'buzz_pos_alerts_high_v3';
+
+export function getDeterministicNotificationId(key: string): number {
+    if (!key) return 10001;
+    let hash = 0;
+    for (let i = 0; i < key.length; i++) {
+        hash = (Math.imul(hash, 31) + key.charCodeAt(i)) | 0;
+    }
+    const pos = hash === -2147483648 ? 0 : Math.abs(hash);
+    return (pos % 800000000) + 10000;
+}
+
+export function syncNativeNotificationContext(
+    userUid: string,
+    userEmail: string,
+    isAdmin: boolean,
+    isRealAdmin: boolean,
+    deviceId: string
+): void {
+    try {
+        if (typeof window === 'undefined' || !Capacitor.isNativePlatform()) return;
+        const nativeExporter = (window as any).AndroidExporter;
+        if (nativeExporter && typeof nativeExporter.syncNotificationContext === 'function') {
+            nativeExporter.syncNotificationContext(
+                userUid || '',
+                userEmail || '',
+                Boolean(isAdmin),
+                Boolean(isRealAdmin),
+                deviceId || ''
+            );
+        }
+    } catch {}
+}
+
+export function markNativeAlertHandled(
+    kind: 'broadcast' | 'security' | 'stock' | 'conflict',
+    key: string,
+    timestamp: number = Date.now()
+): void {
+    try {
+        if (typeof window === 'undefined' || !Capacitor.isNativePlatform()) return;
+        const nativeExporter = (window as any).AndroidExporter;
+        if (nativeExporter && typeof nativeExporter.markAlertHandled === 'function') {
+            nativeExporter.markAlertHandled(kind, key || '', Number(timestamp) || Date.now());
+        }
+    } catch {}
+}
+
+export function wasNativeAlertHandled(
+    kind: 'broadcast' | 'security' | 'stock' | 'conflict',
+    key: string,
+    timestamp: number = 0
+): boolean {
+    try {
+        if (typeof window === 'undefined' || !Capacitor.isNativePlatform()) return false;
+        const nativeExporter = (window as any).AndroidExporter;
+        if (nativeExporter && typeof nativeExporter.wasAlertHandled === 'function') {
+            return Boolean(nativeExporter.wasAlertHandled(kind, key || '', Number(timestamp) || 0));
+        }
+    } catch {}
+    return false;
+}
+
+export function buildCanonicalStockKey(
+    type: string,
+    productId: string,
+    stock: number
+): string {
+    return `stock_canonical_${type}_${productId}_${Math.floor(Math.max(0, Number(stock) || 0))}`;
+}
+
+function inferNativeMetaFromTag(
+    dedupeTag?: string
+): { kind: 'broadcast' | 'security' | 'stock' | 'conflict'; key: string; ts: number } | null {
+    if (!dedupeTag) return null;
+    if (dedupeTag.startsWith('admin_broadcast_')) {
+        const ts = Number(dedupeTag.slice('admin_broadcast_'.length)) || 0;
+        return { kind: 'broadcast', key: dedupeTag, ts };
+    }
+    if (dedupeTag.startsWith('security_alert_')) {
+        return { kind: 'security', key: dedupeTag.slice('security_alert_'.length), ts: 0 };
+    }
+    if (dedupeTag.startsWith('offline_conflict_')) {
+        return { kind: 'conflict', key: dedupeTag.slice('offline_conflict_'.length), ts: 0 };
+    }
+    if (dedupeTag.startsWith('stock_')) {
+        return { kind: 'stock', key: dedupeTag, ts: 0 };
+    }
+    return null;
+}
+
+function inferAndMarkNativeTag(dedupeTag?: string): void {
+    const meta = inferNativeMetaFromTag(dedupeTag);
+    if (!meta) return;
+    markNativeAlertHandled(meta.kind, meta.key, meta.ts || Date.now());
+}
 
 export const ensureNotificationChannel = async () => {
     if (channelInitialized) return;
@@ -86,16 +182,26 @@ export const showLocalNotification = async (
         }
 
         const key = dedupeTag || `${title.trim()}::${body.trim()}`;
+        const dedupeWindowMs = dedupeTag ? KEYED_DEDUPE_WINDOW_MS : DEDUPE_WINDOW_MS;
         const now = Date.now();
         const memLast = recentNotificationsMemory.get(key) || 0;
-        if (now - memLast < DEDUPE_WINDOW_MS) {
+        if (now - memLast < dedupeWindowMs) {
             return;
         }
 
         const storageDedupeKey = `notif_dedupe_${key.slice(0, 140)}`;
         const storedLast = parseInt(localStorage.getItem(storageDedupeKey) || '0', 10);
-        if (now - storedLast < DEDUPE_WINDOW_MS) {
+        if (now - storedLast < dedupeWindowMs) {
             recentNotificationsMemory.set(key, storedLast);
+            return;
+        }
+
+        const nativeMeta = inferNativeMetaFromTag(dedupeTag);
+        if (nativeMeta && wasNativeAlertHandled(nativeMeta.kind, nativeMeta.key, nativeMeta.ts)) {
+            recentNotificationsMemory.set(key, now);
+            try {
+                localStorage.setItem(storageDedupeKey, String(now));
+            } catch {}
             return;
         }
 
@@ -103,6 +209,7 @@ export const showLocalNotification = async (
         try {
             localStorage.setItem(storageDedupeKey, String(now));
         } catch {}
+        inferAndMarkNativeTag(dedupeTag);
 
         const deliverWebNotification = async (uniqueTag: string) => {
             if (!('Notification' in window)) return;
@@ -147,8 +254,10 @@ export const showLocalNotification = async (
         // Enqueue delivery sequentially with a 300ms spacing so Android & Browser never drop or collapse burst notifications
         notificationQueuePromise = notificationQueuePromise
             .then(async () => {
-                const notifId = getUniqueNotificationId(key);
-                const uniqueTag = `${key}_${notifId}`;
+                const notifId = dedupeTag
+                    ? getDeterministicNotificationId(dedupeTag)
+                    : getUniqueNotificationId(key);
+                const uniqueTag = dedupeTag || `${key}_${notifId}`;
 
                 if (Capacitor.isNativePlatform()) {
                     try {

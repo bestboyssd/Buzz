@@ -5,7 +5,10 @@ import android.content.Context;
 import android.content.Intent;
 import androidx.work.Constraints;
 import androidx.work.ExistingPeriodicWorkPolicy;
+import androidx.work.ExistingWorkPolicy;
 import androidx.work.NetworkType;
+import androidx.work.OneTimeWorkRequest;
+import androidx.work.OutOfQuotaPolicy;
 import androidx.work.PeriodicWorkRequest;
 import androidx.work.WorkManager;
 import java.util.concurrent.TimeUnit;
@@ -23,10 +26,25 @@ public class BootReceiver extends BroadcastReceiver {
             } catch (Exception ignored) {
             }
             BuzzNotificationWorker.ensureChannel(context);
+            BuzzNotificationWorker.ensureBaselineInitialized(context);
+            BuzzRealtimeSyncService.ensureLiveSyncChannel(context);
 
             Constraints constraints = new Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)
                     .build();
+
+            try {
+                OneTimeWorkRequest bootImmediate = new OneTimeWorkRequest.Builder(BuzzNotificationWorker.class)
+                        .setConstraints(constraints)
+                        .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                        .build();
+                WorkManager.getInstance(context).enqueueUniqueWork(
+                        "BuzzNotificationBootWake",
+                        ExistingWorkPolicy.REPLACE,
+                        bootImmediate
+                );
+            } catch (Exception ignored) {
+            }
 
             PeriodicWorkRequest periodicWork = new PeriodicWorkRequest.Builder(
                     BuzzNotificationWorker.class,

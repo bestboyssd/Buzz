@@ -183,9 +183,9 @@ export function History() {
           )}
         </div>
 
-        <div className="text-slate-800 dark:text-slate-200 flex-1 flex flex-col">
+        <div className="text-slate-800 dark:text-slate-200 flex-1 flex flex-col [overflow-anchor:none]">
           {filtered.length === 0 ? (
-            <div className="p-10 text-center text-slate-400 dark:text-slate-500 glass-card flex-1 flex flex-col items-center justify-center gap-2">
+            <div className="p-10 text-center text-slate-400 dark:text-slate-500 bg-white dark:bg-[#1b1f2b] border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none flex-1 flex flex-col items-center justify-center gap-2">
               <Receipt className="opacity-50 mb-1" size={36} />
               <p className="font-bold text-slate-700 dark:text-slate-300 text-sm">
                 No matching bills found
@@ -226,7 +226,7 @@ export function History() {
                       triggerHaptic('medium');
                       setSelectedBill(bill);
                     }}
-                    className="glass-card p-3.5 sm:p-4 flex items-center justify-between gap-3 transition-colors cursor-pointer group transform-gpu"
+                    className="glass-card p-3.5 sm:p-4 flex items-center justify-between gap-3 cursor-pointer group transform-gpu"
                   >
                     <div className="flex gap-3.5 items-center min-w-0">
                       <div className="w-12 h-12 shrink-0 rounded-2xl bg-indigo-50/90 dark:bg-indigo-500/15 border border-indigo-100 dark:border-indigo-500/20 flex items-center justify-center text-indigo-600 dark:text-indigo-400 text-xs font-extrabold font-mono tabular-nums group-hover:scale-105 transition-transform">

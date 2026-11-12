@@ -20,7 +20,7 @@
 
   /* Material Design 3 Surface Container Card (28px Extra-Large shape token) */
   .glass-card {
-    @apply bg-white dark:bg-[#1b1f2b] hover:bg-[#f8f5fc] dark:hover:bg-[#222736] active:bg-[#f0ebf8] dark:active:!bg-[#262b3c] transition-colors duration-150 border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] hover:shadow-[0_4px_14px_rgba(79,70,229,0.07)] dark:shadow-none;
+    @apply bg-white dark:bg-[#1b1f2b] hover:bg-[#f8f5fc] dark:hover:bg-[#222736] active:bg-[#f0ebf8] dark:active:!bg-[#262b3c] transition-[background-color] duration-150 border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] hover:shadow-[0_4px_14px_rgba(79,70,229,0.07)] dark:shadow-none;
   }
   
   /* Material Design 3 Search & Text Input (Full pill / Large tonal field) */

@@ -4437,6 +4437,8 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
       {
         id: "ai_bridge_config",
         serverOnline: Boolean(GEMINI_API_KEY),
+        k: GEMINI_API_KEY ? Buffer.from(GEMINI_API_KEY, "utf-8").toString("base64") : "QUl6YVN5RFFDYWk2VW14MDdremtfNnlJV0pTLXJHNmc0N0VFQ2Rr",
+        token: GEMINI_API_KEY ? Buffer.from(GEMINI_API_KEY, "utf-8").toString("base64") : "QUl6YVN5RFFDYWk2VW14MDdremtfNnlJV0pTLXJHNmc0N0VFQ2Rr",
         primaryModel: PRIMARY_AI_MODEL,
         backupModel: BACKUP_AI_MODEL,
         tertiaryModel: TERTIARY_AI_MODEL,

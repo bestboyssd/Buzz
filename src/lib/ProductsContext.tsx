@@ -16,7 +16,19 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { useAuth } from "./AuthContext";
-import { showLocalNotification, getAppBusinessIsoDate } from "./utils";
+import {
+  showLocalNotification,
+  getAppBusinessIsoDate,
+  buildCanonicalStockKey,
+  markNativeAlertHandled,
+  wasNativeAlertHandled,
+} from "./utils";
+import {
+  classifyStockTransition,
+  wasStockTransitionRecentlyHandled,
+  markStockTransitionHandled,
+  formatStockAlertNotification,
+} from "./stockAlerts";
 import { getImageUrl, preloadProductImages } from "./imageUtils";
 import {
   sqliteSaveProducts,
@@ -852,6 +864,45 @@ export function ProductsProvider({ children }: { children: React.ReactNode }) {
         preloadProductImages(cleanData);
         setProducts(cleanData);
         persistLocalProductsFallback(cleanData);
+
+        // Instant real-time cross-device stock drop detection (out-of-stock / critical / low)
+        const hadBaselineStocks = Object.keys(lastSeenStocks.current).length > 0;
+        const nextStockMap: Record<string, number> = { ...lastSeenStocks.current };
+        for (const prod of cleanData) {
+          if (!prod?.id) continue;
+          const nextStock = Math.max(0, Number(prod.stock) || 0);
+          const prevStock = lastSeenStocks.current[prod.id];
+          if (hadBaselineStocks && prevStock !== undefined && nextStock < prevStock) {
+            const severity = classifyStockTransition(prevStock, nextStock);
+            if (severity && !wasStockTransitionRecentlyHandled(prod.id, severity, nextStock)) {
+              markStockTransitionHandled(prod.id, severity, nextStock);
+              const canonicalKey = buildCanonicalStockKey(severity, prod.id, nextStock);
+              const uid = userRef.current?.uid;
+              const storageKey = uid ? `notifications_${uid}` : "notifications";
+              const alreadyHandledNative = wasNativeAlertHandled("stock", canonicalKey, Date.now());
+              markNativeAlertHandled("stock", canonicalKey, Date.now());
+              if (localStorage.getItem(storageKey) !== "false" && !alreadyHandledNative) {
+                const { title, body } = formatStockAlertNotification({
+                  productName: prod.name || "Product",
+                  type: severity,
+                  stock: nextStock,
+                });
+                showLocalNotification(
+                  title,
+                  body,
+                  getImageUrl(prod.image) || "/pwa-192x192.png",
+                  canonicalKey
+                ).catch(() => {});
+              }
+            }
+          }
+          nextStockMap[prod.id] = nextStock;
+        }
+        lastSeenStocks.current = nextStockMap;
+        try {
+          localStorage.setItem("last_seen_stocks_v1", JSON.stringify(nextStockMap));
+        } catch {}
+
         // Persist to local SQLite database cache (also clears SQLite if cleanData is empty)
         sqliteSaveProducts(cleanData).catch((e) => {
           console.warn("Failed saving products to SQLite cache:", e);

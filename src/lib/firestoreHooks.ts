@@ -3,6 +3,7 @@ import { collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, doc, order
 import { db, handleFirestoreError, OperationType } from './firebase';
 import { useAuth } from './AuthContext';
 import { sqliteSaveBill, sqliteSaveProduct, sqliteDeleteProduct, sqliteDeleteBill } from './sqliteAdapter';
+import { publishStockTransitionAlerts, StockTransitionInput } from './stockAlerts';
 import {
     markProductDeletedLocal,
     unmarkProductsDeletedLocal,
@@ -720,12 +721,42 @@ export const updateProduct = async (id: string, data: Partial<Product>): Promise
         ).catch(() => {});
     }
     const payload = { ...sanitizedData, updatedAt: Date.now() };
+
+    let prevStockForAlert: number | null = null;
+    let prodNameForAlert = sanitizedData.name || '';
+    if (sanitizedData.stock !== undefined) {
+        try {
+            const rawLocal = localStorage.getItem('local_products_fallback');
+            if (rawLocal) {
+                const parsed = JSON.parse(rawLocal);
+                if (Array.isArray(parsed)) {
+                    const match = parsed.find((p: any) => String(p?.id || '') === String(id));
+                    if (match) {
+                        prevStockForAlert = Math.max(0, Number(match.stock ?? 0));
+                        if (!prodNameForAlert && match.name) prodNameForAlert = String(match.name);
+                    }
+                }
+            }
+        } catch {}
+    }
+
     sqliteSaveProduct({ id, ...payload } as Product).catch(() => {});
     await commitOfflineReady(
         setDoc(doc(db, 'products', id), payload, { merge: true }),
         `products/${id}`,
         OperationType.UPDATE
     );
+
+    if (sanitizedData.stock !== undefined && prevStockForAlert !== null) {
+        publishStockTransitionAlerts([
+            {
+                productId: String(id),
+                productName: prodNameForAlert || 'Product',
+                prevStock: prevStockForAlert,
+                nextStock: Number(sanitizedData.stock),
+            },
+        ]).catch(() => {});
+    }
 };
 
 /**
@@ -928,6 +959,7 @@ export const checkoutNewBill = async (
         let timedOut = false;
         try {
             const updatedProductsForCache: Product[] = [];
+            const stockTransitionsForAlerts: StockTransitionInput[] = [];
             await Promise.race([
                 runTransaction(db, async (tx) => {
                     const entries = Array.from(aggregated.entries());
@@ -986,6 +1018,13 @@ export const checkoutNewBill = async (
                             soldCount: nextSold,
                             costBatches: updatedCostBatches,
                             updatedAt: now,
+                        });
+
+                        stockTransitionsForAlerts.push({
+                            productId,
+                            productName: data?.name || req.name,
+                            prevStock: currentStock,
+                            nextStock,
                         });
 
                         updatedProductsForCache.push({
@@ -1078,6 +1117,9 @@ export const checkoutNewBill = async (
 
             for (const p of updatedProductsForCache) {
                 sqliteSaveProduct(p).catch(() => {});
+            }
+            if (stockTransitionsForAlerts.length > 0) {
+                publishStockTransitionAlerts(stockTransitionsForAlerts).catch(() => {});
             }
             return newBillRef.id;
         } catch (txErr: any) {
@@ -1241,6 +1283,7 @@ export const syncOfflinePendingBills = async (): Promise<void> => {
 
             try {
                 const updatedProductsForCache: Product[] = [];
+                const syncStockTransitions: StockTransitionInput[] = [];
                 await Promise.race([
                     runTransaction(db, async (tx) => {
                         const productSnaps = new Map<string, any>();
@@ -1317,6 +1360,13 @@ export const syncOfflinePendingBills = async (): Promise<void> => {
                                 updatedAt: now,
                             });
 
+                            syncStockTransitions.push({
+                                productId,
+                                productName: data?.name || req.name,
+                                prevStock: currentStock,
+                                nextStock,
+                            });
+
                             updatedProductsForCache.push({
                                 ...data,
                                 id: productId,
@@ -1364,12 +1414,15 @@ export const syncOfflinePendingBills = async (): Promise<void> => {
                         });
                     }),
                     new Promise((_, reject) =>
-                        setTimeout(() => reject(new Error('Sync transaction timeout')), 5000)
+                        setTimeout(() => reject(new Error('Sync transaction timeout')), 8000)
                     ),
                 ]);
 
                 // Offline bill succeeded server stock validation!
                 removeOfflinePendingBill(billId);
+                if (syncStockTransitions.length > 0) {
+                    publishStockTransitionAlerts(syncStockTransitions).catch(() => {});
+                }
                 const syncedBill: Bill = { ...pendingBill, pendingOfflineSync: false };
                 sqliteSaveBill(syncedBill).catch(() => {});
                 window.dispatchEvent(new CustomEvent('offlineBillQueued', { detail: syncedBill }));
@@ -1468,8 +1521,9 @@ export const syncOfflinePendingBills = async (): Promise<void> => {
                         new CustomEvent('offlineSyncConflictDetected', { detail: conflictRecord })
                     );
                 } else {
-                    // Network hiccup or timeout — keep in queue for next online retry
+                    // Network hiccup or timeout — keep in queue and signal fast retry scheduler
                     console.warn('Offline bill sync deferred due to network:', syncErr);
+                    window.dispatchEvent(new CustomEvent('offlineSyncDeferred'));
                     break;
                 }
             }
@@ -1553,6 +1607,7 @@ export const resolveSyncConflictForceApprove = async (
     sqliteSaveBill(approvedBill).catch(() => {});
     window.dispatchEvent(new CustomEvent('offlineBillQueued', { detail: approvedBill }));
 
+    const forceApprovedTransitions: StockTransitionInput[] = [];
     for (const item of conflict.items || []) {
         if (!item?.productId) continue;
         try {
@@ -1574,6 +1629,12 @@ export const resolveSyncConflictForceApprove = async (
                     },
                     { merge: true }
                 );
+                forceApprovedTransitions.push({
+                    productId: item.productId,
+                    productName: pData?.name || item.name || 'Product',
+                    prevStock: curStock,
+                    nextStock,
+                });
                 window.dispatchEvent(
                     new CustomEvent('offlineStockAdjust', {
                         detail: [{ productId: item.productId, exactStock: nextStock, exactSoldCount: nextSold }],
@@ -1581,6 +1642,9 @@ export const resolveSyncConflictForceApprove = async (
                 );
             }
         } catch {}
+    }
+    if (forceApprovedTransitions.length > 0) {
+        publishStockTransitionAlerts(forceApprovedTransitions).catch(() => {});
     }
 
     await setDoc(

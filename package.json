@@ -1,7 +1,7 @@
 {
   "name": "buzz-pos-stock-management",
   "private": true,
-  "version": "1.1.1",
+  "version": "1.2.3",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
@@ -41,6 +41,7 @@
     "motion": "^12.23.24",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-is": "^19.3.1",
     "react-router-dom": "^7.13.1",
     "recharts": "^3.10.1",
     "sql.js": "^1.13.0",

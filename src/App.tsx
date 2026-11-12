@@ -50,7 +50,7 @@ import {
   limit,
   arrayUnion,
 } from "firebase/firestore";
-import { db } from "./lib/firebase";
+import { db, auth } from "./lib/firebase";
 import {
   getOfflinePendingBills,
   syncOfflinePendingBills,
@@ -67,7 +67,15 @@ import {
   getDeviceId,
   isLocalSecurityAlertTriggered,
   isPerformanceModeEnabled,
+  buildCanonicalStockKey,
+  markNativeAlertHandled,
+  wasNativeAlertHandled,
+  syncNativeNotificationContext,
 } from "./lib/utils";
+import {
+  wasStockTransitionRecentlyHandled,
+  markStockTransitionHandled,
+} from "./lib/stockAlerts";
 import appletConfig from "../firebase-applet-config.json";
 
 const formatDateToDMY = (timestamp: number | string | Date) => {
@@ -208,6 +216,19 @@ function AppContent() {
   const [offlineConflictAlerts, setOfflineConflictAlerts] = useState<SyncConflictRecord[]>([]);
   const [isRetryingConflicts, setIsRetryingConflicts] = useState(false);
 
+  const dismissTopConflictAlert = () => {
+    const target = offlineConflictAlerts[0];
+    if (target?.id && user?.uid) {
+      try {
+        const k = `dismissed_sync_conflict_ids_${user.uid}`;
+        const prev = JSON.parse(localStorage.getItem(k) || "[]");
+        const next = Array.from(new Set([...(Array.isArray(prev) ? prev : []), target.id])).slice(-200);
+        localStorage.setItem(k, JSON.stringify(next));
+      } catch {}
+    }
+    setOfflineConflictAlerts((prev) => prev.slice(1));
+  };
+
   const handleRetryAllOfflineBills = async () => {
     if (isRetryingConflicts) return;
     setIsRetryingConflicts(true);
@@ -223,6 +244,17 @@ function AppContent() {
   };
 
   useEffect(() => {
+    let retryIntervalId: number | null = null;
+    let deferredRetryTimerId: number | null = null;
+
+    const attemptSyncIfOnline = () => {
+      if (typeof navigator === "undefined" || navigator.onLine) {
+        if (getOfflinePendingBills().length > 0) {
+          syncOfflinePendingBills().catch(() => {});
+        }
+      }
+    };
+
     const handleOnline = () => {
       setIsOnline(true);
       syncOfflinePendingBills().catch(() => {});
@@ -230,11 +262,17 @@ function AppContent() {
     const handleOffline = () => setIsOnline(false);
     const handleQueueUpdated = (e: Event) => {
       const custom = e as CustomEvent<{ count?: number }>;
-      setOfflineQueueCount(
+      const count =
         custom.detail?.count !== undefined
           ? custom.detail.count
-          : getOfflinePendingBills().length
-      );
+          : getOfflinePendingBills().length;
+      setOfflineQueueCount(count);
+    };
+    const handleSyncDeferred = () => {
+      if (deferredRetryTimerId !== null) window.clearTimeout(deferredRetryTimerId);
+      deferredRetryTimerId = window.setTimeout(() => {
+        attemptSyncIfOnline();
+      }, 4500);
     };
     const handleSyncState = (e: Event) => {
       const custom = e as CustomEvent<{ syncing?: boolean; count?: number }>;
@@ -256,14 +294,31 @@ function AppContent() {
         }
         return [...prev, conflict];
       });
-      showLocalNotification(
-        `⚠️ Offline Bill #${conflict.billId.slice(-5)} Failed`,
-        `Stock was already billed online while you were offline. Bill (₹${formatPrice(
-          conflict.total
-        )}) was cancelled.`,
-        "/pwa-192x192.png",
-        `offline_conflict_${conflict.id}`
-      );
+      const currentUid = auth.currentUser?.uid;
+      if (currentUid) {
+        try {
+          const sKey = `notified_sync_conflict_ids_${currentUid}`;
+          const raw = localStorage.getItem(sKey);
+          const arr = raw ? JSON.parse(raw) : [];
+          const nextIds = Array.isArray(arr) ? arr.map(String) : [];
+          if (!nextIds.includes(String(conflict.id))) {
+            nextIds.push(String(conflict.id));
+            localStorage.setItem(sKey, JSON.stringify(nextIds.slice(-200)));
+          }
+        } catch {}
+      }
+      const alreadyNative = wasNativeAlertHandled("conflict", conflict.id, Date.now());
+      markNativeAlertHandled("conflict", conflict.id, Date.now());
+      if (!alreadyNative) {
+        showLocalNotification(
+          `⚠️ Offline Bill #${conflict.billId.slice(-5)} Failed`,
+          `Stock was already billed online while you were offline. Bill (₹${formatPrice(
+            conflict.total
+          )}) was cancelled.`,
+          "/pwa-192x192.png",
+          `offline_conflict_${conflict.id}`
+        );
+      }
     };
     const handleConflictResolvedByRetry = (e: Event) => {
       const custom = e as CustomEvent<{ billId?: string; conflictId?: string }>;
@@ -273,26 +328,234 @@ function AppContent() {
         prev.filter((c) => c.id !== cid && c.billId !== bid)
       );
     };
+    const handleVisibilityAttempt = () => {
+      if (document.visibilityState === "visible") {
+        attemptSyncIfOnline();
+      }
+    };
 
     if (typeof navigator === "undefined" || navigator.onLine) {
       syncOfflinePendingBills().catch(() => {});
     }
 
+    // Periodic 8-second auto-retry whenever offline pending bills remain in queue (fixes stale navigator.onLine / WebView reconnects)
+    retryIntervalId = window.setInterval(() => {
+      attemptSyncIfOnline();
+    }, 8000);
+
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
+    window.addEventListener("appResumed", attemptSyncIfOnline);
+    window.addEventListener("focus", attemptSyncIfOnline);
+    document.addEventListener("visibilitychange", handleVisibilityAttempt);
     window.addEventListener("offlineQueueUpdated", handleQueueUpdated);
+    window.addEventListener("offlineSyncDeferred", handleSyncDeferred);
     window.addEventListener("offlineSyncStateChanged", handleSyncState);
     window.addEventListener("offlineSyncConflictDetected", handleConflictDetected);
     window.addEventListener("offlineConflictResolvedByRetry", handleConflictResolvedByRetry);
     return () => {
+      if (retryIntervalId !== null) window.clearInterval(retryIntervalId);
+      if (deferredRetryTimerId !== null) window.clearTimeout(deferredRetryTimerId);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("appResumed", attemptSyncIfOnline);
+      window.removeEventListener("focus", attemptSyncIfOnline);
+      document.removeEventListener("visibilitychange", handleVisibilityAttempt);
       window.removeEventListener("offlineQueueUpdated", handleQueueUpdated);
+      window.removeEventListener("offlineSyncDeferred", handleSyncDeferred);
       window.removeEventListener("offlineSyncStateChanged", handleSyncState);
       window.removeEventListener("offlineSyncConflictDetected", handleConflictDetected);
       window.removeEventListener("offlineConflictResolvedByRetry", handleConflictResolvedByRetry);
     };
   }, []);
+
+  // Global real-time listener for Firestore `sync_conflicts` so Admins & bill creators get instant alerts across all devices
+  useEffect(() => {
+    if (!user?.uid) return;
+    const storageKey = `notified_sync_conflict_ids_${user.uid}`;
+    const dismissedKey = `dismissed_sync_conflict_ids_${user.uid}`;
+
+    const readIdSet = (k: string): Set<string> => {
+      try {
+        const raw = localStorage.getItem(k);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) return new Set(parsed.map(String));
+        }
+      } catch {}
+      return new Set();
+    };
+    const saveIdSet = (k: string, s: Set<string>) => {
+      try {
+        localStorage.setItem(k, JSON.stringify(Array.from(s).slice(-200)));
+      } catch {}
+    };
+
+    let isFirstSnapshot = true;
+    const unsubscribe = onSnapshot(
+      collection(db, "sync_conflicts"),
+      (snapshot) => {
+        const userCanSeeAll = Boolean(isRealAdmin || isAdmin);
+        const notifiedIds = readIdSet(storageKey);
+        const dismissedIds = readIdSet(dismissedKey);
+        let notifiedChanged = false;
+
+        const activeRelevant: SyncConflictRecord[] = [];
+        snapshot.forEach((docSnap) => {
+          const rec = { ...(docSnap.data() as SyncConflictRecord), id: docSnap.id };
+          if (rec.status !== "unresolved") return;
+          if (!userCanSeeAll && rec.userId !== user.uid) return;
+          activeRelevant.push(rec);
+
+          const ts = Number(rec.failedAt || rec.conflictDetectedAt || rec.billDate) || 0;
+          if (!notifiedIds.has(rec.id)) {
+            notifiedIds.add(rec.id);
+            notifiedChanged = true;
+            const alreadyNative = wasNativeAlertHandled("conflict", rec.id, ts);
+            markNativeAlertHandled("conflict", rec.id, ts || Date.now());
+            // Notify immediately for live conflicts (or conflicts from last 2 minutes) if not already posted natively
+            if (!alreadyNative && (!isFirstSnapshot || ts >= Date.now() - 120000)) {
+              showLocalNotification(
+                `⚠️ Offline Bill #${String(rec.billId || "").slice(-5)} Conflict`,
+                `Stock conflict (₹${formatPrice(rec.total)}) by ${rec.userName || "Staff"}. Tap to review.`,
+                "/pwa-192x192.png",
+                `offline_conflict_${rec.id}`
+              );
+            }
+          } else {
+            markNativeAlertHandled("conflict", rec.id, ts || Date.now());
+          }
+        });
+
+        if (notifiedChanged) {
+          saveIdSet(storageKey, notifiedIds);
+        }
+
+        // Keep modal/banner state synced with any unresolved conflicts not dismissed locally
+        const modalCandidates = activeRelevant
+          .filter((c) => !dismissedIds.has(c.id))
+          .sort(
+            (a, b) =>
+              (Number(b.failedAt || b.conflictDetectedAt || b.billDate) || 0) -
+              (Number(a.failedAt || a.conflictDetectedAt || a.billDate) || 0)
+          );
+        setOfflineConflictAlerts((prev) => {
+          const byId = new Map<string, SyncConflictRecord>();
+          modalCandidates.forEach((c) => byId.set(c.id, c));
+          // Drop resolved items; preserve order of still-unresolved local items
+          const prevStillUnresolved = prev.filter((p) => byId.has(p.id));
+          const merged = [...prevStillUnresolved];
+          for (const c of modalCandidates) {
+            if (!merged.some((m) => m.id === c.id)) {
+              merged.push(c);
+            }
+          }
+          return merged;
+        });
+
+        isFirstSnapshot = false;
+      },
+      () => {}
+    );
+
+    return () => unsubscribe();
+  }, [user?.uid, isAdmin, isRealAdmin]);
+
+  // Real-time cross-device stock_alerts_feed listener so alerts from other devices ring immediately
+  useEffect(() => {
+    if (!user?.uid) return;
+    const uid = user.uid;
+    const deviceId = getDeviceId();
+    const notifiedKey = `notified_stock_events_v2_${uid}`;
+    let firstSnap = true;
+
+    const readNotified = (): Set<string> => {
+      try {
+        const raw = localStorage.getItem(notifiedKey);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) return new Set(parsed.map(String));
+        }
+      } catch {}
+      return new Set();
+    };
+
+    const unsub = onSnapshot(
+      doc(db, "settings", "stock_alerts_feed"),
+      (snap) => {
+        if (!snap.exists()) {
+          firstSnap = false;
+          return;
+        }
+        const data = snap.data();
+        const alerts: any[] = Array.isArray(data?.latestAlerts) ? data.latestAlerts : [];
+        const cutoff = Date.now() - 86400000;
+        const known = readNotified();
+        let changed = false;
+
+        for (const ev of alerts) {
+          if (!ev || !ev.id) continue;
+          const ts = Number(ev.timestamp) || 0;
+          if (ts <= cutoff) continue;
+          const evId = String(ev.id);
+          const prodId = String(ev.productId || "");
+          const stock = Math.max(0, Number(ev.stock) || 0);
+          const type = (ev.type || "low_stock") as "out_of_stock" | "critical_low" | "low_stock";
+          const canonicalKey = prodId ? buildCanonicalStockKey(type, prodId, stock) : evId;
+
+          const alreadyHandledNative =
+            wasNativeAlertHandled("stock", evId, ts) ||
+            wasNativeAlertHandled("stock", canonicalKey, ts);
+          markNativeAlertHandled("stock", evId, ts);
+          if (prodId) {
+            markNativeAlertHandled("stock", canonicalKey, ts);
+          }
+
+          if (known.has(evId)) continue;
+          known.add(evId);
+          changed = true;
+
+          // Do not double-notify the initiating device, stale events on cold boot, or alerts already handled locally/natively
+          const fromSelf = Boolean(ev.sourceDeviceId && ev.sourceDeviceId === deviceId);
+          const recentlyHandledLocal = prodId
+            ? wasStockTransitionRecentlyHandled(prodId, type, stock)
+            : false;
+          if (
+            !fromSelf &&
+            !alreadyHandledNative &&
+            !recentlyHandledLocal &&
+            (!firstSnap || ts >= Date.now() - 120000)
+          ) {
+            if (prodId) {
+              markStockTransitionHandled(prodId, type, stock);
+            }
+            const name = ev.productName || "Product";
+            const title =
+              type === "out_of_stock"
+                ? "🚫 Out of Stock Alert"
+                : type === "critical_low"
+                ? "⚠️ Critical Low Stock"
+                : "📉 Low Stock Alert";
+            const body =
+              type === "out_of_stock"
+                ? `"${name}" just ran out of stock (0 left)!`
+                : `"${name}" has only ${stock} unit${stock === 1 ? "" : "s"} left!`;
+            showLocalNotification(title, body, "/pwa-192x192.png", canonicalKey).catch(() => {});
+          }
+        }
+
+        if (changed) {
+          try {
+            localStorage.setItem(notifiedKey, JSON.stringify(Array.from(known).slice(-250)));
+          } catch {}
+        }
+        firstSnap = false;
+      },
+      () => {}
+    );
+
+    return () => unsub();
+  }, [user?.uid]);
 
   const getDismissedKey = (uid?: string) =>
     uid ? `dismissedSecurityMessageTime_${uid}` : user ? `dismissedSecurityMessageTime_${user.uid}` : "dismissedSecurityMessageTime";
@@ -319,6 +582,17 @@ function AppContent() {
     setDismissedMessageTime(userDismissed);
     lastNotifiedRef.current = userNotified;
   }, [user?.uid]);
+
+  // Synchronize auth role & deviceId into Android native SharedPreferences so background worker honors role, sender, and device boundaries
+  useEffect(() => {
+    syncNativeNotificationContext(
+      user?.uid || "",
+      user?.email || "",
+      Boolean(isAdmin),
+      Boolean(isRealAdmin),
+      getDeviceId()
+    );
+  }, [user?.uid, user?.email, isAdmin, isRealAdmin]);
 
   const getNotifiedSecurityIdsKey = (uid?: string) =>
     uid ? `notified_security_ids_${uid}` : user ? `notified_security_ids_${user.uid}` : "notified_security_ids";
@@ -427,6 +701,7 @@ function AppContent() {
         // Check if already acknowledged
         if (Array.isArray(data?.acknowledgedBy) && data.acknowledgedBy.includes(currentUid)) {
           setBroadcastNotification(null);
+          markNativeAlertHandled("broadcast", `admin_broadcast_${ts}`, ts);
           return;
         }
         const dismissedTs = parseInt(
@@ -435,6 +710,7 @@ function AppContent() {
         );
         if (ts <= dismissedTs) {
           setBroadcastNotification(null);
+          markNativeAlertHandled("broadcast", `admin_broadcast_${ts}`, ts);
           return;
         }
 
@@ -443,15 +719,18 @@ function AppContent() {
           parseInt(localStorage.getItem(getNotifiedBroadcastKey(currentUid)) || "0", 10),
           lastBroadcastNotifiedRef.current
         );
+        const broadcastKey = `admin_broadcast_${ts}`;
+        const alreadyNative = wasNativeAlertHandled("broadcast", broadcastKey, ts);
+        markNativeAlertHandled("broadcast", broadcastKey, ts);
         if (ts > lastNotified) {
           lastBroadcastNotifiedRef.current = ts;
           localStorage.setItem(getNotifiedBroadcastKey(currentUid), ts.toString());
-          if (ts >= appMountTimeRef.current - 120000) {
+          if (!alreadyNative && ts >= appMountTimeRef.current - 120000) {
             showLocalNotification(
               `🔔 ${data.title || "Admin Announcement"}`,
               data.message || "",
               "/pwa-192x192.png",
-              `admin_broadcast_${ts}`
+              broadcastKey
             );
           }
         }
@@ -616,16 +895,18 @@ function AppContent() {
       } else {
         unreadEvents.forEach((ev, idx) => {
           const evId = String(ev.alertId || ev.id || `ev_${ev.timestamp}`);
+          const ts = Number(ev.timestamp) || Date.now();
+          const alreadyNative = wasNativeAlertHandled("security", evId, ts);
+          markNativeAlertHandled("security", evId, ts);
           if (!notifiedSet.has(evId)) {
             notifiedSet.add(evId);
             setModified = true;
-            const ts = Number(ev.timestamp) || Date.now();
             if (ts > lastNotifiedRef.current) {
               lastNotifiedRef.current = ts;
               localStorage.setItem(getNotifiedKey(currentUid), ts.toString());
             }
-            // Only fire system push notification for live events that occurred while this session is active
-            if (ts >= appMountTimeRef.current - 15000) {
+            // Only fire system push notification for live events that occurred while this session is active and not yet posted natively
+            if (!alreadyNative && ts >= appMountTimeRef.current - 15000) {
               const breachNum = ev.breachCount || idx + 1;
               const msg =
                 ev.type === "pin_login_bypass"
@@ -765,6 +1046,9 @@ function AppContent() {
     let workerUrl: string | null = null;
 
     const syncContextToServiceWorker = async () => {
+      // On native Android, BuzzRealtimeSyncService + BuzzNotificationWorker own background polling;
+      // keep Service Worker disabled so web SW never fires duplicate notifications.
+      if (Capacitor.isNativePlatform()) return;
       if (!("serviceWorker" in navigator)) return;
       try {
         const reg = await navigator.serviceWorker.getRegistration();
@@ -780,6 +1064,12 @@ function AppContent() {
 
         const storageKey = `notifications_${user.uid}`;
         const notificationsEnabled = localStorage.getItem(storageKey) !== "false";
+        try {
+          const nativeExporter = (window as any).AndroidExporter;
+          if (nativeExporter && typeof nativeExporter.setNotificationsEnabled === "function") {
+            nativeExporter.setNotificationsEnabled(Boolean(notificationsEnabled));
+          }
+        } catch {}
         const notifiedSecurityIds = (() => {
           try {
             return JSON.parse(localStorage.getItem(getNotifiedSecurityIdsKey(user.uid)) || "[]");
@@ -857,6 +1147,8 @@ function AppContent() {
             lastBroadcastNotifiedRef.current
           );
 
+          const broadcastKey = `admin_broadcast_${ts}`;
+          const alreadyNative = wasNativeAlertHandled("broadcast", broadcastKey, ts);
           if (
             ts > cutoff &&
             data?.senderUid !== uid &&
@@ -867,13 +1159,14 @@ function AppContent() {
           ) {
             lastBroadcastNotifiedRef.current = ts;
             localStorage.setItem(getNotifiedBroadcastKey(uid), ts.toString());
+            markNativeAlertHandled("broadcast", broadcastKey, ts);
             setBroadcastNotification(data);
-            if (ts >= appMountTimeRef.current - 60000) {
+            if (!alreadyNative && ts >= appMountTimeRef.current - 60000) {
               showLocalNotification(
                 `🔔 ${data.title || "Admin Announcement"}`,
                 data.message || "",
                 "/pwa-192x192.png",
-                `admin_broadcast_${ts}`
+                broadcastKey
               );
             }
           }
@@ -909,7 +1202,7 @@ function AppContent() {
       workerUrl = URL.createObjectURL(blob);
       bgWorker = new Worker(workerUrl);
       bgWorker.onmessage = () => {
-        if (document.visibilityState === "hidden") {
+        if (document.visibilityState === "hidden" && !Capacitor.isNativePlatform()) {
           pollBackgroundAlertsNative().catch(() => {});
           syncContextToServiceWorker().then(() => {
             if ("serviceWorker" in navigator) {
@@ -1164,6 +1457,12 @@ function AppContent() {
 
         const storageKey = `notifications_${user.uid}`;
         const notificationsEnabled = localStorage.getItem(storageKey) !== "false";
+        try {
+          const nativeExporter = (window as any).AndroidExporter;
+          if (nativeExporter && typeof nativeExporter.setNotificationsEnabled === "function") {
+            nativeExporter.setNotificationsEnabled(Boolean(notificationsEnabled));
+          }
+        } catch {}
         if (notificationsEnabled) {
           const sampleNames = overdueList
             .slice(0, 3)
@@ -1220,6 +1519,69 @@ function AppContent() {
       window.dispatchEvent(new Event("openAdminBuyCosts"));
     }, 60);
   };
+
+  // Intercept Android hardware back button for global overlays (conflicts, broadcasts, buy-cost reminder, optional update)
+  useEffect(() => {
+    const hasOpenOverlay =
+      offlineConflictAlerts.length > 0 ||
+      Boolean(
+        broadcastNotification &&
+          broadcastNotification.timestamp > dismissedBroadcastTime
+      ) ||
+      (overdueUnsetBuyCostProducts.length > 0 && !buyCostReminderDismissedToday) ||
+      Boolean(
+        isOutdated &&
+          latestRelease &&
+          (!passedThisSession || !canPassUpdate) &&
+          canPassUpdate &&
+          !downloadState.isDownloading
+      );
+
+    if (!hasOpenOverlay) return;
+
+    const handleAndroidBack = (e: Event) => {
+      if (offlineConflictAlerts.length > 0) {
+        e.preventDefault();
+        if (!isRetryingConflicts) dismissTopConflictAlert();
+      } else if (
+        broadcastNotification &&
+        broadcastNotification.timestamp > dismissedBroadcastTime
+      ) {
+        e.preventDefault();
+        handleDismissBroadcastNotification(broadcastNotification);
+      } else if (
+        overdueUnsetBuyCostProducts.length > 0 &&
+        !buyCostReminderDismissedToday
+      ) {
+        e.preventDefault();
+        handleDismissBuyCostReminderToday();
+      } else if (
+        isOutdated &&
+        latestRelease &&
+        !passedThisSession &&
+        canPassUpdate &&
+        !downloadState.isDownloading
+      ) {
+        e.preventDefault();
+        passUpdateThisTime();
+      }
+    };
+
+    window.addEventListener("androidBackPress", handleAndroidBack);
+    return () => window.removeEventListener("androidBackPress", handleAndroidBack);
+  }, [
+    offlineConflictAlerts,
+    isRetryingConflicts,
+    broadcastNotification,
+    dismissedBroadcastTime,
+    overdueUnsetBuyCostProducts,
+    buyCostReminderDismissedToday,
+    isOutdated,
+    latestRelease,
+    passedThisSession,
+    canPassUpdate,
+    downloadState.isDownloading,
+  ]);
 
   // Safety max timeout so offline startup never holds the native splash screen indefinitely
   useEffect(() => {
@@ -1480,7 +1842,9 @@ function AppContent() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setOfflineConflictAlerts((prev) => prev.slice(1))}
+              onClick={() => {
+                dismissTopConflictAlert();
+              }}
               className="absolute inset-0 bg-slate-950/75 backdrop-blur-md"
             />
             {(() => {
@@ -1546,7 +1910,9 @@ function AppContent() {
                     <button
                       type="button"
                       disabled={isRetryingConflicts}
-                      onClick={() => setOfflineConflictAlerts((prev) => prev.slice(1))}
+                      onClick={() => {
+                dismissTopConflictAlert();
+              }}
                       className="h-11 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/90 dark:hover:bg-slate-700 active:scale-95 text-slate-700 dark:text-slate-200 font-bold rounded-xl text-xs border border-slate-200/80 dark:border-slate-700/70 transition-all cursor-pointer disabled:opacity-50"
                     >
                       Understood

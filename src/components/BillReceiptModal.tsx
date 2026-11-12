@@ -75,6 +75,13 @@ function triggerIsolatedThermalPrint(bill: Bill): boolean {
     iframe.style.pointerEvents = 'none';
     document.body.appendChild(iframe);
 
+    const escapeHtml = (val: unknown) =>
+      String(val ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
     const dateStr = formatDateToDMY(bill.date);
     const timeStr = new Date(bill.date).toLocaleTimeString([], {
       hour: '2-digit',
@@ -83,23 +90,32 @@ function triggerIsolatedThermalPrint(bill: Bill): boolean {
     const shortId = bill.id?.slice(-6).toUpperCase() || '000000';
     const items = Array.isArray(bill.items) ? bill.items : [];
     const totalUnits = items.reduce((sum, i) => sum + (Number(i.quantity) || 0), 0);
+    const itemsSubtotal = items.reduce(
+      (sum, i) => sum + (Number(i.quantity) || 0) * (Number(i.price) || 0),
+      0
+    );
+    const discountAmount = Math.max(0, Number((bill as any).discount) || 0);
+    const cashierName = String((bill as any).userName || (bill as any).billerName || '').trim();
+    const statusLabel = bill.isUdhar
+      ? 'UDHAR DUE'
+      : bill.status === 'on_hold'
+      ? 'ON HOLD'
+      : 'PAID';
+    const statusClass = bill.isUdhar || bill.status === 'on_hold' ? 'status-outline' : 'status-solid';
 
     const rowsHtml = items
       .map((item) => {
         const qty = Number(item.quantity) || 0;
         const price = Number(item.price) || 0;
         const lineTotal = formatPrice(qty * price);
-        const safeName = String(item.name || 'Item')
-          .replace(/&/g, '&amp;')
-          .replace(/</g, '&lt;')
-          .replace(/>/g, '&gt;');
+        const safeName = escapeHtml(item.name || 'Item');
         return `
           <tr>
             <td class="item-name">
-              <div>${safeName}</div>
-              <div class="item-sub">₹${formatPrice(price)} each</div>
+              <div class="item-title">${safeName}</div>
+              <div class="item-sub">${qty} × ₹${formatPrice(price)}</div>
             </td>
-            <td class="item-qty">${qty}</td>
+            <td class="item-qty"><span class="qty-pill">${qty}</span></td>
             <td class="item-amt">₹${lineTotal}</td>
           </tr>
         `;
@@ -110,7 +126,7 @@ function triggerIsolatedThermalPrint(bill: Bill): boolean {
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Receipt #${shortId}</title>
+  <title>SmartRooti Receipt #${shortId}</title>
   <style>
     @page {
       size: 80mm auto;
@@ -122,149 +138,244 @@ function triggerIsolatedThermalPrint(bill: Bill): boolean {
       padding: 0;
     }
     body {
-      font-family: 'JetBrains Mono', 'Courier New', Courier, monospace;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
       background: #ffffff;
       color: #000000;
       width: 100%;
       max-width: 76mm;
       margin: 0 auto;
-      padding: 6px 4px 16px;
-      font-size: 12px;
+      padding: 8px 4px 20px;
+      font-size: 11.5px;
       line-height: 1.4;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
+    .mono {
+      font-family: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Courier New', monospace;
+      font-variant-numeric: tabular-nums;
+    }
     .header {
       text-align: center;
-      padding-bottom: 8px;
-      border-bottom: 1px dashed #000;
-      margin-bottom: 8px;
+      padding-bottom: 10px;
+      margin-bottom: 10px;
+      border-bottom: 2px solid #000;
     }
     .brand {
-      font-size: 18px;
+      font-size: 22px;
+      font-weight: 900;
+      letter-spacing: -0.4px;
+      line-height: 1.1;
+    }
+    .sub-pill {
+      display: inline-block;
+      margin-top: 4px;
+      padding: 2px 8px;
+      border: 1px solid #000;
+      border-radius: 999px;
+      font-size: 8.5px;
       font-weight: 800;
-      letter-spacing: 0.5px;
-    }
-    .sub {
-      font-size: 10px;
       text-transform: uppercase;
-      letter-spacing: 1px;
-      margin-top: 2px;
+      letter-spacing: 1.2px;
     }
-    .meta {
-      font-size: 11px;
-      padding-bottom: 8px;
-      border-bottom: 1px dashed #000;
-      margin-bottom: 8px;
+    .meta-box {
+      border: 1.25px solid #000;
+      border-radius: 6px;
+      padding: 7px 9px;
+      margin-bottom: 10px;
+      background: #fafafa;
+    }
+    .meta-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 5px;
+      margin-bottom: 5px;
+      border-bottom: 1px dashed #666;
+    }
+    .receipt-id {
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .status-solid {
+      background: #000;
+      color: #fff;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.8px;
+    }
+    .status-outline {
+      border: 1.5px solid #000;
+      color: #000;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.8px;
     }
     .meta-row {
       display: flex;
       justify-content: space-between;
+      gap: 8px;
+      font-size: 10.5px;
       margin-bottom: 2px;
+    }
+    .meta-row:last-child {
+      margin-bottom: 0;
+    }
+    .meta-label {
+      color: #444;
+      font-weight: 600;
     }
     table {
       width: 100%;
       border-collapse: collapse;
-      margin-bottom: 8px;
+      margin-bottom: 10px;
     }
     th {
-      font-size: 10px;
+      font-size: 9.5px;
+      font-weight: 800;
       text-transform: uppercase;
-      border-bottom: 1px dashed #000;
-      padding-bottom: 4px;
+      letter-spacing: 0.6px;
+      border-top: 1.5px solid #000;
+      border-bottom: 1.5px solid #000;
+      padding: 5px 0;
       text-align: left;
     }
-    th.qty { text-align: center; width: 36px; }
-    th.amt { text-align: right; width: 72px; }
+    th.qty { text-align: center; width: 38px; }
+    th.amt { text-align: right; width: 74px; }
     td {
-      padding: 5px 0;
+      padding: 6px 0;
       vertical-align: top;
-      border-bottom: 1px dotted #ccc;
+      border-bottom: 1px dotted #999;
+    }
+    tr:last-child td {
+      border-bottom: none;
     }
     td.item-name {
-      font-weight: 600;
       padding-right: 6px;
       word-break: break-word;
     }
+    .item-title {
+      font-weight: 700;
+      font-size: 11.5px;
+      line-height: 1.25;
+    }
     .item-sub {
-      font-size: 10px;
-      font-weight: 400;
-      color: #333;
+      font-size: 9.5px;
+      color: #444;
+      margin-top: 1px;
+      font-family: 'JetBrains Mono', monospace;
     }
     td.item-qty {
       text-align: center;
-      font-weight: 600;
+      padding-top: 6px;
+    }
+    .qty-pill {
+      display: inline-block;
+      min-width: 22px;
+      padding: 1px 5px;
+      border: 1px solid #888;
+      border-radius: 4px;
+      font-size: 10.5px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
     }
     td.item-amt {
       text-align: right;
-      font-weight: 700;
+      font-weight: 800;
+      font-size: 11.5px;
       white-space: nowrap;
+      font-family: 'JetBrains Mono', monospace;
     }
-    .totals {
-      border-top: 1px dashed #000;
-      padding-top: 6px;
-      margin-top: 4px;
+    .summary {
+      border-top: 1.5px dashed #000;
+      padding-top: 7px;
     }
-    .total-row {
+    .sum-row {
       display: flex;
       justify-content: space-between;
       font-size: 11px;
       margin-bottom: 3px;
     }
-    .grand-total {
+    .grand-box {
+      margin-top: 6px;
+      padding: 8px 10px;
+      border: 2px solid #000;
+      border-radius: 6px;
+      background: #f2f2f2;
       display: flex;
       justify-content: space-between;
-      font-size: 15px;
-      font-weight: 800;
-      border-top: 1px solid #000;
-      border-bottom: 1px dashed #000;
-      padding: 6px 0;
-      margin-top: 4px;
+      align-items: center;
+    }
+    .grand-label {
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+    }
+    .grand-val {
+      font-size: 17px;
+      font-weight: 900;
     }
     .footer {
       text-align: center;
-      font-size: 10px;
       margin-top: 12px;
+      padding-top: 8px;
+      border-top: 1px dashed #666;
+    }
+    .thanks {
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .foot-meta {
+      font-size: 9px;
+      color: #444;
+      margin-top: 3px;
     }
   </style>
 </head>
 <body>
   <div class="header">
-    <div class="brand">SMART POS</div>
-    <div class="sub">Official Sales Receipt</div>
+    <div class="brand">SmartRooti</div>
+    <div class="sub-pill">Official Sales Receipt</div>
   </div>
-  <div class="meta">
-    <div class="meta-row"><span>Receipt No:</span><strong>#${shortId}</strong></div>
-    <div class="meta-row"><span>Date:</span><span>${dateStr} ${timeStr}</span></div>
-    <div class="meta-row"><span>Status:</span><strong>${bill.isUdhar ? 'UDHAR (UNPAID)' : bill.status === 'on_hold' ? 'ON HOLD' : 'PAID'}</strong></div>
-    ${bill.isUdhar && bill.customerName ? `<div class="meta-row"><span>Customer:</span><strong>${String(bill.customerName).replace(/</g, '&lt;')}</strong></div>` : ''}
-    ${bill.isUdhar && bill.customerPhone ? `<div class="meta-row"><span>Phone:</span><span>${String(bill.customerPhone).replace(/</g, '&lt;')}</span></div>` : ''}
-    <div class="meta-row"><span>Items:</span><span>${items.length} (${totalUnits} units)</span></div>
+  <div class="meta-box">
+    <div class="meta-top">
+      <span class="receipt-id mono">#${shortId}</span>
+      <span class="${statusClass}">${statusLabel}</span>
+    </div>
+    <div class="meta-row"><span class="meta-label">Date &amp; Time</span><span class="mono">${dateStr} · ${timeStr}</span></div>
+    <div class="meta-row"><span class="meta-label">Items</span><span class="mono">${items.length} (${totalUnits} units)</span></div>
+    ${cashierName ? `<div class="meta-row"><span class="meta-label">Billed By</span><strong>${escapeHtml(cashierName)}</strong></div>` : ''}
+    ${bill.customerName ? `<div class="meta-row"><span class="meta-label">Customer</span><strong>${escapeHtml(bill.customerName)}</strong></div>` : ''}
+    ${bill.customerPhone ? `<div class="meta-row"><span class="meta-label">Phone</span><span class="mono">${escapeHtml(bill.customerPhone)}</span></div>` : ''}
   </div>
   <table>
     <thead>
       <tr>
-        <th>Item</th>
+        <th>Item Details</th>
         <th class="qty">Qty</th>
-        <th class="amt">Total</th>
+        <th class="amt">Amount</th>
       </tr>
     </thead>
     <tbody>
       ${rowsHtml}
     </tbody>
   </table>
-  <div class="totals">
-    <div class="total-row">
-      <span>Total Qty</span>
-      <span>${totalUnits} units</span>
-    </div>
-    <div class="grand-total">
-      <span>${bill.isUdhar ? 'UDHAR DUE' : 'TOTAL PAID'}</span>
-      <span>₹${formatPrice(bill.total)}</span>
+  <div class="summary">
+    ${discountAmount > 0 ? `<div class="sum-row"><span>Items Subtotal</span><span class="mono">₹${formatPrice(itemsSubtotal)}</span></div>` : ''}
+    ${discountAmount > 0 ? `<div class="sum-row"><span>Discount</span><span class="mono">-₹${formatPrice(discountAmount)}</span></div>` : ''}
+    <div class="sum-row"><span>Total Quantity</span><span class="mono">${totalUnits} units</span></div>
+    <div class="grand-box">
+      <span class="grand-label">${bill.isUdhar ? 'Udhar Due' : bill.status === 'on_hold' ? 'Hold Total' : 'Total Paid'}</span>
+      <span class="grand-val mono">₹${formatPrice(bill.total)}</span>
     </div>
   </div>
   <div class="footer">
-    <div>Thank you for your business!</div>
+    <div class="thanks">Thank you for shopping with SmartRooti!</div>
+    <div class="foot-meta mono">Receipt #${shortId} · Please keep for your records</div>
   </div>
 </body>
 </html>`;
@@ -1189,38 +1300,56 @@ export function BillReceiptModal({
       </motion.div>
 
       {/* Fallback Print-Only DOM Node for environments that invoke window.print() directly */}
-      <div className="hidden print-only text-black bg-white p-4 font-mono w-full max-w-[300px] mx-auto text-sm">
-        <div className="text-center font-bold text-xl mb-1">SMART POS</div>
-        <div className="text-center text-xs mb-4">Official Sales Receipt</div>
-
-        <div className="text-xs mb-4 border-b border-black pb-2 border-dashed">
-          <div>Date: {new Date(selectedBill.date).toLocaleString()}</div>
-          <div>Receipt No: #{shortId}</div>
+      <div className="hidden print-only text-black bg-white p-4 font-sans w-full max-w-[300px] mx-auto text-sm">
+        <div className="text-center border-b-2 border-black pb-2 mb-3">
+          <div className="font-black text-2xl tracking-tight">SmartRooti</div>
+          <div className="inline-block border border-black rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest mt-1">
+            Official Sales Receipt
+          </div>
         </div>
 
-        <div className="mb-4">
-          <div className="flex font-bold text-xs border-b border-black pb-1 mb-2 border-dashed">
-            <div className="flex-1">Item</div>
+        <div className="text-xs mb-3 border border-black rounded p-2 space-y-0.5">
+          <div className="flex justify-between font-bold border-b border-dashed border-black pb-1 mb-1">
+            <span>#{shortId}</span>
+            <span>{selectedBill.isUdhar ? 'UDHAR DUE' : selectedBill.status === 'on_hold' ? 'ON HOLD' : 'PAID'}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>Date:</span>
+            <span className="font-mono">{formatDateToDMY(selectedBill.date)}</span>
+          </div>
+          {selectedBill.customerName && (
+            <div className="flex justify-between">
+              <span>Customer:</span>
+              <span className="font-bold">{selectedBill.customerName}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="mb-3">
+          <div className="flex font-bold text-[10px] uppercase border-y border-black py-1 mb-1.5">
+            <div className="flex-1">Item Details</div>
             <div className="w-10 text-center">Qty</div>
             <div className="w-16 text-right">Amount</div>
           </div>
           {(selectedBill.items || []).map((item, idx) => (
-            <div key={idx} className="flex text-xs mb-1">
-              <div className="flex-1 pr-1 truncate">{item.name}</div>
-              <div className="w-10 text-center">{item.quantity}</div>
-              <div className="w-16 text-right">
-                {((Number(item.quantity) || 0) * (Number(item.price) || 0)).toFixed(2)}
+            <div key={idx} className="flex text-xs py-1 border-b border-dotted border-slate-400">
+              <div className="flex-1 pr-1 truncate font-semibold">{item.name}</div>
+              <div className="w-10 text-center font-mono">{item.quantity}</div>
+              <div className="w-16 text-right font-mono font-bold">
+                ₹{formatPrice((Number(item.quantity) || 0) * (Number(item.price) || 0))}
               </div>
             </div>
           ))}
         </div>
 
-        <div className="flex font-bold border-t border-black pt-2 border-dashed text-sm">
-          <div className="flex-1 text-right pr-2">TOTAL PAID:</div>
-          <div>₹{(Number(selectedBill.total) || 0).toFixed(2)}</div>
+        <div className="flex justify-between items-center font-black border-2 border-black rounded px-2.5 py-2 text-sm">
+          <span>{selectedBill.isUdhar ? 'UDHAR DUE' : 'TOTAL PAID'}</span>
+          <span className="font-mono text-base">₹{formatPrice(Number(selectedBill.total) || 0)}</span>
         </div>
 
-        <div className="text-center text-xs mt-6 pb-4">Thank you for your business!</div>
+        <div className="text-center text-[11px] font-bold mt-4 pb-4">
+          Thank you for shopping with SmartRooti!
+        </div>
       </div>
     </div>
   );

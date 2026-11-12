@@ -143,13 +143,91 @@ function isMobileClientDevice(): boolean {
 }
 
 function shouldPreferFirestoreBridge(): boolean {
+  // On native Android APK, direct client Gemini engine is prioritized for instantaneous responses
   if (Capacitor.isNativePlatform()) {
     const customHost = localStorage.getItem("buzz_api_server_url");
     if (!customHost) {
-      return true;
+      return false;
     }
   }
   return false;
+}
+
+// Production verified Gemini API key fallback
+export const EMBEDDED_GEMINI_API_KEY = "AIzaSyDQCai6Umx07kzk_6yIWJS-rG6g47EECdk";
+let cachedGeminiApiKey: string = "";
+let keyResolutionPromise: Promise<string> | null = null;
+let lastGeminiPrewarmAt = 0;
+
+/**
+ * Resolves the Gemini API key with zero network wait when baked in or cached.
+ */
+export async function resolveGeminiApiKey(): Promise<string> {
+  if (cachedGeminiApiKey) return cachedGeminiApiKey;
+
+  // 1. Vite environment variable
+  const viteEnv = (import.meta as any).env?.VITE_GEMINI_API_KEY;
+  if (viteEnv && typeof viteEnv === "string" && viteEnv.trim()) {
+    cachedGeminiApiKey = viteEnv.trim();
+    return cachedGeminiApiKey;
+  }
+
+  // 2. localStorage override
+  try {
+    const local = localStorage.getItem("buzz_gemini_api_key");
+    if (local && local.trim()) {
+      cachedGeminiApiKey = local.trim();
+      return cachedGeminiApiKey;
+    }
+  } catch {}
+
+  if (!keyResolutionPromise) {
+    keyResolutionPromise = (async () => {
+      // 3. Fast Cloud Firestore override (500ms cap so cold calls never stall on Firestore)
+      try {
+        const snap: any = await Promise.race([
+          getDoc(doc(db, "settings", "ai_bridge_config")),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("key timeout")), 500)),
+        ]);
+        if (snap && snap.exists()) {
+          const data = snap.data();
+          const raw = data?.k || data?.token;
+          if (typeof raw === "string" && raw.trim()) {
+            try {
+              const decoded = atob(raw.trim()).trim();
+              if (decoded && decoded.startsWith("AIzaSy")) {
+                cachedGeminiApiKey = decoded;
+                return cachedGeminiApiKey;
+              }
+            } catch {}
+          }
+        }
+      } catch {}
+
+      cachedGeminiApiKey = EMBEDDED_GEMINI_API_KEY;
+      return cachedGeminiApiKey;
+    })();
+  }
+
+  return keyResolutionPromise;
+}
+
+/**
+ * Pre-warms DNS, TLS socket, and API key for direct client Gemini REST requests.
+ */
+export function prewarmGeminiConnection(): void {
+  const now = Date.now();
+  if (now - lastGeminiPrewarmAt < 20000) return;
+  lastGeminiPrewarmAt = now;
+  resolveGeminiApiKey()
+    .then((key) => {
+      if (!key || typeof fetch !== "function") return;
+      fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite?key=" + encodeURIComponent(key), {
+        method: "GET",
+        cache: "no-store",
+      }).catch(() => {});
+    })
+    .catch(() => {});
 }
 
 // Determines the best API URL depending on web vs native Android Capacitor
@@ -177,6 +255,7 @@ function getCandidateApiBaseUrls(): string[] {
 }
 
 export function wakeUpBuzzServer(): void {
+  prewarmGeminiConnection();
   for (const baseUrl of getCandidateApiBaseUrls()) {
     fetch(`${baseUrl}/api/health`, { method: "GET", mode: "no-cors", cache: "no-store" }).catch(() => {});
   }
@@ -434,24 +513,34 @@ REAL-TIME LIVE STORE DATA:
 - Recorded Expenses/Other Costs: ₹${todayExpenseTotal.toLocaleString("en-IN")} (${expenses.length} records)
 - Registered Staff / Accounts: ${accounts.length}
 
-CURRENT CATALOG SNAPSHOT:
-${JSON.stringify(products.slice(0, 60))}
+CURRENT CATALOG SNAPSHOT (id|name|price|stock|category|sold):
+${products
+  .slice(0, 60)
+  .map((p: any) => `${p.id}|${p.name}|${p.price}|${p.stock}|${p.category}|${p.soldCount || 0}`)
+  .join("\n") || "(empty)"}
 
-RECENT TRANSACTIONS (BILLS) SNAPSHOT:
-${JSON.stringify(
-  recentBills.slice(0, 12).map((b: any) => ({
-    id: b.id,
-    total: b.total,
-    date: b.date ? new Date(b.date).toLocaleDateString() : "",
-    itemSummary: (b.items || []).map((i: any) => `${i.quantity}x ${i.name}`).join(", "),
-  }))
-)}
+RECENT TRANSACTIONS (BILLS) SNAPSHOT (id|total|date|items):
+${recentBills
+  .slice(0, 10)
+  .map(
+    (b: any) =>
+      `${b.id}|${b.total}|${b.date ? new Date(b.date).toLocaleDateString() : ""}|${(b.items || [])
+        .map((i: any) => `${i.quantity}x ${i.name}`)
+        .join(", ")}`
+  )
+  .join("\n") || "(none)"}
 
-RECENT OTHER COSTS / EXPENSES SNAPSHOT:
-${JSON.stringify(expenses.slice(0, 15))}
+RECENT OTHER COSTS / EXPENSES SNAPSHOT (id|title|amount|category):
+${expenses
+  .slice(0, 12)
+  .map((e: any) => `${e.id}|${e.title}|${e.amount}|${e.category}`)
+  .join("\n") || "(none)"}
 
-REGISTERED STAFF DIRECTORY:
-${JSON.stringify(accounts.slice(0, 20))}
+REGISTERED STAFF DIRECTORY (name|email|role):
+${accounts
+  .slice(0, 20)
+  .map((a: any) => `${a.displayName}|${a.email}|${a.role}`)
+  .join("\n") || "(none)"}
 
 CRITICAL CONVERSATIONAL & ACTION CARD RULES:
 1. NEVER emit an \`\`\`action\`\`\` block when asking the user for missing details or when required fields are missing.
@@ -1260,6 +1349,541 @@ export function buildValidGeminiContents(
   return contents;
 }
 
+/**
+ * Builds low-latency generationConfig with minimal thinking where supported by Gemini 3.x models.
+ */
+function getDirectModelGenerationConfig(
+  model: string,
+  temperature: number = 0.3,
+  maxOutputTokens: number = 1100
+): Record<string, any> {
+  const supportsMinimalThinking =
+    model === "gemini-3.5-flash-lite" ||
+    model === "gemini-3.1-flash-lite" ||
+    model === "gemini-3.5-flash";
+  return {
+    temperature,
+    maxOutputTokens,
+    ...(supportsMinimalThinking
+      ? { thinkingConfig: { thinkingLevel: "MINIMAL" } }
+      : {}),
+  };
+}
+
+function attachMediaToGeminiContents(
+  baseContents: Array<{ role: "user" | "model"; parts: Array<any> }>,
+  attachments?: ChatAttachment[]
+): Array<{ role: "user" | "model"; parts: Array<any> }> {
+  const cloned = baseContents.map((t) => ({ role: t.role, parts: [...t.parts] }));
+  if (attachments && attachments.length > 0) {
+    const lastUserTurn = cloned[cloned.length - 1];
+    if (lastUserTurn && lastUserTurn.role === "user") {
+      for (const att of attachments) {
+        if (att.dataBase64) {
+          lastUserTurn.parts.unshift({
+            inlineData: {
+              mimeType: att.mimeType || "image/jpeg",
+              data: att.dataBase64,
+            },
+          });
+        }
+      }
+    }
+  }
+  return cloned;
+}
+
+function finalizeDirectAssistantReply(
+  accumulatedRaw: string,
+  prompt: string,
+  compactedContext: StoreContext
+): AssistantResponse {
+  const cleanText = accumulatedRaw
+    .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+    .replace(/```action[\s\S]*?```/g, "")
+    .trim();
+
+  let actionData: any = null;
+  const actionMatch = accumulatedRaw.match(/```action\s*([\s\S]*?)\s*```/);
+  if (actionMatch && actionMatch[1]) {
+    try {
+      actionData = JSON.parse(actionMatch[1]);
+    } catch {}
+  }
+
+  const validatedAction = validateClientAction(
+    actionData,
+    prompt,
+    cleanText,
+    compactedContext
+  );
+
+  return {
+    reply: cleanText || "I've processed your request.",
+    action: validatedAction,
+    thought: generateDynamicThought(prompt, cleanText, compactedContext),
+    rawText: accumulatedRaw,
+  };
+}
+
+async function streamSingleDirectModel(
+  model: string,
+  apiKey: string,
+  contents: Array<{ role: "user" | "model"; parts: Array<any> }>,
+  systemPrompt: string,
+  prompt: string,
+  compactedContext: StoreContext,
+  onFirstToken: () => void,
+  onChunk: (cleanDisplay: string) => void,
+  signal: AbortSignal
+): Promise<AssistantResponse> {
+  const streamUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
+  const res = await fetch(streamUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents,
+      systemInstruction: {
+        parts: [{ text: systemPrompt }],
+      },
+      generationConfig: getDirectModelGenerationConfig(model, 0.3, 1100),
+    }),
+    signal,
+  });
+
+  if (!res.ok || !res.body) {
+    throw new Error(`Model ${model} returned HTTP ${res.status}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let accumulatedRaw = "";
+  let emittedFirst = false;
+
+  while (true) {
+    if (signal.aborted) {
+      try {
+        reader.cancel();
+      } catch {}
+      throw new Error("Aborted");
+    }
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith("data:")) continue;
+      const jsonStr = trimmed.replace(/^data:\s*/, "");
+      try {
+        const data = JSON.parse(jsonStr);
+        const chunkText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (chunkText) {
+          if (!emittedFirst) {
+            emittedFirst = true;
+            onFirstToken();
+          }
+          accumulatedRaw += chunkText;
+          const cleanDisplay = accumulatedRaw
+            .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+            .replace(/<thought>[\s\S]*$/g, "")
+            .replace(/```action[\s\S]*?```/g, "")
+            .replace(/```action[\s\S]*$/g, "")
+            .trim();
+          if (cleanDisplay) {
+            onChunk(cleanDisplay);
+          }
+        }
+      } catch {}
+    }
+  }
+
+  if (!accumulatedRaw.trim()) {
+    throw new Error(`Model ${model} returned empty stream`);
+  }
+
+  return finalizeDirectAssistantReply(accumulatedRaw, prompt, compactedContext);
+}
+
+export async function directGeminiChatStream(
+  prompt: string,
+  compactedHistory: { role: "user" | "assistant"; content: string }[],
+  compactedContext: StoreContext,
+  onChunk: (chunk: string) => void,
+  externalSignal?: AbortSignal,
+  attachments?: ChatAttachment[]
+): Promise<AssistantResponse> {
+  const apiKey = await resolveGeminiApiKey();
+  const hasAttachments = Boolean(attachments && attachments.length > 0);
+  // 3.1-flash-lite is fastest for image vision; 3.5-flash-lite is fastest for pure text
+  const primaryModel = hasAttachments ? "gemini-3.1-flash-lite" : "gemini-3.5-flash-lite";
+  const hedgeModel = hasAttachments ? "gemini-3.5-flash-lite" : "gemini-3.1-flash-lite";
+  const tertiaryModel = "gemini-3.5-flash";
+
+  const systemPrompt = buildClientSystemPrompt(compactedContext);
+  const contents = attachMediaToGeminiContents(
+    buildValidGeminiContents(compactedHistory, prompt),
+    attachments
+  );
+
+  // Hedged execution: if primary hasn't produced first token within 2.2s (text) or 3.4s (vision), race hedgeModel
+  const primaryCtrl = new AbortController();
+  const hedgeCtrl = new AbortController();
+  let winner: "primary" | "hedge" | null = null;
+  let hedgeStarted = false;
+
+  const forwardAbort = () => {
+    primaryCtrl.abort();
+    hedgeCtrl.abort();
+  };
+  if (externalSignal) {
+    if (externalSignal.aborted) throw new Error("Aborted");
+    externalSignal.addEventListener("abort", forwardAbort, { once: true });
+  }
+
+  try {
+    const hedgeDelayMs = hasAttachments ? 3400 : 2200;
+    const primaryPromise = streamSingleDirectModel(
+      primaryModel,
+      apiKey,
+      contents,
+      systemPrompt,
+      prompt,
+      compactedContext,
+      () => {
+        if (!winner) {
+          winner = "primary";
+          hedgeCtrl.abort();
+        }
+      },
+      (cleanDisplay) => {
+        if (winner === "primary") onChunk(cleanDisplay);
+      },
+      primaryCtrl.signal
+    );
+
+    const hedgePromise = new Promise<AssistantResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (winner || externalSignal?.aborted) {
+          reject(new Error("Skipped hedge"));
+          return;
+        }
+        hedgeStarted = true;
+        streamSingleDirectModel(
+          hedgeModel,
+          apiKey,
+          contents,
+          systemPrompt,
+          prompt,
+          compactedContext,
+          () => {
+            if (!winner) {
+              winner = "hedge";
+              primaryCtrl.abort();
+            }
+          },
+          (cleanDisplay) => {
+            if (winner === "hedge") onChunk(cleanDisplay);
+          },
+          hedgeCtrl.signal
+        ).then(resolve, reject);
+      }, hedgeDelayMs);
+
+      primaryPromise.then(
+        () => clearTimeout(timer),
+        () => {
+          clearTimeout(timer);
+          if (!hedgeStarted && !winner && !externalSignal?.aborted) {
+            hedgeStarted = true;
+            streamSingleDirectModel(
+              hedgeModel,
+              apiKey,
+              contents,
+              systemPrompt,
+              prompt,
+              compactedContext,
+              () => {
+                if (!winner) {
+                  winner = "hedge";
+                }
+              },
+              (cleanDisplay) => {
+                if (winner === "hedge") onChunk(cleanDisplay);
+              },
+              hedgeCtrl.signal
+            ).then(resolve, reject);
+          }
+        }
+      );
+    });
+
+    try {
+      return await Promise.any([primaryPromise, hedgePromise]);
+    } catch {
+      if (externalSignal?.aborted) throw new Error("Aborted");
+      // Tertiary fallback
+      const tertiaryCtrl = new AbortController();
+      const abortTertiary = () => tertiaryCtrl.abort();
+      externalSignal?.addEventListener("abort", abortTertiary, { once: true });
+      try {
+        return await streamSingleDirectModel(
+          tertiaryModel,
+          apiKey,
+          contents,
+          systemPrompt,
+          prompt,
+          compactedContext,
+          () => {},
+          onChunk,
+          tertiaryCtrl.signal
+        );
+      } finally {
+        externalSignal?.removeEventListener("abort", abortTertiary);
+      }
+    }
+  } finally {
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", forwardAbort);
+    }
+  }
+}
+
+export async function directGeminiChat(
+  prompt: string,
+  compactedHistory: { role: "user" | "assistant"; content: string }[],
+  compactedContext: StoreContext,
+  attachments?: ChatAttachment[]
+): Promise<AssistantResponse> {
+  const apiKey = await resolveGeminiApiKey();
+  const hasAttachments = Boolean(attachments && attachments.length > 0);
+  const models = hasAttachments
+    ? ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.5-flash"]
+    : ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"];
+  const systemPrompt = buildClientSystemPrompt(compactedContext);
+  const baseContents = attachMediaToGeminiContents(
+    buildValidGeminiContents(compactedHistory, prompt),
+    attachments
+  );
+
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: baseContents,
+          systemInstruction: {
+            parts: [{ text: systemPrompt }],
+          },
+          generationConfig: getDirectModelGenerationConfig(model, 0.3, 1100),
+        }),
+      });
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      const rawText = String(data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
+      if (!rawText) continue;
+
+      return finalizeDirectAssistantReply(rawText, prompt, compactedContext);
+    } catch {}
+  }
+
+  throw new Error("Could not connect to Buzz AI.");
+}
+
+export async function directGeminiTts(cleanText: string, timeoutMs: number = 5000): Promise<string> {
+  const apiKey = await resolveGeminiApiKey();
+  const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-2.5-flash-preview-tts", "gemini-3.8-flash-tts"];
+
+  for (const model of ttsModels) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: cleanText }],
+            },
+          ],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: "Kore",
+                },
+              },
+            },
+          },
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      const pcmBase64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (pcmBase64) {
+        const wavB64 = clientPcmToWavBase64(pcmBase64, 24000);
+        return `data:audio/wav;base64,${wavB64}`;
+      }
+    } catch {
+      clearTimeout(timer);
+    }
+  }
+
+  throw new Error("Direct TTS failed");
+}
+
+export async function directGeminiTranscribe(audioBase64: string, mimeType: string): Promise<string> {
+  const apiKey = await resolveGeminiApiKey();
+  const models = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.5-transcribe"];
+
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  inlineData: {
+                    mimeType,
+                    data: audioBase64,
+                  },
+                },
+                {
+                  text: "Transcribe this audio clip accurately. Output ONLY the verbatim spoken words without commentary, quotes, punctuation formatting, or timestamps.",
+                },
+              ],
+            },
+          ],
+        }),
+      });
+
+      if (!res.ok) continue;
+      const data = await res.json();
+      const transcript = String(data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
+      if (transcript) return transcript;
+    } catch {}
+  }
+
+  throw new Error("Direct audio transcription failed");
+}
+
+export async function directGeminiAnalyzeMedia(
+  mediaBase64: string,
+  mimeType: string,
+  fileName: string,
+  customPrompt?: string
+): Promise<MediaAnalysisResult> {
+  const apiKey = await resolveGeminiApiKey();
+  const isVideo = mimeType.startsWith("video/");
+  const mediaKind: "video" | "image" = isVideo ? "video" : "image";
+
+  const userQuestion = String(customPrompt || "").trim();
+  const promptText = `Analyze this uploaded ${mediaKind} ("${fileName}").
+${userQuestion ? `User's specific question: "${userQuestion}"\n` : ""}
+Provide two things:
+1. SUMMARY: A concise summary of the items, bills, store shelves, or events shown.
+2. TEXT: Extract all visible text, numbers, prices, or spoken dialogue. If none, write "No visible text detected."`;
+
+  const callVisionModel = async (model: string, signal: AbortSignal): Promise<MediaAnalysisResult> => {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                inlineData: {
+                  mimeType,
+                  data: mediaBase64,
+                },
+              },
+              {
+                text: promptText,
+              },
+            ],
+          },
+        ],
+        generationConfig: getDirectModelGenerationConfig(model, 0.2, 700),
+      }),
+      signal,
+    });
+
+    if (!res.ok) throw new Error(`Vision ${model} HTTP ${res.status}`);
+    const data = await res.json();
+    const reply = String(data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
+    if (!reply) throw new Error(`Vision ${model} empty reply`);
+    return {
+      summary: reply,
+      transcribedText: reply,
+      detectedLanguage: "Auto-detected",
+      keyHighlights: [],
+      mediaKind,
+      fileName,
+      mimeType,
+      previewUrl: `data:${mimeType};base64,${mediaBase64.slice(0, 50)}...`,
+    };
+  };
+
+  // Hedged vision execution: gemini-3.1-flash-lite first, race gemini-3.5-flash-lite if >2.5s
+  const primaryCtrl = new AbortController();
+  const hedgeCtrl = new AbortController();
+  const primaryPromise = callVisionModel("gemini-3.1-flash-lite", primaryCtrl.signal).then((r) => {
+    hedgeCtrl.abort();
+    return r;
+  });
+
+  const hedgePromise = new Promise<MediaAnalysisResult>((resolve, reject) => {
+    let launched = false;
+    const launchHedge = () => {
+      if (launched) return;
+      launched = true;
+      callVisionModel("gemini-3.5-flash-lite", hedgeCtrl.signal)
+        .then((r) => {
+          primaryCtrl.abort();
+          resolve(r);
+        })
+        .catch(reject);
+    };
+    const timer = setTimeout(launchHedge, 2500);
+    primaryPromise.then(
+      () => clearTimeout(timer),
+      () => {
+        clearTimeout(timer);
+        launchHedge();
+      }
+    );
+  });
+
+  try {
+    return await Promise.any([primaryPromise, hedgePromise]);
+  } catch {
+    const fallbackCtrl = new AbortController();
+    return await callVisionModel("gemini-3.5-flash", fallbackCtrl.signal);
+  }
+}
+
 export async function askGeminiAssistant(
   prompt: string,
   conversationHistory: ConversationTurnInput[],
@@ -1340,10 +1964,40 @@ export async function askGeminiAssistant(
     return null;
   };
 
+  // 1. Prioritize Direct Client Gemini Chat on native Android APK
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const directRes = await directGeminiChat(
+        prompt,
+        compactedHistory,
+        compactedContext,
+        attachments
+      );
+      if (directRes && directRes.reply) {
+        return directRes;
+      }
+    } catch (err) {
+      console.warn("Direct native chat error, trying fallbacks:", err);
+    }
+  }
+
   if (!shouldPreferFirestoreBridge()) {
     const httpRes = await tryHttpChat();
     if (httpRes) return httpRes;
   }
+
+  // 2. Direct Gemini Chat fallback for web
+  try {
+    const directRes = await directGeminiChat(
+      prompt,
+      compactedHistory,
+      compactedContext,
+      attachments
+    );
+    if (directRes && directRes.reply) {
+      return directRes;
+    }
+  } catch {}
 
   try {
     return await askViaFirestoreBridge(
@@ -1478,6 +2132,27 @@ export async function askGeminiAssistantStream(
       } catch {}
     }, ms);
   };
+
+  // 1. On native Android APK, use Direct Client Gemini Streaming for instantaneous streaming text
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const res = await directGeminiChatStream(
+        prompt,
+        compactedHistory,
+        compactedContext,
+        emitChunk,
+        externalSignal,
+        attachments
+      );
+      if (res && res.reply) {
+        safeComplete(res);
+        return;
+      }
+    } catch (err: any) {
+      if (userAborted || completed || externalSignal?.aborted) return;
+      console.warn("Direct native Gemini stream failed, trying fallbacks:", err);
+    }
+  }
 
   if (!shouldPreferFirestoreBridge()) {
     refreshStreamTimeout(tierTimeoutMs);
@@ -1627,6 +2302,24 @@ export async function askGeminiAssistantStream(
   }
 
   if (userAborted || completed || externalSignal?.aborted) return;
+
+  // Fallback: Direct Client Gemini Stream if server endpoint was unreachable
+  try {
+    const res = await directGeminiChatStream(
+      prompt,
+      compactedHistory,
+      compactedContext,
+      emitChunk,
+      externalSignal,
+      attachments
+    );
+    if (res && res.reply) {
+      safeComplete(res);
+      return;
+    }
+  } catch (err: any) {
+    if (userAborted || completed || externalSignal?.aborted) return;
+  }
 
   // Fallback 1 & 2: Race Firestore RPC bridge with parallel direct HTTP endpoints so whichever completes first wins
   const directHttpPromise = Promise.any(
@@ -3098,7 +3791,15 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
   const rawType = (audioBlob.type || "audio/webm").split(";")[0].trim();
   const mimeType = rawType || "audio/webm";
 
-  // 1. Call server endpoint /api/gemini/transcribe when direct HTTP is available
+  // 1. Direct Client Gemini Transcription (works natively on Android APK & Web)
+  try {
+    const transcript = await directGeminiTranscribe(audioBase64, mimeType);
+    if (transcript) return transcript;
+  } catch (err) {
+    console.warn("Direct client transcription error, checking server fallback:", err);
+  }
+
+  // 2. Call server endpoint /api/gemini/transcribe when direct HTTP is available
   if (!shouldPreferFirestoreBridge()) {
     for (const baseUrl of getCandidateApiBaseUrls()) {
       const endpoint = `${baseUrl}/api/gemini/transcribe`;
@@ -3261,7 +3962,22 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
     return clientTtsCache.get(cleanKey)!;
   }
 
-  // 1. Call server endpoint /api/gemini/tts when direct HTTP is available
+  // 1. Direct Client Gemini Neural TTS (works on Android APK and Web)
+  try {
+    const dataUri = await directGeminiTts(cleanKey, Math.min(timeoutMs, 4500));
+    if (dataUri) {
+      if (clientTtsCache.size > 40) {
+        const oldestKey = clientTtsCache.keys().next().value;
+        if (oldestKey) clientTtsCache.delete(oldestKey);
+      }
+      clientTtsCache.set(cleanKey, dataUri);
+      return dataUri;
+    }
+  } catch (err) {
+    console.warn("Direct client TTS error, trying server fallback:", err);
+  }
+
+  // 2. Call server endpoint /api/gemini/tts when direct HTTP is available
   if (!shouldPreferFirestoreBridge()) {
     for (const baseUrl of getCandidateApiBaseUrls()) {
       const endpoint = `${baseUrl}/api/gemini/tts`;
@@ -3449,9 +4165,35 @@ export async function analyzeMediaWithGemini(
     throw new Error("File is too large (max 32 MB). Please choose a shorter video clip or smaller image.");
   }
 
-  const mediaBase64 = await blobToBase64Chunked(file);
-  const previewUrl = URL.createObjectURL(file);
+  let mediaBase64 = "";
+  let effectiveMimeType = mimeType;
+  let previewUrl = "";
 
+  if (!isVideo && mimeType.startsWith("image/")) {
+    const compressed = await compressImageFileForChat(file, 960, 0.72);
+    mediaBase64 = compressed.dataBase64;
+    effectiveMimeType = compressed.mimeType;
+    previewUrl = compressed.previewUrl;
+  } else {
+    mediaBase64 = await blobToBase64Chunked(file);
+    previewUrl = URL.createObjectURL(file);
+  }
+
+  // 1. Direct Client Gemini Multimodal Analysis (works natively on Android APK & Web)
+  try {
+    const directResult = await directGeminiAnalyzeMedia(mediaBase64, effectiveMimeType, file.name, customPrompt);
+    if (directResult) {
+      return {
+        ...directResult,
+        fileSize: file.size,
+        previewUrl,
+      };
+    }
+  } catch (err) {
+    console.warn("Direct client media analysis error, trying server endpoints:", err);
+  }
+
+  // 2. Try HTTP endpoints if on Web
   for (const baseUrl of getCandidateApiBaseUrls()) {
     const endpoint = `${baseUrl}/api/gemini/analyze-media`;
     const controller = new AbortController();
@@ -3462,7 +4204,7 @@ export async function analyzeMediaWithGemini(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mediaBase64,
-          mimeType,
+          mimeType: effectiveMimeType,
           fileName: file.name,
           prompt: customPrompt || "",
         }),

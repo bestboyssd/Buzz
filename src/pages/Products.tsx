@@ -481,14 +481,14 @@ export function Products() {
         {loading ? null : filteredProducts.length === 0 ? (
           <motion.div
             key="stock-empty-state"
-            initial={perfMode ? false : { opacity: 0, y: 14, scale: 0.97 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
+            initial={perfMode ? false : { opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
             transition={
               perfMode
                 ? { duration: 0 }
-                : { type: "spring", stiffness: 380, damping: 28 }
+                : { type: "spring", stiffness: 420, damping: 32, mass: 0.65 }
             }
-            className="bg-white dark:bg-[#1b1f2b] border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] text-center py-14 px-6 text-slate-500 flex-1 flex flex-col items-center justify-center gap-2 shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none"
+            className="bg-white dark:bg-[#1b1f2b] border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] text-center py-14 px-6 text-slate-500 flex-1 flex flex-col items-center justify-center gap-2 shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none transform-gpu"
           >
             <Package
               size={44}
@@ -525,12 +525,10 @@ export function Products() {
             )}
           </motion.div>
         ) : (
-          <motion.div
+          <div
             key="stock-list-state"
-            layout={!perfMode}
             className="space-y-3 [overflow-anchor:none]"
           >
-            <AnimatePresence mode="popLayout" initial={false}>
             {filteredProducts.map((product, idx) => {
               const pStock = Number(product.stock) || 0;
               const isLowStock = pStock > 0 && pStock <= 5;
@@ -539,28 +537,23 @@ export function Products() {
               return (
                 <motion.div
                   key={product.id ? `prod_${product.id}` : `prod_idx_${idx}`}
-                  layout={!perfMode}
-                  initial={perfMode ? false : { opacity: 0, y: 14, scale: 0.96 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={
-                    perfMode
-                      ? undefined
-                      : { opacity: 0, scale: 0.94, transition: { duration: 0.15 } }
-                  }
+                  layout={perfMode ? false : "position"}
+                  initial={perfMode ? false : { opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
                   whileHover={perfMode ? undefined : { y: -1.5, scale: 1.006 }}
                   transition={
                     perfMode
                       ? { duration: 0 }
                       : {
-                          layout: { type: "spring", stiffness: 340, damping: 29, mass: 0.72 },
+                          layout: { type: "spring", stiffness: 420, damping: 34, mass: 0.65 },
                           type: "spring",
-                          stiffness: 440,
-                          damping: 30,
-                          mass: 0.68,
-                          delay: Math.min(idx * 0.035, 0.22),
+                          stiffness: 460,
+                          damping: 32,
+                          mass: 0.62,
+                          delay: Math.min(idx * 0.016, 0.1),
                         }
                   }
-                  className={`bg-white dark:bg-[#1b1f2b] hover:bg-[#f8f5fc] dark:hover:bg-[#222736] transition-colors duration-150 border rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none p-3.5 sm:p-4 flex items-center gap-3.5 overflow-hidden relative group text-slate-800 transform-gpu ${
+                  className={`bg-white dark:bg-[#1b1f2b] hover:bg-[#f8f5fc] dark:hover:bg-[#222736] transition-[background-color] duration-150 border rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none p-3.5 sm:p-4 min-h-[118px] sm:min-h-[124px] flex items-center gap-3.5 overflow-hidden relative group text-slate-800 transform-gpu ${
                     isOutOfStock
                       ? "border-red-500/40 dark:border-red-500/35"
                       : isLowStock
@@ -596,34 +589,32 @@ export function Products() {
                     })()}
                   </div>
 
-                  <div className="flex-1 min-w-0 flex flex-col justify-center gap-1">
+                  <div className="flex-1 min-w-0 flex flex-col justify-center gap-0.5">
                     <h3 className="font-bold text-base sm:text-lg text-slate-900 dark:text-slate-100 truncate leading-snug">
                       {product.name}
                     </h3>
 
-                    {/* Clean unboxed metadata row */}
-                    <div className="flex items-center gap-2 text-xs font-medium flex-wrap">
-                      <span
-                        className={`font-mono tabular-nums font-bold ${
-                          isOutOfStock
-                            ? "text-red-600 dark:text-red-400"
-                            : isLowStock
-                            ? "text-amber-600 dark:text-amber-400"
-                            : "text-slate-500 dark:text-slate-400"
-                        }`}
-                      >
-                        {isOutOfStock
-                          ? "Out of stock"
+                    {/* Dedicated stock & category rows keep all inventory cards identical height */}
+                    <span
+                      className={`text-xs font-mono tabular-nums font-bold leading-tight whitespace-nowrap truncate ${
+                        isOutOfStock
+                          ? "text-red-600 dark:text-red-400"
                           : isLowStock
-                          ? `Low stock (${pStock})`
-                          : `${pStock} in stock`}
-                      </span>
-                      <span className="text-slate-500 dark:text-slate-400 capitalize">
-                        {normalizeProductCategory(product.category, product.name)}
-                      </span>
-                    </div>
+                          ? "text-amber-600 dark:text-amber-400"
+                          : "text-slate-500 dark:text-slate-400"
+                      }`}
+                    >
+                      {isOutOfStock
+                        ? "Out of stock"
+                        : isLowStock
+                        ? `Low stock (${pStock})`
+                        : `${pStock} in stock`}
+                    </span>
+                    <span className="text-xs font-medium text-slate-500 dark:text-slate-400 capitalize leading-tight whitespace-nowrap truncate">
+                      {normalizeProductCategory(product.category, product.name)}
+                    </span>
 
-                    <span className="font-extrabold text-indigo-600 dark:text-indigo-400 font-mono tabular-nums text-base sm:text-lg mt-0.5">
+                    <span className="font-extrabold text-indigo-600 dark:text-indigo-400 font-mono tabular-nums text-base sm:text-lg leading-tight mt-0.5">
                       ₹{formatPrice(product.price)}
                     </span>
                   </div>
@@ -659,8 +650,7 @@ export function Products() {
                 </motion.div>
               );
             })}
-            </AnimatePresence>
-          </motion.div>
+          </div>
         )}
       </div>
 

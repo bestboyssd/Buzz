@@ -254,9 +254,10 @@ export function Home() {
       <AnimatePresence>
         {maxBillNotice && (
           <motion.div
-            initial={{ opacity: 0, y: -8 }}
+            initial={perfMode ? false : { opacity: 0, y: -8 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
+            exit={perfMode ? undefined : { opacity: 0, y: -8 }}
+            transition={perfMode ? { duration: 0 } : { type: "spring", stiffness: 460, damping: 32, mass: 0.6 }}
             className="sticky top-2 z-40 mb-3 px-3.5 py-2.5 rounded-2xl bg-amber-50/95 dark:bg-slate-900/95 backdrop-blur-md border border-amber-300 dark:border-amber-500/40 text-amber-800 dark:text-amber-300 text-xs font-bold shadow-md flex items-center justify-between gap-2"
           >
             <span className="flex items-center gap-2">
@@ -369,16 +370,18 @@ export function Home() {
         </motion.div>
       )}
 
+      <div className="flex-1 flex flex-col [overflow-anchor:none]">
       {productsLoading ? null : sortedProducts.length === 0 ? (
         <motion.div
-          initial={perfMode ? false : { opacity: 0, y: 14, scale: 0.97 }}
-          animate={{ opacity: 1, y: 0, scale: 1 }}
+          key="home-empty-state"
+          initial={perfMode ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
           transition={
             perfMode
               ? { duration: 0 }
-              : { type: "spring", stiffness: 380, damping: 28 }
+              : { type: "spring", stiffness: 420, damping: 32, mass: 0.65 }
           }
-          className="glass-card text-center py-14 px-6 text-slate-500 flex-1 flex flex-col items-center justify-center gap-2"
+          className="bg-white dark:bg-[#1b1f2b] border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none text-center py-14 px-6 text-slate-500 flex-1 flex flex-col items-center justify-center gap-2 transform-gpu"
         >
           <ShoppingBag
             size={44}
@@ -399,21 +402,17 @@ export function Home() {
                 setSearch("");
                 setSelectedCategory("all");
               }}
-              className="mt-3 px-4 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 text-xs font-bold hover:bg-indigo-100 transition-colors"
+              className="mt-3 px-4 py-2 rounded-xl bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 text-xs font-bold hover:bg-indigo-100 transition-colors cursor-pointer"
             >
               Reset Filters
             </button>
           )}
         </motion.div>
       ) : (
-        <motion.div
-          layout={!perfMode}
-          initial={perfMode ? false : { opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={perfMode ? { duration: 0 } : { duration: 0.22 }}
-          className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4"
+        <div
+          key="home-products-grid"
+          className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 sm:gap-4 [overflow-anchor:none]"
         >
-          <AnimatePresence mode="popLayout" initial={false}>
           {sortedProducts.map((product, idx) => {
             const cartItem = cart.find((c) => c.product.id === product.id);
             const quantityInCart = cartItem?.quantity || 0;
@@ -440,22 +439,21 @@ export function Home() {
             return (
               <motion.div
                 key={product.id ? `pos_${product.id}` : `product_${idx}`}
-                layout={!perfMode}
-                initial={perfMode ? false : { opacity: 0, y: 16, scale: 0.95 }}
-                animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={perfMode ? undefined : { opacity: 0, scale: 0.92, transition: { duration: 0.15 } }}
-                whileHover={!disableAdd && !perfMode ? { y: -2.5, scale: 1.012 } : undefined}
+                layout={perfMode ? false : "position"}
+                initial={perfMode ? false : { opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                whileHover={!disableAdd && !perfMode ? { y: -2, scale: 1.01 } : undefined}
                 whileTap={!disableAdd && !perfMode ? { scale: 0.96 } : undefined}
                 transition={
                   perfMode
                     ? { duration: 0 }
                     : {
-                        layout: { type: "spring", stiffness: 340, damping: 29, mass: 0.72 },
+                        layout: { type: "spring", stiffness: 420, damping: 34, mass: 0.65 },
                         type: "spring",
-                        stiffness: 440,
-                        damping: 29,
-                        mass: 0.68,
-                        delay: Math.min(idx * 0.035, 0.22),
+                        stiffness: 460,
+                        damping: 32,
+                        mass: 0.62,
+                        delay: Math.min(idx * 0.016, 0.1),
                       }
                 }
                 onContextMenu={(e) => e.preventDefault()}
@@ -497,7 +495,7 @@ export function Home() {
                     }
                   }
                 }}
-                className={`group/card flex flex-col justify-between relative overflow-hidden text-slate-800 dark:text-slate-200 transition-colors duration-200 rounded-[1.75rem] border select-none transform-gpu ${
+                className={`group/card flex flex-col justify-between relative overflow-hidden text-slate-800 dark:text-slate-200 transition-[background-color,box-shadow] duration-200 rounded-[1.75rem] border select-none transform-gpu ${
                   isOutOfStock
                     ? "cursor-not-allowed bg-white dark:bg-slate-900 border-slate-200/80 dark:border-slate-800/90"
                     : quantityInCart > 0
@@ -547,10 +545,14 @@ export function Home() {
                       {quantityInCart > 0 && (
                         <motion.div
                           key={`stepper_${product.id || idx}`}
-                          initial={{ scale: 0.72, opacity: 0, y: -4 }}
+                          initial={perfMode ? false : { scale: 0.78, opacity: 0, y: -4 }}
                           animate={{ scale: 1, opacity: 1, y: 0 }}
-                          exit={{ scale: 0.72, opacity: 0, y: -4 }}
-                          transition={{ type: "spring", stiffness: 520, damping: 26, mass: 0.6 }}
+                          exit={perfMode ? undefined : { scale: 0.78, opacity: 0, y: -4 }}
+                          transition={
+                            perfMode
+                              ? { duration: 0 }
+                              : { type: "spring", stiffness: 520, damping: 28, mass: 0.58 }
+                          }
                           onPointerDown={(e) => e.stopPropagation()}
                           onClick={(e) => e.stopPropagation()}
                           className="absolute top-2 right-2 z-20 flex items-center gap-1 bg-slate-900/90 dark:bg-indigo-600/95 backdrop-blur-md text-white p-1 rounded-full shadow-lg border border-white/15"
@@ -679,9 +681,9 @@ export function Home() {
               </motion.div>
             );
           })}
-          </AnimatePresence>
-        </motion.div>
+        </div>
       )}
+      </div>
     </motion.div>
   );
 }

@@ -614,7 +614,7 @@ export function OtherCosts() {
                 {loading && costs.length === 0 ? (
                     <div className="text-center py-10 font-medium text-slate-500 dark:text-slate-400 flex-1 flex items-center justify-center">Loading cost receipts...</div>
                 ) : filteredCosts.length === 0 ? (
-                    <div className="glass-card p-8 text-center flex-1 flex flex-col items-center justify-center">
+                    <div className="bg-white dark:bg-[#1b1f2b] border border-slate-200/75 dark:border-white/[0.07] rounded-[28px] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none p-8 text-center flex-1 flex flex-col items-center justify-center">
                         <AlertCircle className="text-slate-300 dark:text-slate-700 mb-2" size={36} />
                         <p className="text-sm font-bold text-slate-700 dark:text-slate-300">No costs recorded yet</p>
                         <p className="text-xs text-slate-500 mt-1">Tap the plus button above to add expenses, borrow accounts, or dynamic dues.</p>
@@ -651,7 +651,7 @@ export function OtherCosts() {
                                           }
                                 }
                                 key={item.id || `cost_${idx}`}
-                                className="glass-card p-4 relative overflow-hidden group hover:border-slate-300 dark:hover:border-slate-800 transition-colors transform-gpu"
+                                className="glass-card p-4 relative overflow-hidden group hover:border-slate-300 dark:hover:border-slate-800 transform-gpu"
                             >
                                 {/* Top Row: Icon + Title/Meta + Amount (+ Delete for standard costs) */}
                                 <div className="flex items-center justify-between gap-3">
