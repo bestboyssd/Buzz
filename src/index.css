@@ -118,10 +118,13 @@
 
 .m3-circular-spinner {
   animation: m3-circular-rotate 1.8s linear infinite;
+  transform-origin: center center;
 }
 
 .m3-circular-spinner circle {
   stroke-linecap: round;
+  stroke-dasharray: 85, 150;
+  stroke-dashoffset: -15;
   animation: m3-circular-dash 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 
@@ -201,6 +204,21 @@ html.performance-mode .m3-circular-spinner circle,
 html.performance-mode .m3-linear-bar-1,
 html.performance-mode .m3-linear-bar-2 {
   animation: none !important;
+}
+
+html.performance-mode .m3-linear-bar-1 {
+  left: 0 !important;
+  right: 0 !important;
+  opacity: 0.45 !important;
+}
+
+html.performance-mode .m3-linear-bar-2 {
+  display: none !important;
+}
+
+html.performance-mode .m3-circular-spinner circle {
+  stroke-dasharray: 92, 150 !important;
+  stroke-dashoffset: -10 !important;
 }
 
 html.performance-mode .glass {

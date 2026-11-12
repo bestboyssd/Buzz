@@ -153,41 +153,160 @@ function shouldPreferFirestoreBridge(): boolean {
   return false;
 }
 
-// Production verified Gemini API key fallback
-export const EMBEDDED_GEMINI_API_KEY = "AIzaSyDQCai6Umx07kzk_6yIWJS-rG6g47EECdk";
+// Never commit literal Gemini API keys to public source control (Google Secret Scanner automatically revokes exposed keys).
+export const EMBEDDED_GEMINI_API_KEY = "";
 let cachedGeminiApiKey: string = "";
 let keyResolutionPromise: Promise<string> | null = null;
 let lastGeminiPrewarmAt = 0;
+const rejectedGeminiApiKeys = new Set<string>();
+
+export class GeminiApiKeyError extends Error {
+  code: "MISSING_KEY" | "REVOKED_KEY" | "INVALID_KEY";
+  constructor(
+    message: string,
+    code: "MISSING_KEY" | "REVOKED_KEY" | "INVALID_KEY" = "MISSING_KEY"
+  ) {
+    super(message);
+    this.name = "GeminiApiKeyError";
+    this.code = code;
+  }
+}
+
+function isApiKeyErrorResponse(status: number, bodyText: string): "REVOKED_KEY" | "INVALID_KEY" | null {
+  const lower = bodyText.toLowerCase();
+  if (lower.includes("reported as leaked") || lower.includes("leaked")) {
+    return "REVOKED_KEY";
+  }
+  if (
+    status === 400 &&
+    (lower.includes("api_key_invalid") || lower.includes("api key not valid"))
+  ) {
+    return "INVALID_KEY";
+  }
+  if (status === 403 && (lower.includes("permission_denied") || lower.includes("api key"))) {
+    return "REVOKED_KEY";
+  }
+  return null;
+}
+
+export function markGeminiKeyRejected(badKey: string): void {
+  const clean = (badKey || "").trim();
+  if (!clean) return;
+  rejectedGeminiApiKeys.add(clean);
+  if (cachedGeminiApiKey === clean) {
+    cachedGeminiApiKey = "";
+  }
+  keyResolutionPromise = null;
+  try {
+    if (localStorage.getItem("buzz_gemini_api_key")?.trim() === clean) {
+      localStorage.removeItem("buzz_gemini_api_key");
+    }
+  } catch {}
+}
+
+function getViteEnvGeminiKey(): string {
+  try {
+    const viteEnv = (import.meta as any).env?.VITE_GEMINI_API_KEY;
+    if (viteEnv && typeof viteEnv === "string") {
+      const trimmed = viteEnv.trim();
+      if (trimmed && !rejectedGeminiApiKeys.has(trimmed)) return trimmed;
+    }
+  } catch {}
+  return "";
+}
 
 /**
- * Resolves the Gemini API key with zero network wait when baked in or cached.
+ * Validates a Gemini API key against Google's API and saves it to localStorage + Firestore
+ * so all devices receive the active key without requiring an APK rebuild or committing keys to git.
+ */
+export async function testAndSaveGeminiApiKey(rawKey: string): Promise<{ ok: boolean; error?: string }> {
+  const clean = (rawKey || "").trim();
+  if (!clean || clean.length < 20) {
+    return { ok: false, error: "Please enter a valid Google AI Studio Gemini API key." };
+  }
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${encodeURIComponent(clean)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: "Reply OK" }] }],
+          generationConfig: { maxOutputTokens: 8, temperature: 0 },
+        }),
+      }
+    );
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      if (errText.toLowerCase().includes("leaked")) {
+        return { ok: false, error: "This API key was already reported as leaked by Google. Generate a new key." };
+      }
+      if (res.status === 400 || res.status === 403) {
+        return { ok: false, error: "Google rejected this API key. Check that Gemini API is enabled and copy the full key." };
+      }
+      return { ok: false, error: `Key check failed (HTTP ${res.status}).` };
+    }
+  } catch {
+    return { ok: false, error: "Network error while verifying key. Check internet connection." };
+  }
+
+  rejectedGeminiApiKeys.delete(clean);
+  cachedGeminiApiKey = clean;
+  keyResolutionPromise = null;
+  try {
+    localStorage.setItem("buzz_gemini_api_key", clean);
+  } catch {}
+  try {
+    const encoded = typeof btoa === "function" ? btoa(clean) : "";
+    if (encoded) {
+      await Promise.race([
+        setDoc(
+          doc(db, "settings", "ai_bridge_config"),
+          { k: encoded, updatedAt: Date.now() },
+          { merge: true }
+        ),
+        new Promise((resolve) => setTimeout(resolve, 2500)),
+      ]);
+    }
+  } catch {}
+  return { ok: true };
+}
+
+/**
+ * Resolves the Gemini API key dynamically (localStorage -> Firestore remote config -> build env),
+ * never allowing a stale build key to block a newly synced remote key.
  */
 export async function resolveGeminiApiKey(): Promise<string> {
-  if (cachedGeminiApiKey) return cachedGeminiApiKey;
-
-  // 1. Vite environment variable
-  const viteEnv = (import.meta as any).env?.VITE_GEMINI_API_KEY;
-  if (viteEnv && typeof viteEnv === "string" && viteEnv.trim()) {
-    cachedGeminiApiKey = viteEnv.trim();
+  if (cachedGeminiApiKey && !rejectedGeminiApiKeys.has(cachedGeminiApiKey)) {
     return cachedGeminiApiKey;
   }
 
-  // 2. localStorage override
+  // 1. localStorage override / synced key (zero network wait)
   try {
     const local = localStorage.getItem("buzz_gemini_api_key");
-    if (local && local.trim()) {
-      cachedGeminiApiKey = local.trim();
-      return cachedGeminiApiKey;
+    if (local) {
+      const trimmed = local.trim();
+      if (trimmed && !rejectedGeminiApiKeys.has(trimmed)) {
+        cachedGeminiApiKey = trimmed;
+        return cachedGeminiApiKey;
+      }
     }
   } catch {}
 
   if (!keyResolutionPromise) {
     keyResolutionPromise = (async () => {
-      // 3. Fast Cloud Firestore override (500ms cap so cold calls never stall on Firestore)
+      // 2. Cloud Firestore dynamic key (server read first with fast cache fallback)
       try {
+        const readRemote = async () => {
+          try {
+            return await getDocFromServer(doc(db, "settings", "ai_bridge_config"));
+          } catch {
+            return await getDoc(doc(db, "settings", "ai_bridge_config"));
+          }
+        };
         const snap: any = await Promise.race([
-          getDoc(doc(db, "settings", "ai_bridge_config")),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("key timeout")), 500)),
+          readRemote(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("key timeout")), 1500)),
         ]);
         if (snap && snap.exists()) {
           const data = snap.data();
@@ -195,8 +314,11 @@ export async function resolveGeminiApiKey(): Promise<string> {
           if (typeof raw === "string" && raw.trim()) {
             try {
               const decoded = atob(raw.trim()).trim();
-              if (decoded && decoded.startsWith("AIzaSy")) {
+              if (decoded && decoded.startsWith("AIzaSy") && !rejectedGeminiApiKeys.has(decoded)) {
                 cachedGeminiApiKey = decoded;
+                try {
+                  localStorage.setItem("buzz_gemini_api_key", decoded);
+                } catch {}
                 return cachedGeminiApiKey;
               }
             } catch {}
@@ -204,9 +326,22 @@ export async function resolveGeminiApiKey(): Promise<string> {
         }
       } catch {}
 
-      cachedGeminiApiKey = EMBEDDED_GEMINI_API_KEY;
-      return cachedGeminiApiKey;
-    })();
+      // 3. Vite environment variable (.env, excluded from git)
+      const viteKey = getViteEnvGeminiKey();
+      if (viteKey) {
+        cachedGeminiApiKey = viteKey;
+        return cachedGeminiApiKey;
+      }
+
+      if (EMBEDDED_GEMINI_API_KEY && !rejectedGeminiApiKeys.has(EMBEDDED_GEMINI_API_KEY)) {
+        cachedGeminiApiKey = EMBEDDED_GEMINI_API_KEY;
+        return cachedGeminiApiKey;
+      }
+
+      return "";
+    })().finally(() => {
+      keyResolutionPromise = null;
+    });
   }
 
   return keyResolutionPromise;
@@ -222,7 +357,7 @@ export function prewarmGeminiConnection(): void {
   resolveGeminiApiKey()
     .then((key) => {
       if (!key || typeof fetch !== "function") return;
-      fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite?key=" + encodeURIComponent(key), {
+      fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite?key=" + encodeURIComponent(key), {
         method: "GET",
         cache: "no-store",
       }).catch(() => {});
@@ -1452,6 +1587,17 @@ async function streamSingleDirectModel(
   });
 
   if (!res.ok || !res.body) {
+    const errBody = await res.text().catch(() => "");
+    const keyErr = isApiKeyErrorResponse(res.status, errBody);
+    if (keyErr) {
+      markGeminiKeyRejected(apiKey);
+      throw new GeminiApiKeyError(
+        keyErr === "REVOKED_KEY"
+          ? "Buzz AI key was blocked by Google (reported as leaked). Tap 'Set AI Key' to add a fresh Gemini key."
+          : "Buzz AI key is invalid. Tap 'Set AI Key' to enter a valid Gemini key.",
+        keyErr
+      );
+    }
     throw new Error(`Model ${model} returned HTTP ${res.status}`);
   }
 
@@ -1518,11 +1664,19 @@ export async function directGeminiChatStream(
   attachments?: ChatAttachment[]
 ): Promise<AssistantResponse> {
   const apiKey = await resolveGeminiApiKey();
+  if (!apiKey) {
+    throw new GeminiApiKeyError(
+      "Buzz AI needs a Gemini API key. Tap 'Set AI Key' to add your Google AI Studio key.",
+      "MISSING_KEY"
+    );
+  }
   const hasAttachments = Boolean(attachments && attachments.length > 0);
-  // 3.1-flash-lite is fastest for image vision; 3.5-flash-lite is fastest for pure text
+  // Race fast Flash-Lite variants and seamlessly fall back to stable Gemini 2.5 GA models
   const primaryModel = hasAttachments ? "gemini-3.1-flash-lite" : "gemini-3.5-flash-lite";
-  const hedgeModel = hasAttachments ? "gemini-3.5-flash-lite" : "gemini-3.1-flash-lite";
-  const tertiaryModel = "gemini-3.5-flash";
+  const hedgeModel = hasAttachments ? "gemini-2.5-flash-lite" : "gemini-2.5-flash-lite";
+  const backupModels = hasAttachments
+    ? ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash"]
+    : ["gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash"];
 
   const systemPrompt = buildClientSystemPrompt(compactedContext);
   const contents = attachMediaToGeminiContents(
@@ -1623,27 +1777,41 @@ export async function directGeminiChatStream(
 
     try {
       return await Promise.any([primaryPromise, hedgePromise]);
-    } catch {
+    } catch (aggErr: any) {
       if (externalSignal?.aborted) throw new Error("Aborted");
-      // Tertiary fallback
-      const tertiaryCtrl = new AbortController();
-      const abortTertiary = () => tertiaryCtrl.abort();
-      externalSignal?.addEventListener("abort", abortTertiary, { once: true });
-      try {
-        return await streamSingleDirectModel(
-          tertiaryModel,
-          apiKey,
-          contents,
-          systemPrompt,
-          prompt,
-          compactedContext,
-          () => {},
-          onChunk,
-          tertiaryCtrl.signal
-        );
-      } finally {
-        externalSignal?.removeEventListener("abort", abortTertiary);
+      const firstKeyErr = Array.isArray(aggErr?.errors)
+        ? aggErr.errors.find((e: any) => e instanceof GeminiApiKeyError)
+        : aggErr instanceof GeminiApiKeyError
+        ? aggErr
+        : null;
+      if (firstKeyErr) {
+        throw firstKeyErr;
       }
+      // Sequential fallback across remaining models (handles 404 alias differences cleanly)
+      for (const fallbackModel of backupModels) {
+        if (externalSignal?.aborted) throw new Error("Aborted");
+        const fallbackCtrl = new AbortController();
+        const abortFallback = () => fallbackCtrl.abort();
+        externalSignal?.addEventListener("abort", abortFallback, { once: true });
+        try {
+          return await streamSingleDirectModel(
+            fallbackModel,
+            apiKey,
+            contents,
+            systemPrompt,
+            prompt,
+            compactedContext,
+            () => {},
+            onChunk,
+            fallbackCtrl.signal
+          );
+        } catch (err: any) {
+          if (err instanceof GeminiApiKeyError) throw err;
+        } finally {
+          externalSignal?.removeEventListener("abort", abortFallback);
+        }
+      }
+      throw new Error("All Gemini streaming models failed for this request.");
     }
   } finally {
     if (externalSignal) {
@@ -1659,10 +1827,16 @@ export async function directGeminiChat(
   attachments?: ChatAttachment[]
 ): Promise<AssistantResponse> {
   const apiKey = await resolveGeminiApiKey();
+  if (!apiKey) {
+    throw new GeminiApiKeyError(
+      "Buzz AI needs a Gemini API key. Tap 'Set AI Key' to add your Google AI Studio key.",
+      "MISSING_KEY"
+    );
+  }
   const hasAttachments = Boolean(attachments && attachments.length > 0);
   const models = hasAttachments
-    ? ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.5-flash"]
-    : ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash"];
+    ? ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
+    : ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash"];
   const systemPrompt = buildClientSystemPrompt(compactedContext);
   const baseContents = attachMediaToGeminiContents(
     buildValidGeminiContents(compactedHistory, prompt),
@@ -1684,13 +1858,28 @@ export async function directGeminiChat(
         }),
       });
 
-      if (!res.ok) continue;
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        const keyErr = isApiKeyErrorResponse(res.status, errBody);
+        if (keyErr) {
+          markGeminiKeyRejected(apiKey);
+          throw new GeminiApiKeyError(
+            keyErr === "REVOKED_KEY"
+              ? "Buzz AI key was blocked by Google (reported as leaked). Tap 'Set AI Key' to add a fresh Gemini key."
+              : "Buzz AI key is invalid. Tap 'Set AI Key' to enter a valid Gemini key.",
+            keyErr
+          );
+        }
+        continue;
+      }
       const data = await res.json();
       const rawText = String(data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
       if (!rawText) continue;
 
       return finalizeDirectAssistantReply(rawText, prompt, compactedContext);
-    } catch {}
+    } catch (err: any) {
+      if (err instanceof GeminiApiKeyError) throw err;
+    }
   }
 
   throw new Error("Could not connect to Buzz AI.");
@@ -1793,6 +1982,12 @@ export async function directGeminiAnalyzeMedia(
   customPrompt?: string
 ): Promise<MediaAnalysisResult> {
   const apiKey = await resolveGeminiApiKey();
+  if (!apiKey) {
+    throw new GeminiApiKeyError(
+      "Buzz AI needs a Gemini API key. Tap 'Set AI Key' to add your Google AI Studio key.",
+      "MISSING_KEY"
+    );
+  }
   const isVideo = mimeType.startsWith("video/");
   const mediaKind: "video" | "image" = isVideo ? "video" : "image";
 
@@ -1830,7 +2025,20 @@ Provide two things:
       signal,
     });
 
-    if (!res.ok) throw new Error(`Vision ${model} HTTP ${res.status}`);
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      const keyErr = isApiKeyErrorResponse(res.status, errBody);
+      if (keyErr) {
+        markGeminiKeyRejected(apiKey);
+        throw new GeminiApiKeyError(
+          keyErr === "REVOKED_KEY"
+            ? "Buzz AI key was blocked by Google (reported as leaked). Tap 'Set AI Key' to add a fresh Gemini key."
+            : "Buzz AI key is invalid. Tap 'Set AI Key' to enter a valid Gemini key.",
+          keyErr
+        );
+      }
+      throw new Error(`Vision ${model} HTTP ${res.status}`);
+    }
     const data = await res.json();
     const reply = String(data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
     if (!reply) throw new Error(`Vision ${model} empty reply`);
@@ -1846,7 +2054,7 @@ Provide two things:
     };
   };
 
-  // Hedged vision execution: gemini-3.1-flash-lite first, race gemini-3.5-flash-lite if >2.5s
+  // Hedged vision execution: gemini-3.1-flash-lite first, race gemini-2.5-flash-lite if >2.5s
   const primaryCtrl = new AbortController();
   const hedgeCtrl = new AbortController();
   const primaryPromise = callVisionModel("gemini-3.1-flash-lite", primaryCtrl.signal).then((r) => {
@@ -1859,7 +2067,7 @@ Provide two things:
     const launchHedge = () => {
       if (launched) return;
       launched = true;
-      callVisionModel("gemini-3.5-flash-lite", hedgeCtrl.signal)
+      callVisionModel("gemini-2.5-flash-lite", hedgeCtrl.signal)
         .then((r) => {
           primaryCtrl.abort();
           resolve(r);
@@ -1878,9 +2086,22 @@ Provide two things:
 
   try {
     return await Promise.any([primaryPromise, hedgePromise]);
-  } catch {
-    const fallbackCtrl = new AbortController();
-    return await callVisionModel("gemini-3.5-flash", fallbackCtrl.signal);
+  } catch (aggErr: any) {
+    const keyErr = Array.isArray(aggErr?.errors)
+      ? aggErr.errors.find((e: any) => e instanceof GeminiApiKeyError)
+      : aggErr instanceof GeminiApiKeyError
+      ? aggErr
+      : null;
+    if (keyErr) throw keyErr;
+    for (const model of ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash"]) {
+      const fallbackCtrl = new AbortController();
+      try {
+        return await callVisionModel(model, fallbackCtrl.signal);
+      } catch (err: any) {
+        if (err instanceof GeminiApiKeyError) throw err;
+      }
+    }
+    throw new Error("Vision analysis failed across all Gemini models.");
   }
 }
 
@@ -2134,6 +2355,7 @@ export async function askGeminiAssistantStream(
   };
 
   // 1. On native Android APK, use Direct Client Gemini Streaming for instantaneous streaming text
+  let capturedKeyError: GeminiApiKeyError | null = null;
   if (Capacitor.isNativePlatform()) {
     try {
       const res = await directGeminiChatStream(
@@ -2150,6 +2372,9 @@ export async function askGeminiAssistantStream(
       }
     } catch (err: any) {
       if (userAborted || completed || externalSignal?.aborted) return;
+      if (err instanceof GeminiApiKeyError) {
+        throw err;
+      }
       console.warn("Direct native Gemini stream failed, trying fallbacks:", err);
     }
   }
@@ -2319,6 +2544,9 @@ export async function askGeminiAssistantStream(
     }
   } catch (err: any) {
     if (userAborted || completed || externalSignal?.aborted) return;
+    if (err instanceof GeminiApiKeyError) {
+      throw err;
+    }
   }
 
   // Fallback 1 & 2: Race Firestore RPC bridge with parallel direct HTTP endpoints so whichever completes first wins
@@ -2403,6 +2631,8 @@ export async function askGeminiAssistantStream(
         action: validateClientAction(null, prompt, lastStreamedChunk, compactedContext) || localActionCandidate || null,
         thought: generateDynamicThought(prompt, lastStreamedChunk, storeContext),
       });
+    } else if (capturedKeyError) {
+      throw capturedKeyError;
     } else {
       throw new Error("Buzz AI is taking longer than expected or could not reach the server. Please try again.");
     }

@@ -37,6 +37,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Quote,
+  KeyRound,
 } from "lucide-react";
 import { triggerHaptic } from "../lib/haptics";
 import { useAuth } from "../lib/AuthContext";
@@ -81,6 +82,8 @@ import {
   purgeChatMediaFromDatabase,
   wakeUpBuzzServer,
   sanitizeLatexAndMathFormatting,
+  testAndSaveGeminiApiKey,
+  GeminiApiKeyError,
   ConversationTurnInput,
   ChatAttachment,
   ChatMessage,
@@ -599,6 +602,10 @@ export function AdminAIAssistant({
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
+  const [showKeyModal, setShowKeyModal] = useState(false);
+  const [keyDraft, setKeyDraft] = useState("");
+  const [savingKey, setSavingKey] = useState(false);
+  const [keyModalError, setKeyModalError] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [synthesizingId, setSynthesizingId] = useState<string | null>(null);
@@ -2517,6 +2524,12 @@ export function AdminAIAssistant({
       setErrorMessage(
         err?.message || "Could not connect to Buzz AI server. Please check your connection and try again."
       );
+      if (
+        err instanceof GeminiApiKeyError ||
+        String(err?.message || "").toLowerCase().includes("api key")
+      ) {
+        setShowKeyModal(true);
+      }
       setLoading(false);
       triggerHaptic("error");
       scrollToBottom(false);
@@ -3216,6 +3229,20 @@ export function AdminAIAssistant({
                   onChange={handleMediaFileSelect}
                   className="hidden"
                 />
+                <motion.button
+                  whileHover={{ scale: 1.03 }}
+                  whileTap={{ scale: 0.94 }}
+                  transition={{ type: "spring", stiffness: 520, damping: 28 }}
+                  onClick={() => {
+                    triggerHaptic("light");
+                    setKeyModalError("");
+                    setShowKeyModal(true);
+                  }}
+                  title="Update Gemini API Key"
+                  className="w-9 h-9 rounded-xl flex items-center justify-center text-slate-700 dark:text-slate-200 hover:text-indigo-600 dark:hover:text-indigo-300 bg-slate-100/90 dark:bg-white/[0.05] hover:bg-slate-200/80 dark:hover:bg-white/[0.1] border border-slate-200/90 dark:border-white/[0.08] transition-colors cursor-pointer"
+                >
+                  <KeyRound size={15} />
+                </motion.button>
                 <motion.button
                   whileHover={{ scale: 1.03 }}
                   whileTap={{ scale: 0.94 }}
@@ -4841,20 +4868,107 @@ export function AdminAIAssistant({
         >
           <div className="max-w-3xl mx-auto w-full px-3 sm:px-5 pt-2.5 pb-1">
             {errorMessage && (
-              <div className="mb-2.5 px-3 py-1.5 rounded-xl bg-red-500/15 border border-red-500/30 text-red-600 dark:text-red-400 text-xs flex items-center justify-between">
+              <div className="mb-2.5 px-3 py-1.5 rounded-xl bg-red-500/15 border border-red-500/30 text-red-600 dark:text-red-400 text-xs flex items-center justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
                   <AlertTriangle size={14} className="shrink-0" />
                   <span className="truncate">{errorMessage}</span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setErrorMessage("")}
-                  className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200 text-[10px] font-bold underline ml-2 shrink-0"
-                >
-                  Dismiss
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  {(errorMessage.toLowerCase().includes("key") ||
+                    errorMessage.toLowerCase().includes("leaked") ||
+                    errorMessage.toLowerCase().includes("403")) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setKeyModalError("");
+                        setShowKeyModal(true);
+                      }}
+                      className="px-2 py-0.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-700 dark:text-red-200 text-[10px] font-bold"
+                    >
+                      Set AI Key
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setErrorMessage("")}
+                    className="text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-200 text-[10px] font-bold underline"
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
             )}
+
+            <AnimatePresence>
+              {showKeyModal && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8 }}
+                  className="mb-3 p-3.5 rounded-2xl bg-slate-100 dark:bg-[#111625] border border-indigo-500/30 shadow-lg space-y-2.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <KeyRound size={15} className="text-indigo-500" />
+                      <span className="text-xs font-extrabold text-slate-900 dark:text-white">
+                        Update Buzz AI Gemini Key
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowKeyModal(false)}
+                      className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-600 dark:text-slate-400 leading-relaxed">
+                    Paste a Google AI Studio key (<span className="font-mono">AIzaSy...</span>). Saving verifies the key and syncs it securely via Firestore to all devices without updating the APK.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      value={keyDraft}
+                      onChange={(e) => {
+                        setKeyDraft(e.target.value);
+                        setKeyModalError("");
+                      }}
+                      placeholder="AIzaSy..."
+                      className="flex-1 min-w-0 px-3 py-2 rounded-xl bg-white dark:bg-[#090d18] border border-slate-200 dark:border-white/10 text-xs font-mono text-slate-900 dark:text-white focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      type="button"
+                      disabled={savingKey || !keyDraft.trim()}
+                      onClick={async () => {
+                        setSavingKey(true);
+                        setKeyModalError("");
+                        const res = await testAndSaveGeminiApiKey(keyDraft);
+                        setSavingKey(false);
+                        if (res.ok) {
+                          setKeyDraft("");
+                          setErrorMessage("");
+                          setShowKeyModal(false);
+                          setClearToastMessage("Buzz AI key verified & synced to all devices");
+                          setTimeout(() => setClearToastMessage(""), 3200);
+                          triggerHaptic("success");
+                        } else {
+                          setKeyModalError(res.error || "Invalid key");
+                          triggerHaptic("error");
+                        }
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-bold shrink-0 cursor-pointer"
+                    >
+                      {savingKey ? "Verifying..." : "Verify & Save"}
+                    </button>
+                  </div>
+                  {keyModalError && (
+                    <p className="text-[11px] font-semibold text-rose-500 dark:text-rose-400">
+                      {keyModalError}
+                    </p>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {/* Quoted Text Banner above Composer */}
             <AnimatePresence initial={false}>

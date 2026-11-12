@@ -14,6 +14,7 @@ import {
   Zap,
   Download,
   X,
+  Radio,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { triggerHaptic } from "../lib/haptics";
@@ -492,25 +493,27 @@ export function Settings() {
             />
             {Capacitor.isNativePlatform() && (
               <SettingItem
-                icon={<Zap size={20} className={batteryUnrestricted ? "text-emerald-500" : "text-amber-500"} />}
+                icon={<Radio size={20} className={batteryUnrestricted ? "text-emerald-500" : "text-amber-500"} />}
                 label="Instant Background Alerts"
-                badge={
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border ${
-                      batteryUnrestricted
-                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25"
-                        : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25"
-                    }`}
-                  >
-                    {batteryUnrestricted ? "Unrestricted" : "Battery Restricted"}
-                  </span>
-                }
                 description={
                   batteryUnrestricted
-                    ? "Background sync runs unimpeded even when closed"
-                    : "Tap to allow Unrestricted battery for instant alerts"
+                    ? "Unrestricted background sync active"
+                    : "Allow unrestricted battery for instant alerts"
                 }
-                action={<ChevronRight size={20} className="text-slate-400" />}
+                action={
+                  <div className="flex items-center gap-1.5">
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border ${
+                        batteryUnrestricted
+                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25"
+                          : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25"
+                      }`}
+                    >
+                      {batteryUnrestricted ? "Active" : "Restricted"}
+                    </span>
+                    <ChevronRight size={18} className="text-slate-400" />
+                  </div>
+                }
                 onClick={() => {
                   triggerHaptic("light");
                   try {
@@ -595,102 +598,122 @@ export function Settings() {
           </h2>
           <div className="glass-card overflow-hidden divide-y divide-slate-100/50 dark:divide-white/10">
             <PWAInstallButton />
-            <SettingItem
-              icon={<Smartphone size={20} className="text-slate-500" />}
-              label="App Version"
-              badge={
-                downloadState.isDownloading ? (
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 border-indigo-500/25">
-                    {downloadState.progress}%
-                  </span>
-                ) : isOutdated ? (
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/25">
-                    Outdated
-                  </span>
-                ) : isUpdated ? (
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25">
-                    Updated
-                  </span>
-                ) : checkingVersion ? (
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-slate-100 dark:bg-slate-800/90 text-slate-500 dark:text-slate-400 border-slate-200/80 dark:border-white/[0.08]">
-                    Checking...
-                  </span>
-                ) : null
-              }
-              description={
-                downloadState.isDownloading ? (
-                  <div className="mt-1 space-y-1">
-                    <div className="flex items-center justify-between text-[11px] font-semibold text-indigo-600 dark:text-indigo-400">
-                      <span>
-                        Downloading v{latestRelease?.version || "latest"}...
+            <div>
+              <SettingItem
+                icon={<Smartphone size={20} className="text-slate-500" />}
+                label="App Version"
+                badge={
+                  downloadState.isDownloading ? (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-indigo-500/12 text-indigo-600 dark:text-indigo-400 border-indigo-500/25">
+                      Updating
+                    </span>
+                  ) : isOutdated ? (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-rose-500/10 text-rose-600 dark:text-rose-400 border-rose-500/25">
+                      Outdated
+                    </span>
+                  ) : isUpdated ? (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25">
+                      Updated
+                    </span>
+                  ) : checkingVersion ? (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border bg-slate-100 dark:bg-slate-800/90 text-slate-500 dark:text-slate-400 border-slate-200/80 dark:border-white/[0.08]">
+                      Checking...
+                    </span>
+                  ) : null
+                }
+                description={
+                  downloadState.status === "completed" && isOutdated ? (
+                    <span className="inline-flex items-center flex-wrap gap-y-0.5 text-emerald-600 dark:text-emerald-400 font-semibold">
+                      <span>v{latestRelease?.version} APK ready</span>
+                      <span className="ml-2 underline">(Tap to install)</span>
+                    </span>
+                  ) : isOutdated && latestRelease ? (
+                    <span className="inline-flex items-center flex-wrap gap-y-0.5">
+                      <span className="font-mono font-semibold text-slate-500 dark:text-slate-400">
+                        v{appVersion}
                       </span>
-                      <span className="font-mono">
+                      <span className="mx-1.5 text-slate-400 dark:text-slate-500 font-bold">
+                        →
+                      </span>
+                      <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
+                        v{latestRelease.version}
+                      </span>
+                      {!downloadState.isDownloading && (
+                        <span className="ml-2 text-rose-500 dark:text-rose-400 font-semibold">
+                          (Tap to download)
+                        </span>
+                      )}
+                    </span>
+                  ) : (
+                    <span className="font-mono">v{appVersion}</span>
+                  )
+                }
+                action={
+                  downloadState.isDownloading ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        triggerHaptic("light");
+                        cancelApkDownload();
+                      }}
+                      title="Cancel download"
+                      className="w-8 h-8 rounded-full flex items-center justify-center bg-slate-100 dark:bg-white/[0.07] text-slate-500 hover:text-rose-500 hover:bg-rose-500/15 transition-colors cursor-pointer"
+                    >
+                      <X size={15} strokeWidth={2.5} />
+                    </button>
+                  ) : isOutdated ? (
+                    <Download
+                      size={18}
+                      className="text-rose-500 dark:text-rose-400"
+                    />
+                  ) : undefined
+                }
+                onClick={handleAppVersionClick}
+              />
+
+              {downloadState.isDownloading && (
+                <div className="px-3.5 sm:px-4 pb-3.5 pt-0.5">
+                  <div className="p-3 rounded-2xl bg-indigo-500/[0.06] dark:bg-indigo-500/[0.09] border border-indigo-500/20 space-y-2">
+                    <div className="flex items-center justify-between gap-2 text-[11px] font-bold">
+                      <span className="text-indigo-700 dark:text-indigo-300 truncate">
+                        Downloading v{latestRelease?.version || "latest"}
+                      </span>
+                      <span className="font-mono tabular-nums whitespace-nowrap text-slate-700 dark:text-slate-200 shrink-0">
                         {downloadState.totalBytes > 0
-                          ? `${(downloadState.downloadedBytes / (1024 * 1024)).toFixed(1)} / ${(downloadState.totalBytes / (1024 * 1024)).toFixed(1)} MB (${downloadState.progress}%)`
+                          ? `${(downloadState.downloadedBytes / (1024 * 1024)).toFixed(1)} / ${(downloadState.totalBytes / (1024 * 1024)).toFixed(1)} MB · ${downloadState.progress}%`
                           : `${downloadState.progress}%`}
                       </span>
                     </div>
-                    <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                    <div className="w-full h-2 rounded-full bg-slate-200/90 dark:bg-slate-800 overflow-hidden">
                       <div
-                        className="h-full rounded-full bg-indigo-600 dark:bg-indigo-500 transition-all duration-150"
+                        className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-[width] duration-150 ease-out"
                         style={{
                           width: `${Math.max(4, Math.min(100, downloadState.progress))}%`,
                         }}
                       />
                     </div>
                   </div>
-                ) : downloadState.status === "error" && isOutdated ? (
-                  <span className="inline-flex items-center flex-wrap gap-y-0.5 text-rose-500 dark:text-rose-400 font-semibold">
-                    <span>{downloadState.error || "Download failed"}</span>
-                    <span className="ml-2 underline">(Tap to retry)</span>
-                  </span>
-                ) : downloadState.status === "completed" && isOutdated ? (
-                  <span className="inline-flex items-center flex-wrap gap-y-0.5 text-emerald-600 dark:text-emerald-400 font-semibold">
-                    <span>v{latestRelease?.version} APK verified & ready</span>
-                    <span className="ml-2 underline">(Tap to install)</span>
-                  </span>
-                ) : isOutdated && latestRelease ? (
-                  <span className="inline-flex items-center flex-wrap gap-y-0.5">
-                    <span className="font-mono font-semibold text-slate-500 dark:text-slate-400">
-                      v{appVersion}
-                    </span>
-                    <span className="mx-2 text-slate-400 dark:text-slate-500 font-bold">
-                      →
-                    </span>
-                    <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                      v{latestRelease.version} available
-                    </span>
-                    <span className="ml-2.5 text-rose-500 dark:text-rose-400 font-semibold">
-                      (Tap to download)
-                    </span>
-                  </span>
-                ) : (
-                  <span className="font-mono">v{appVersion}</span>
-                )
-              }
-              action={
-                downloadState.isDownloading ? (
+                </div>
+              )}
+
+              {downloadState.status === "error" && isOutdated && (
+                <div className="px-3.5 sm:px-4 pb-3.5 pt-0.5">
                   <button
                     type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      triggerHaptic("light");
-                      cancelApkDownload();
-                    }}
-                    title="Cancel download"
-                    className="p-1.5 rounded-full text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+                    onClick={handleAppVersionClick}
+                    className="w-full p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/25 flex items-center justify-between gap-2 text-left cursor-pointer hover:bg-rose-500/15 transition-colors"
                   >
-                    <X size={16} strokeWidth={2.5} />
+                    <span className="text-[11px] font-semibold text-rose-600 dark:text-rose-400 truncate">
+                      {downloadState.error || "Download failed"}
+                    </span>
+                    <span className="text-[11px] font-extrabold text-rose-600 dark:text-rose-300 underline whitespace-nowrap shrink-0">
+                      Retry
+                    </span>
                   </button>
-                ) : isOutdated ? (
-                  <Download
-                    size={18}
-                    className="text-rose-500 dark:text-rose-400"
-                  />
-                ) : undefined
-              }
-              onClick={handleAppVersionClick}
-            />
+                </div>
+              )}
+            </div>
             <SettingItem
               icon={<ChevronRight size={20} className="text-slate-400" />}
               label="Contact Support"

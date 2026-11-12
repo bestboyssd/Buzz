@@ -2058,9 +2058,7 @@ function AppContent() {
                     : "bg-rose-500/12 text-rose-600 dark:text-rose-400 border-rose-500/25"
                 }`}
               >
-                {canPassUpdate
-                  ? `${graceDaysLeft} ${graceDaysLeft === 1 ? "Day" : "Days"} Left Before Lock`
-                  : "Mandatory Update"}
+                {canPassUpdate ? "Update Available" : "Mandatory Update"}
               </span>
 
               <h2 className="text-2xl font-extrabold tracking-tight text-slate-900 dark:text-white mb-2">
@@ -2069,8 +2067,8 @@ function AppContent() {
 
               <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 leading-relaxed mb-5">
                 {canPassUpdate
-                  ? `A newer version of Buzz POS (v${latestRelease.version}) is available. You can pass this time and continue using the app for ${graceDaysLeft} more ${graceDaysLeft === 1 ? "day" : "days"}, after which updating is mandatory.`
-                  : "Your 3-day update grace period has expired. Please download and install the latest version to continue using Buzz POS."}
+                  ? `A newer version of Buzz POS (v${latestRelease.version}) is available with improvements and fixes.`
+                  : `Please download and install v${latestRelease.version} to continue using Buzz POS.`}
               </p>
 
               {/* Version Comparison Box */}
@@ -2236,9 +2234,7 @@ function AppContent() {
                     }}
                     className="w-full py-3 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800/90 dark:hover:bg-slate-800 disabled:opacity-50 active:scale-[0.98] text-slate-700 dark:text-slate-200 font-bold rounded-2xl text-xs border border-slate-200/80 dark:border-white/[0.07] transition-all flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    <span>
-                      Pass This Time ({graceDaysLeft} {graceDaysLeft === 1 ? "day" : "days"} left)
-                    </span>
+                    <span>Pass This Time</span>
                   </button>
                 ) : (
                   <button

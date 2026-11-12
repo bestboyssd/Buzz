@@ -57,6 +57,7 @@ public class MainActivity extends BridgeActivity {
     private WebView printWebView = null;
     private volatile boolean isDownloadingUpdate = false;
     private volatile boolean cancelCurrentDownload = false;
+    private volatile HttpURLConnection activeDownloadConn = null;
     private File pendingInstallApkFile = null;
 
     private static boolean isValidApkFile(File f) {
@@ -211,6 +212,16 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public boolean cancelApkDownload() {
             cancelCurrentDownload = true;
+            final HttpURLConnection connToClose = activeDownloadConn;
+            if (connToClose != null) {
+                Executors.newSingleThreadExecutor().execute(() -> {
+                    try {
+                        connToClose.disconnect();
+                    } catch (Exception ignored) {
+                    }
+                });
+            }
+            emitApkProgressToWebView(0, 0, 0, "idle", "");
             return true;
         }
 
@@ -260,118 +271,221 @@ public class MainActivity extends BridgeActivity {
             isDownloadingUpdate = true;
             cancelCurrentDownload = false;
             final String targetUrl = url.trim();
+            final String cleanVerNoV = safeVer.replaceFirst("^v", "");
+            final String canonicalUrl = !safeVer.equals("latest")
+                ? "https://github.com/bestboyssd/Buzz/releases/download/v" + cleanVerNoV + "/Buzz-v" + cleanVerNoV + ".apk"
+                : "https://github.com/bestboyssd/Buzz/releases/latest/download/Buzz.apk";
 
             Executors.newSingleThreadExecutor().execute(() -> {
-                HttpURLConnection conn = null;
                 File partFile = null;
+                Exception lastErr = null;
+                boolean succeeded = false;
                 try {
                     emitApkProgressToWebView(1, 0, 0, "downloading", "");
-                    String currentUrl = targetUrl;
-                    if (currentUrl.endsWith("/releases/latest") || currentUrl.contains("/releases/tag/")) {
-                        currentUrl = !safeVer.equals("latest")
-                            ? "https://github.com/bestboyssd/Buzz/releases/download/v" + safeVer.replaceFirst("^v", "") + "/Buzz-v" + safeVer.replaceFirst("^v", "") + ".apk"
-                            : "https://github.com/bestboyssd/Buzz/releases/latest/download/Buzz.apk";
-                    }
 
-                    for (int redirects = 0; redirects < 10; redirects++) {
-                        URL u = new URL(currentUrl);
-                        conn = (HttpURLConnection) u.openConnection();
-                        conn.setInstanceFollowRedirects(false);
-                        conn.setConnectTimeout(15000);
-                        conn.setReadTimeout(30000);
-                        conn.setRequestProperty("User-Agent", "Buzz-Android-Updater/1.1");
-                        conn.setRequestProperty("Accept", "application/octet-stream, application/vnd.android.package-archive, */*");
-                        int code = conn.getResponseCode();
-                        if (code == HttpURLConnection.HTTP_MOVED_PERM
-                                || code == HttpURLConnection.HTTP_MOVED_TEMP
-                                || code == HttpURLConnection.HTTP_SEE_OTHER
-                                || code == 307
-                                || code == 308) {
-                            String loc = conn.getHeaderField("Location");
-                            conn.disconnect();
-                            if (loc == null || loc.isEmpty()) break;
-                            currentUrl = new URL(u, loc).toString();
-                            continue;
-                        }
-                        break;
-                    }
-
-                    if (conn == null || conn.getResponseCode() >= 400) {
-                        throw new Exception("Download failed with HTTP " + (conn != null ? conn.getResponseCode() : 0));
-                    }
-
-                    String contentType = conn.getContentType();
-                    if (contentType != null && contentType.toLowerCase(Locale.US).contains("text/html")) {
-                        throw new Exception("Server returned HTML page instead of APK binary");
-                    }
-
-                    long totalBytes = conn.getContentLengthLong();
                     File baseDir = getExternalCacheDir() != null ? getExternalCacheDir() : getCacheDir();
                     File updatesDir = new File(baseDir, "updates");
                     if (!updatesDir.exists()) {
                         updatesDir.mkdirs();
                     }
 
-                    // Delete any older partial/previous APKs first
+                    // Delete stale APKs for older versions, keep only current version partFile for resume
                     File[] oldFiles = updatesDir.listFiles();
                     if (oldFiles != null) {
                         for (File f : oldFiles) {
                             if (f != null && f.isFile() && (f.getName().endsWith(".apk") || f.getName().endsWith(".part"))) {
-                                f.delete();
+                                if (!f.getName().equals("buzz_update_" + safeVer + ".apk.part")) {
+                                    f.delete();
+                                }
                             }
                         }
                     }
 
                     partFile = new File(updatesDir, "buzz_update_" + safeVer + ".apk.part");
                     File outFile = new File(updatesDir, "buzz_update_" + safeVer + ".apk");
-                    long downloadedBytes = 0;
-                    int lastProgress = 1;
-                    long lastEmitTime = 0;
 
-                    try (InputStream in = conn.getInputStream();
-                         FileOutputStream out = new FileOutputStream(partFile)) {
-                        byte[] buffer = new byte[32768];
-                        int read;
-                        while ((read = in.read(buffer)) != -1) {
-                            if (cancelCurrentDownload) {
-                                throw new Exception("Download cancelled");
-                            }
-                            out.write(buffer, 0, read);
-                            downloadedBytes += read;
-                            int pct;
-                            if (totalBytes > 0) {
-                                pct = (int) Math.min(99, Math.max(1, (downloadedBytes * 100L) / totalBytes));
-                            } else {
-                                // Estimate based on ~36.5MB APK size if Content-Length is omitted
-                                pct = (int) Math.min(95, Math.max(1, (downloadedBytes * 100L) / (36L * 1024L * 1024L)));
-                            }
-                            long now = System.currentTimeMillis();
-                            if (pct != lastProgress && (now - lastEmitTime >= 75 || pct >= 99)) {
-                                lastProgress = pct;
-                                lastEmitTime = now;
-                                emitApkProgressToWebView(pct, downloadedBytes, totalBytes > 0 ? totalBytes : downloadedBytes, "downloading", "");
-                            }
+                    String[] candidateUrls = (!targetUrl.equals(canonicalUrl))
+                        ? new String[]{targetUrl, canonicalUrl, targetUrl}
+                        : new String[]{targetUrl, targetUrl, targetUrl};
+
+                    for (int attempt = 0; attempt < candidateUrls.length; attempt++) {
+                        if (cancelCurrentDownload) {
+                            throw new Exception("Download cancelled");
                         }
-                        out.flush();
+                        HttpURLConnection conn = null;
+                        try {
+                            String startUrl = candidateUrls[attempt];
+                            if (startUrl.endsWith("/releases/latest") || startUrl.contains("/releases/tag/")) {
+                                startUrl = canonicalUrl;
+                            }
+                            long resumeOffset = (partFile.exists() && partFile.isFile()) ? partFile.length() : 0L;
+                            String currentUrl = startUrl;
+                            int redirects = 0;
+                            while (redirects < 10) {
+                                if (cancelCurrentDownload) {
+                                    throw new Exception("Download cancelled");
+                                }
+                                URL u = new URL(currentUrl);
+                                conn = (HttpURLConnection) u.openConnection();
+                                activeDownloadConn = conn;
+                                conn.setInstanceFollowRedirects(false);
+                                conn.setConnectTimeout(10000);
+                                conn.setReadTimeout(20000);
+                                conn.setUseCaches(false);
+                                conn.setRequestProperty("User-Agent", "Buzz-Android-Updater/1.2");
+                                conn.setRequestProperty("Accept", "application/octet-stream, application/vnd.android.package-archive, */*");
+                                conn.setRequestProperty("Accept-Encoding", "identity");
+                                if (redirects == 0 && resumeOffset > 0 && currentUrl.equals(startUrl)) {
+                                    // GitHub initial URL handles redirects before CDN range support; attach Range on CDN too below
+                                    conn.setRequestProperty("Range", "bytes=" + resumeOffset + "-");
+                                } else if (resumeOffset > 0 && redirects > 0) {
+                                    conn.setRequestProperty("Range", "bytes=" + resumeOffset + "-");
+                                }
+                                int code = conn.getResponseCode();
+                                if (code == HttpURLConnection.HTTP_MOVED_PERM
+                                        || code == HttpURLConnection.HTTP_MOVED_TEMP
+                                        || code == HttpURLConnection.HTTP_SEE_OTHER
+                                        || code == 307
+                                        || code == 308) {
+                                    String loc = conn.getHeaderField("Location");
+                                    conn.disconnect();
+                                    activeDownloadConn = null;
+                                    if (loc == null || loc.isEmpty()) break;
+                                    currentUrl = new URL(u, loc).toString();
+                                    redirects++;
+                                    continue;
+                                }
+                                break;
+                            }
+
+                            if (conn == null) {
+                                throw new Exception("Unable to reach update server");
+                            }
+                            int finalCode = conn.getResponseCode();
+                            if (finalCode == 416 && resumeOffset > 0) {
+                                // Stale range offset: delete partial and retry clean from byte 0
+                                partFile.delete();
+                                continue;
+                            }
+                            if (finalCode >= 400) {
+                                throw new Exception("Update server returned HTTP " + finalCode);
+                            }
+
+                            String contentType = conn.getContentType();
+                            if (contentType != null && contentType.toLowerCase(Locale.US).contains("text/html")) {
+                                throw new Exception("Server returned HTML page instead of APK binary");
+                            }
+
+                            boolean isPartial = (finalCode == HttpURLConnection.HTTP_PARTIAL);
+                            long contentLen = conn.getContentLengthLong();
+                            long existingBytes = isPartial ? resumeOffset : 0L;
+                            long totalBytes = (contentLen > 0) ? (existingBytes + contentLen) : -1L;
+                            if (!isPartial && partFile.exists()) {
+                                partFile.delete();
+                            }
+
+                            long downloadedBytes = existingBytes;
+                            int lastProgress = totalBytes > 0
+                                ? (int) Math.min(99, Math.max(1, (downloadedBytes * 100L) / totalBytes))
+                                : 1;
+                            long lastEmitTime = System.currentTimeMillis();
+                            emitApkProgressToWebView(
+                                lastProgress,
+                                downloadedBytes,
+                                totalBytes > 0 ? totalBytes : Math.max(downloadedBytes, 36L * 1024L * 1024L),
+                                "downloading",
+                                ""
+                            );
+
+                            try (InputStream in = conn.getInputStream();
+                                 FileOutputStream out = new FileOutputStream(partFile, isPartial)) {
+                                byte[] buffer = new byte[65536];
+                                int read;
+                                while ((read = in.read(buffer)) != -1) {
+                                    if (cancelCurrentDownload) {
+                                        throw new Exception("Download cancelled");
+                                    }
+                                    out.write(buffer, 0, read);
+                                    downloadedBytes += read;
+                                    int pct;
+                                    if (totalBytes > 0) {
+                                        pct = (int) Math.min(99, Math.max(1, (downloadedBytes * 100L) / totalBytes));
+                                    } else {
+                                        pct = (int) Math.min(95, Math.max(1, (downloadedBytes * 100L) / (36L * 1024L * 1024L)));
+                                    }
+                                    long now = System.currentTimeMillis();
+                                    // Emit every 180ms even when integer % hasn't changed yet so 0.0 -> 0.5 MB updates smoothly past 1%
+                                    if (pct != lastProgress || now - lastEmitTime >= 180 || pct >= 99) {
+                                        lastProgress = pct;
+                                        lastEmitTime = now;
+                                        emitApkProgressToWebView(
+                                            pct,
+                                            downloadedBytes,
+                                            totalBytes > 0 ? totalBytes : Math.max(downloadedBytes, 36L * 1024L * 1024L),
+                                            "downloading",
+                                            ""
+                                        );
+                                    }
+                                }
+                                out.flush();
+                            }
+
+                            if (totalBytes > 0 && downloadedBytes < totalBytes) {
+                                throw new Exception("Connection closed early (" + (downloadedBytes / (1024 * 1024)) + "MB / " + (totalBytes / (1024 * 1024)) + "MB)");
+                            }
+
+                            if (!isValidApkFile(partFile)) {
+                                partFile.delete();
+                                throw new Exception("Downloaded package failed APK verification");
+                            }
+
+                            if (outFile.exists()) {
+                                outFile.delete();
+                            }
+                            if (!partFile.renameTo(outFile)) {
+                                outFile = partFile;
+                            }
+
+                            emitApkProgressToWebView(100, downloadedBytes, downloadedBytes, "installing", "");
+                            launchApkInstaller(outFile);
+                            succeeded = true;
+                            break;
+                        } catch (Exception attemptErr) {
+                            lastErr = attemptErr;
+                            if (cancelCurrentDownload || "Download cancelled".equals(attemptErr.getMessage())) {
+                                break;
+                            }
+                            // Wait briefly before automatic retry/resume
+                            if (attempt < candidateUrls.length - 1) {
+                                try {
+                                    Thread.sleep(700);
+                                } catch (InterruptedException ignored) {
+                                }
+                            }
+                        } finally {
+                            if (conn != null) {
+                                try {
+                                    conn.disconnect();
+                                } catch (Exception ignored) {
+                                }
+                            }
+                            activeDownloadConn = null;
+                        }
                     }
 
-                    if (totalBytes > 0 && downloadedBytes < totalBytes) {
-                        throw new Exception("Connection closed early (" + (downloadedBytes / (1024 * 1024)) + "MB / " + (totalBytes / (1024 * 1024)) + "MB). Tap Retry.");
+                    if (!succeeded) {
+                        if (cancelCurrentDownload || (lastErr != null && "Download cancelled".equals(lastErr.getMessage()))) {
+                            if (partFile != null && partFile.exists()) {
+                                partFile.delete();
+                            }
+                            emitApkProgressToWebView(0, 0, 0, "idle", "");
+                        } else {
+                            String msg = (lastErr != null && lastErr.getMessage() != null && !lastErr.getMessage().isEmpty())
+                                ? lastErr.getMessage()
+                                : "Download interrupted. Please tap Retry.";
+                            emitApkProgressToWebView(0, 0, 0, "error", msg);
+                        }
                     }
-
-                    if (!isValidApkFile(partFile)) {
-                        throw new Exception("Downloaded file is not a valid Android APK package.");
-                    }
-
-                    if (outFile.exists()) {
-                        outFile.delete();
-                    }
-                    if (!partFile.renameTo(outFile)) {
-                        outFile = partFile;
-                    }
-
-                    emitApkProgressToWebView(100, downloadedBytes, downloadedBytes, "installing", "");
-                    launchApkInstaller(outFile);
                 } catch (Exception e) {
                     e.printStackTrace();
                     if (partFile != null && partFile.exists()) {
@@ -381,19 +495,14 @@ public class MainActivity extends BridgeActivity {
                         }
                     }
                     String msg = e.getMessage() != null ? e.getMessage() : "Download failed";
-                    if ("Download cancelled".equals(msg)) {
+                    if ("Download cancelled".equals(msg) || cancelCurrentDownload) {
                         emitApkProgressToWebView(0, 0, 0, "idle", "");
                     } else {
                         emitApkProgressToWebView(0, 0, 0, "error", msg);
                     }
                 } finally {
+                    activeDownloadConn = null;
                     isDownloadingUpdate = false;
-                    if (conn != null) {
-                        try {
-                            conn.disconnect();
-                        } catch (Exception ignored) {
-                        }
-                    }
                 }
             });
             return true;

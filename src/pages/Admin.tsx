@@ -5010,7 +5010,7 @@ export function Admin() {
             </div>
           )}
           {renderActionFeedbackPortal()}
-          <style>{"#bottom-nav-container { display: none !important; } #app-scroll-container { padding-bottom: calc(1.25rem + env(safe-area-inset-bottom)) !important; }"}</style>
+          <style>{"#bottom-nav-container { display: none !important; } #app-scroll-container { padding-bottom: calc(2.25rem + env(safe-area-inset-bottom)) !important; }"}</style>
         </motion.div>
       );
     }
@@ -5152,20 +5152,19 @@ export function Admin() {
                     setRefreshLogsTrigger((prev) => prev + 1);
                     setTimeout(() => {
                       setIsRefreshingLogs(false);
-                    }, 900);
+                    }, 600);
                   }}
                   className={`m3-icon-btn ${
                     activityLogsLoading || isRefreshingLogs
-                      ? "!bg-[#e8def8] dark:!bg-indigo-500/25 !text-indigo-700 dark:!text-indigo-300 !border-indigo-300/80 dark:!border-indigo-400/40 scale-95"
+                      ? "!bg-[#e8def8] dark:!bg-indigo-500/25 !text-indigo-700 dark:!text-indigo-300 !border-indigo-300/80 dark:!border-indigo-400/40"
                       : ""
                   }`}
                   title="Refresh log"
                 >
-                  {activityLogsLoading || isRefreshingLogs ? (
-                    <M3CircularProgress size={18} strokeWidth={4.2} />
-                  ) : (
-                    <RefreshCw size={16} />
-                  )}
+                  <RefreshCw
+                    size={16}
+                    className={activityLogsLoading || isRefreshingLogs ? "animate-spin" : ""}
+                  />
                 </button>
                 <button
                   onClick={() => setShowClearLogsConfirm(true)}
@@ -5286,11 +5285,6 @@ export function Admin() {
 
           {/* Activity Logs List Container (div:nth-of-type(3)) */}
           <div className="relative flex-1 flex flex-col min-h-[320px] [overflow-anchor:none]">
-            <M3RefreshIndicator
-              active={activityLogsLoading || isRefreshingLogs}
-              label="Syncing audit logs..."
-            />
-
             {activityLogsPermissionError ? (
               <div
                 key="logs-permission-error"
@@ -5334,13 +5328,8 @@ export function Admin() {
                 </p>
               </div>
             ) : (
-              <motion.div
+              <div
                 key="logs-list-state"
-                animate={{
-                  opacity: isRefreshingLogs ? 0.72 : 1,
-                  scale: isRefreshingLogs ? 0.992 : 1,
-                }}
-                transition={{ duration: 0.22 }}
                 className="space-y-6 [overflow-anchor:none]"
               >
                 {groupedLogs.map((group) => (
@@ -5431,7 +5420,7 @@ export function Admin() {
                     </div>
                   </div>
                 ))}
-              </motion.div>
+              </div>
             )}
           </div>
 
@@ -5482,7 +5471,7 @@ export function Admin() {
             </div>
           )}
           {renderActionFeedbackPortal()}
-          <style>{"#bottom-nav-container { display: none !important; } #app-scroll-container { padding-bottom: calc(1.25rem + env(safe-area-inset-bottom)) !important; }"}</style>
+          <style>{"#bottom-nav-container { display: none !important; } #app-scroll-container { padding-bottom: calc(2.25rem + env(safe-area-inset-bottom)) !important; }"}</style>
         </motion.div>
       );
     }
@@ -6306,7 +6295,7 @@ export function Admin() {
             })()}
           </AnimatePresence>
           {renderActionFeedbackPortal()}
-          <style>{"#bottom-nav-container { display: none !important; } #app-scroll-container { padding-bottom: calc(1.25rem + env(safe-area-inset-bottom)) !important; }"}</style>
+          <style>{"#bottom-nav-container { display: none !important; } #app-scroll-container { padding-bottom: calc(2.25rem + env(safe-area-inset-bottom)) !important; }"}</style>
         </motion.div>
       );
     }
@@ -6636,49 +6625,43 @@ export function Admin() {
                       }}
                       className="bg-white dark:bg-[#1b1f2b] p-4 rounded-[24px] flex flex-col gap-3.5 border border-slate-200/80 dark:border-white/[0.08] shadow-[0_1px_3px_rgba(15,23,42,0.04)] dark:shadow-none"
                     >
-                      {/* Top Row: Thumbnail + Full-Width Name & Single-Line MRP/Stock + Saved Status */}
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-3 min-w-0 flex-1">
-                          <div className="w-12 h-12 rounded-2xl overflow-hidden shrink-0 bg-slate-100 dark:bg-slate-800 border border-slate-200/60 dark:border-slate-700/60">
-                            {imgUrl ? (
-                              <img
-                                src={imgUrl}
-                                alt={p.name}
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              <ProductImagePlaceholder
-                                name={p.name}
-                                category={p.category}
-                                size={16}
-                                rounded="rounded-2xl"
-                                className="w-full h-full"
-                                showBorder={false}
-                                showShadow={false}
-                                monogramSize="bottom-0 right-[2px] text-[24px] font-black"
-                              />
-                            )}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <h3 className="font-bold text-[15px] text-slate-900 dark:text-slate-100 truncate leading-snug">
-                              {p.name}
-                            </h3>
-                            <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums mt-0.5 whitespace-nowrap overflow-hidden">
-                              <span className="font-semibold text-slate-700 dark:text-slate-300">
-                                Sell: ₹{formatPrice(p.price)}
-                              </span>
-                              <span className="text-slate-300 dark:text-slate-600">•</span>
-                              <span className="truncate">{p.stock} in stock</span>
-                            </div>
-                          </div>
+                      {/* Top Section: Thumbnail + Full-Width Name, MRP/Stock & Profit Pill (never truncates stock count) */}
+                      <div className="flex items-start gap-3">
+                        <div className="w-12 h-12 rounded-2xl overflow-hidden shrink-0 bg-slate-100 dark:bg-slate-800 border border-slate-200/60 dark:border-slate-700/60 mt-0.5">
+                          {imgUrl ? (
+                            <img
+                              src={imgUrl}
+                              alt={p.name}
+                              className="w-full h-full object-cover"
+                            />
+                          ) : (
+                            <ProductImagePlaceholder
+                              name={p.name}
+                              category={p.category}
+                              size={16}
+                              rounded="rounded-2xl"
+                              className="w-full h-full"
+                              showBorder={false}
+                              showShadow={false}
+                              monogramSize="bottom-0 right-[2px] text-[24px] font-black"
+                            />
+                          )}
                         </div>
-
-                        {/* Right Status Pill: Shows Profit or Loss per Unit when Buy Price is Set */}
-                        <div className="shrink-0 text-right">
-                          {previewCost > 0 ? (
-                            <div className="flex flex-col items-end">
+                        <div className="min-w-0 flex-1">
+                          <h3 className="font-bold text-[15px] text-slate-900 dark:text-slate-100 leading-snug break-words">
+                            {p.name}
+                          </h3>
+                          <div className="flex items-center flex-wrap gap-x-2 gap-y-0.5 text-xs text-slate-500 dark:text-slate-400 font-mono tabular-nums mt-0.5">
+                            <span className="font-semibold text-slate-700 dark:text-slate-300">
+                              Sell: ₹{formatPrice(p.price)}
+                            </span>
+                            <span className="text-slate-300 dark:text-slate-600">•</span>
+                            <span>{p.stock} in stock</span>
+                          </div>
+                          <div className="mt-2 flex items-center flex-wrap gap-1.5">
+                            {previewCost > 0 ? (
                               <span
-                                className={`px-2.5 py-1 rounded-xl text-[11px] font-mono tabular-nums font-extrabold border ${
+                                className={`inline-flex items-center px-2.5 py-0.5 rounded-lg text-[11px] font-mono tabular-nums font-extrabold border ${
                                   unitProfit > 0
                                     ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
                                     : unitProfit < 0
@@ -6692,12 +6675,12 @@ export function Admin() {
                                   ? `-₹${formatPrice(Math.abs(unitProfit))}/u loss`
                                   : `₹0/u profit`}
                               </span>
-                            </div>
-                          ) : (
-                            <span className="px-2.5 py-1 rounded-xl text-[11px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
-                              No buy price (₹0 profit)
-                            </span>
-                          )}
+                            ) : (
+                              <span className="inline-flex items-center px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                                No buy price (₹0 profit)
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </div>
 
@@ -6779,7 +6762,7 @@ export function Admin() {
           </div>
 
           {renderActionFeedbackPortal()}
-          <style>{"#bottom-nav-container { display: none !important; } #app-scroll-container { padding-bottom: calc(1.25rem + env(safe-area-inset-bottom)) !important; }"}</style>
+          <style>{"#bottom-nav-container { display: none !important; } #app-scroll-container { padding-bottom: calc(2.25rem + env(safe-area-inset-bottom)) !important; }"}</style>
         </motion.div>
       );
     }

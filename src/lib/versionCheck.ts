@@ -621,25 +621,74 @@ export async function triggerInstantApkDownload(
   });
 }
 
-function getOrSetOutdatedFirstSeen(remoteVersion: string): number {
-  const key = `buzz_outdated_first_seen_${remoteVersion}`;
+const ACTIVE_OUTDATED_FIRST_SEEN_KEY = "buzz_outdated_active_first_seen";
+
+function clearOutdatedGraceTimestamps(): void {
   try {
-    const raw = localStorage.getItem(key);
-    if (raw) {
-      const parsed = parseInt(raw, 10);
-      if (!isNaN(parsed) && parsed > 0) {
-        return parsed;
+    localStorage.removeItem(ACTIVE_OUTDATED_FIRST_SEEN_KEY);
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith("buzz_outdated_first_seen")) {
+        keysToRemove.push(k);
       }
     }
-    const now = Date.now();
-    localStorage.setItem(key, String(now));
-    return now;
+    for (const k of keysToRemove) {
+      localStorage.removeItem(k);
+    }
+    sessionStorage.removeItem("buzz_update_passed_session");
+  } catch {}
+}
+
+/**
+ * Anchors the first-seen timestamp to the entire outdated cycle (not per remote patch tag)
+ * so releasing 1.2.4 after 1.2.3 cannot reset an elapsed grace period.
+ */
+export function getOrSetOutdatedFirstSeen(remoteVersion: string, installedVersion?: string): number {
+  const perRemoteKey = `buzz_outdated_first_seen_${remoteVersion}`;
+  const perInstalledKey = installedVersion ? `buzz_outdated_first_seen_from_${installedVersion}` : null;
+  try {
+    const candidates: number[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (
+        k &&
+        (k === ACTIVE_OUTDATED_FIRST_SEEN_KEY || k.startsWith("buzz_outdated_first_seen"))
+      ) {
+        const parsed = parseInt(localStorage.getItem(k) || "", 10);
+        if (!isNaN(parsed) && parsed > 0) {
+          candidates.push(parsed);
+        }
+      }
+    }
+    const earliest = candidates.length > 0 ? Math.min(...candidates) : Date.now();
+    localStorage.setItem(ACTIVE_OUTDATED_FIRST_SEEN_KEY, String(earliest));
+    localStorage.setItem(perRemoteKey, String(earliest));
+    if (perInstalledKey) {
+      localStorage.setItem(perInstalledKey, String(earliest));
+    }
+    return earliest;
   } catch {
     return Date.now();
   }
 }
 
+export function computeGraceState(
+  firstSeenMs: number,
+  nowMs: number = Date.now(),
+  gracePeriodMs: number = GRACE_PERIOD_MS
+): { remainingGraceMs: number; canPassUpdate: boolean; graceDaysLeft: number } {
+  const elapsed = Math.max(0, nowMs - firstSeenMs);
+  const remainingGraceMs = Math.max(0, gracePeriodMs - elapsed);
+  return {
+    remainingGraceMs,
+    canPassUpdate: remainingGraceMs > 0,
+    graceDaysLeft: Math.max(0, Math.ceil(remainingGraceMs / (24 * 60 * 60 * 1000))),
+  };
+}
+
 export function useAppVersionCheck() {
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [appVersion, setAppVersion] = useState<string>(() =>
     getInitialBundledVersion()
   );
@@ -664,6 +713,7 @@ export function useAppVersionCheck() {
   );
 
   const refreshVersionCheck = useCallback(async () => {
+    setNowMs(Date.now());
     setCheckingVersion(true);
     try {
       const currentVer = await getInstalledAppVersion();
@@ -682,22 +732,23 @@ export function useAppVersionCheck() {
         );
 
         if (compareSemver(release.version, currentVer) <= 0) {
-          // App is up to date! Delete any leftover downloaded APK files automatically
+          // App is up to date! Clear outdated grace stamps and delete any leftover APKs
+          clearOutdatedGraceTimestamps();
+          setPassedThisSession(false);
           cleanupInstalledApkFiles().catch(() => {});
         } else {
-          const firstSeen = getOrSetOutdatedFirstSeen(release.version);
-          const remMs = Math.max(0, GRACE_PERIOD_MS - (Date.now() - firstSeen));
-          const daysLeft = Math.max(0, Math.ceil(remMs / (24 * 60 * 60 * 1000)));
+          const firstSeen = getOrSetOutdatedFirstSeen(release.version, currentVer);
+          const { remainingGraceMs: remMs } = computeGraceState(firstSeen, Date.now());
           const notifKey = `buzz_outdated_notified_${release.version}`;
           if (sessionStorage.getItem(notifKey) !== "true") {
             sessionStorage.setItem(notifKey, "true");
             showLocalNotification(
               remMs > 0
-                ? `App Update Available (v${release.version})`
-                : `Mandatory Update Required (v${release.version})`,
+                ? `Update Available (v${release.version})`
+                : `Update Required (v${release.version})`,
               remMs > 0
-                ? `Buzz v${release.version} is available. You can pass for ${daysLeft} more ${daysLeft === 1 ? "day" : "days"} before updating is mandatory.`
-                : `Your 3-day update grace period has expired. Please update to Buzz v${release.version} to continue using the app.`,
+                ? `A newer version of Buzz POS (v${release.version}) is ready to install.`
+                : `Please update Buzz POS to v${release.version} to continue using the app.`,
               "/pwa-192x192.png",
               `update_notice_${release.version}`
             );
@@ -759,6 +810,7 @@ export function useAppVersionCheck() {
     };
 
     const handleResumeOrFocus = () => {
+      setNowMs(Date.now());
       refreshVersionCheck();
     };
 
@@ -769,6 +821,7 @@ export function useAppVersionCheck() {
     window.addEventListener("online", handleResumeOrFocus);
 
     const interval = setInterval(() => {
+      setNowMs(Date.now());
       if (typeof navigator === "undefined" || navigator.onLine) {
         refreshVersionCheck();
       }
@@ -793,8 +846,8 @@ export function useAppVersionCheck() {
 
   let remainingGraceMs = GRACE_PERIOD_MS;
   if (isOutdated && latestRelease) {
-    const firstSeen = getOrSetOutdatedFirstSeen(latestRelease.version);
-    remainingGraceMs = Math.max(0, GRACE_PERIOD_MS - (Date.now() - firstSeen));
+    const firstSeen = getOrSetOutdatedFirstSeen(latestRelease.version, appVersion);
+    remainingGraceMs = computeGraceState(firstSeen, nowMs).remainingGraceMs;
   }
 
   const canPassUpdate = isOutdated && remainingGraceMs > 0;
@@ -803,7 +856,39 @@ export function useAppVersionCheck() {
     Math.ceil(remainingGraceMs / (24 * 60 * 60 * 1000))
   );
 
+  // Immediately revoke any session pass the moment the grace deadline elapses (even if app stays open)
+  useEffect(() => {
+    if (!isOutdated) return;
+    if (remainingGraceMs <= 0) {
+      if (passedThisSession) {
+        setPassedThisSession(false);
+        try {
+          sessionStorage.removeItem("buzz_update_passed_session");
+        } catch {}
+      }
+      return;
+    }
+    // Schedule an automatic wakeup timer at the exact expiration deadline (capped for 32-bit timer safety)
+    const waitMs = Math.min(remainingGraceMs + 250, 24 * 60 * 60 * 1000);
+    const expiryTimer = setTimeout(() => {
+      setNowMs(Date.now());
+    }, waitMs);
+    return () => clearTimeout(expiryTimer);
+  }, [isOutdated, remainingGraceMs, passedThisSession]);
+
   const passUpdateThisTime = useCallback(() => {
+    // Re-evaluate directly against current clock so a stale closure can never bypass an expired deadline
+    if (isOutdated && latestRelease) {
+      const freshFirstSeen = getOrSetOutdatedFirstSeen(latestRelease.version, appVersion);
+      if (computeGraceState(freshFirstSeen, Date.now()).remainingGraceMs <= 0) {
+        setNowMs(Date.now());
+        setPassedThisSession(false);
+        try {
+          sessionStorage.removeItem("buzz_update_passed_session");
+        } catch {}
+        return;
+      }
+    }
     if (!canPassUpdate) return;
     setPassedThisSession(true);
     try {
@@ -814,7 +899,7 @@ export function useAppVersionCheck() {
         detail: { passedSession: true },
       })
     );
-  }, [canPassUpdate]);
+  }, [canPassUpdate, isOutdated, latestRelease, appVersion]);
 
   const startApkDownload = useCallback(() => {
     if (!latestRelease) return;
