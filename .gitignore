@@ -8,3 +8,8 @@ coverage/
 *.log
 .env*
 !.env.example
+.agents/
+.playwright-cli/
+android/app/src/main/assets/public/
+*.jks
+*.keystore

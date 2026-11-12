@@ -104,6 +104,50 @@ export function formatStockAlertNotification(entry: {
 }
 
 /**
+ * Determines whether a stock alert from `settings/stock_alerts_feed` should trigger
+ * a local notification on this device. Prevents fresh installs and newly signed-in
+ * users from receiving alerts for historical out-of-stock events.
+ */
+export function shouldNotifyFeedStockAlert(params: {
+  eventTimestamp: number;
+  baselineTimestamp: number;
+  isFirstSnapshot: boolean;
+  hasPriorNotifiedHistory: boolean;
+  fromSelf: boolean;
+  alreadyHandledNative: boolean;
+  recentlyHandledLocal: boolean;
+}): boolean {
+  if (params.fromSelf || params.alreadyHandledNative || params.recentlyHandledLocal) {
+    return false;
+  }
+  // On a fresh install or first login for this user on this device, the first snapshot
+  // seeds existing feed alerts as baseline and must never notify.
+  if (params.isFirstSnapshot || !params.hasPriorNotifiedHistory) {
+    return false;
+  }
+  // Never notify for events that occurred at or before the user's install/session baseline.
+  if ((Number(params.eventTimestamp) || 0) <= (Number(params.baselineTimestamp) || 0)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Determines whether the daily out-of-stock / low-stock reminder should be silently
+ * seeded instead of firing a notification because the app was just installed on this
+ * device or this user is signing in on this device for the first time.
+ */
+export function shouldSuppressInitialInstallStockReminder(params: {
+  hasDeviceBaselineSeeded: boolean;
+  hasUserBaselineSeeded: boolean;
+  isBrandNewAccount?: boolean;
+}): boolean {
+  if (params.isBrandNewAccount) return true;
+  if (!params.hasDeviceBaselineSeeded || !params.hasUserBaselineSeeded) return true;
+  return false;
+}
+
+/**
  * Immediately notifies on the local device and publishes threshold drops to Firestore
  * `settings/stock_alerts_feed` so all devices & background Android workers alert instantly.
  */

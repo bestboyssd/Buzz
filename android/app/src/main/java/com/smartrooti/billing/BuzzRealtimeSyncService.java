@@ -1,14 +1,11 @@
 package com.smartrooti.billing;
 
 import android.app.AlarmManager;
-import android.app.Notification;
-import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ServiceInfo;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -19,8 +16,6 @@ import android.os.IBinder;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import androidx.annotation.Nullable;
-import androidx.core.app.NotificationCompat;
-import androidx.core.content.ContextCompat;
 import androidx.work.Constraints;
 import androidx.work.ExistingWorkPolicy;
 import androidx.work.NetworkType;
@@ -64,23 +59,21 @@ public class BuzzRealtimeSyncService extends Service {
 
     public static void startIfPermitted(Context context) {
         if (context == null) return;
+        ensureLiveSyncChannel(context);
         if (!BuzzNotificationWorker.areNotificationsEnabled(context)) {
             stopService(context);
             return;
         }
         try {
             Intent intent = new Intent(context, BuzzRealtimeSyncService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                ContextCompat.startForegroundService(context, intent);
-            } else {
-                context.startService(intent);
-            }
+            context.startService(intent);
         } catch (Exception ignored) {
         }
     }
 
     public static void stopService(Context context) {
         if (context == null) return;
+        ensureLiveSyncChannel(context);
         try {
             context.stopService(new Intent(context, BuzzRealtimeSyncService.class));
         } catch (Exception ignored) {
@@ -98,19 +91,8 @@ public class BuzzRealtimeSyncService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        ensureLiveSyncChannel(this);
         if (!BuzzNotificationWorker.areNotificationsEnabled(getApplicationContext())) {
-            stopSelf();
-            return START_NOT_STICKY;
-        }
-
-        Notification notif = buildForegroundNotification();
-        try {
-            if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(SYNC_NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING);
-            } else {
-                startForeground(SYNC_NOTIF_ID, notif);
-            }
-        } catch (Exception e) {
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -155,12 +137,7 @@ public class BuzzRealtimeSyncService extends Service {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 pendingFlags |= PendingIntent.FLAG_IMMUTABLE;
             }
-            PendingIntent pi;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                pi = PendingIntent.getForegroundService(ctx, 8802, restartIntent, pendingFlags);
-            } else {
-                pi = PendingIntent.getService(ctx, 8802, restartIntent, pendingFlags);
-            }
+            PendingIntent pi = PendingIntent.getService(ctx, 8802, restartIntent, pendingFlags);
             AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
             if (am != null && pi != null) {
                 am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 2500L, pi);
@@ -192,44 +169,16 @@ public class BuzzRealtimeSyncService extends Service {
         return null;
     }
 
-    private Notification buildForegroundNotification() {
-        Intent openAppIntent = new Intent(this, MainActivity.class);
-        openAppIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            flags |= PendingIntent.FLAG_IMMUTABLE;
-        }
-        PendingIntent pendingIntent = PendingIntent.getActivity(this, 8803, openAppIntent, flags);
-
-        return new NotificationCompat.Builder(this, LIVE_SYNC_CHANNEL_ID)
-                .setSmallIcon(R.mipmap.ic_launcher)
-                .setContentTitle("Buzz Instant Alerts Active")
-                .setContentText("Monitoring stock, conflicts, and security in real time")
-                .setPriority(NotificationCompat.PRIORITY_MIN)
-                .setCategory(NotificationCompat.CATEGORY_SERVICE)
-                .setOngoing(true)
-                .setSilent(true)
-                .setShowWhen(false)
-                .setContentIntent(pendingIntent)
-                .build();
-    }
-
     public static void ensureLiveSyncChannel(Context context) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (context == null) return;
+        try {
             NotificationManager manager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
             if (manager == null) return;
-            NotificationChannel existing = manager.getNotificationChannel(LIVE_SYNC_CHANNEL_ID);
-            if (existing != null) return;
-            NotificationChannel channel = new NotificationChannel(
-                    LIVE_SYNC_CHANNEL_ID,
-                    "Buzz Live Sync Status",
-                    NotificationManager.IMPORTANCE_MIN
-            );
-            channel.setDescription("Keeps instant out-of-stock and bill conflict alerts active in the background");
-            channel.setShowBadge(false);
-            channel.setSound(null, null);
-            channel.enableVibration(false);
-            manager.createNotificationChannel(channel);
+            manager.cancel(SYNC_NOTIF_ID);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                manager.deleteNotificationChannel(LIVE_SYNC_CHANNEL_ID);
+            }
+        } catch (Exception ignored) {
         }
     }
 

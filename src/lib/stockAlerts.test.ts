@@ -5,6 +5,8 @@ import {
   formatStockAlertNotification,
   wasStockTransitionRecentlyHandled,
   markStockTransitionHandled,
+  shouldNotifyFeedStockAlert,
+  shouldSuppressInitialInstallStockReminder,
 } from "./stockAlerts";
 import {
   buildCanonicalStockKey,
@@ -76,4 +78,77 @@ describe("stockAlerts instant transition detection", () => {
     assert.equal(getDeterministicNotificationId("offline_conflict_bill_123"), 470733477);
     assert.equal(getDeterministicNotificationId("stock_canonical_out_of_stock_p1_0"), 141217742);
   });
+
+  it("suppresses historical stock_alerts_feed notifications on fresh install or initial snapshot", () => {
+    const installTime = 1700000000000;
+    // Fresh install (no prior notified history, first snapshot) -> must NOT notify even for a very recent alert
+    assert.equal(
+      shouldNotifyFeedStockAlert({
+        eventTimestamp: installTime - 5000,
+        baselineTimestamp: installTime,
+        isFirstSnapshot: true,
+        hasPriorNotifiedHistory: false,
+        fromSelf: false,
+        alreadyHandledNative: false,
+        recentlyHandledLocal: false,
+      }),
+      false
+    );
+
+    // Subsequent snapshot, but alert timestamp is older than baseline -> must NOT notify
+    assert.equal(
+      shouldNotifyFeedStockAlert({
+        eventTimestamp: installTime - 1000,
+        baselineTimestamp: installTime,
+        isFirstSnapshot: false,
+        hasPriorNotifiedHistory: true,
+        fromSelf: false,
+        alreadyHandledNative: false,
+        recentlyHandledLocal: false,
+      }),
+      false
+    );
+
+    // Live stock drop occurring AFTER install baseline on another device -> MUST notify
+    assert.equal(
+      shouldNotifyFeedStockAlert({
+        eventTimestamp: installTime + 5000,
+        baselineTimestamp: installTime,
+        isFirstSnapshot: false,
+        hasPriorNotifiedHistory: true,
+        fromSelf: false,
+        alreadyHandledNative: false,
+        recentlyHandledLocal: false,
+      }),
+      true
+    );
+  });
+
+  it("suppresses initial out-of-stock reminder on fresh install or first user login on device", () => {
+    assert.equal(
+      shouldSuppressInitialInstallStockReminder({
+        hasDeviceBaselineSeeded: false,
+        hasUserBaselineSeeded: false,
+        isBrandNewAccount: false,
+      }),
+      true
+    );
+    assert.equal(
+      shouldSuppressInitialInstallStockReminder({
+        hasDeviceBaselineSeeded: true,
+        hasUserBaselineSeeded: false,
+        isBrandNewAccount: false,
+      }),
+      true
+    );
+    assert.equal(
+      shouldSuppressInitialInstallStockReminder({
+        hasDeviceBaselineSeeded: true,
+        hasUserBaselineSeeded: true,
+        isBrandNewAccount: false,
+      }),
+      false
+    );
+  });
 });
+

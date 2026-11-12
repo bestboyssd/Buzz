@@ -75,6 +75,7 @@ import {
 import {
   wasStockTransitionRecentlyHandled,
   markStockTransitionHandled,
+  shouldNotifyFeedStockAlert,
 } from "./lib/stockAlerts";
 import appletConfig from "../firebase-applet-config.json";
 
@@ -467,31 +468,49 @@ function AppContent() {
     const uid = user.uid;
     const deviceId = getDeviceId();
     const notifiedKey = `notified_stock_events_v2_${uid}`;
+    const baselineKey = `stock_feed_baseline_ts_v1_${uid}`;
     let firstSnap = true;
 
-    const readNotified = (): Set<string> => {
+    let baselineTimestamp = Date.now();
+    try {
+      const existingBaseline = Number(localStorage.getItem(baselineKey) || 0);
+      if (existingBaseline > 0) {
+        baselineTimestamp = existingBaseline;
+      } else {
+        localStorage.setItem(baselineKey, String(baselineTimestamp));
+      }
+    } catch {}
+
+    const readNotified = (): { set: Set<string>; hadHistory: boolean } => {
       try {
         const raw = localStorage.getItem(notifiedKey);
-        if (raw) {
+        if (raw !== null) {
           const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) return new Set(parsed.map(String));
+          if (Array.isArray(parsed)) {
+            return { set: new Set(parsed.map(String)), hadHistory: true };
+          }
         }
       } catch {}
-      return new Set();
+      return { set: new Set(), hadHistory: false };
     };
 
     const unsub = onSnapshot(
       doc(db, "settings", "stock_alerts_feed"),
       (snap) => {
         if (!snap.exists()) {
+          try {
+            if (localStorage.getItem(notifiedKey) === null) {
+              localStorage.setItem(notifiedKey, JSON.stringify([]));
+            }
+          } catch {}
           firstSnap = false;
           return;
         }
         const data = snap.data();
         const alerts: any[] = Array.isArray(data?.latestAlerts) ? data.latestAlerts : [];
         const cutoff = Date.now() - 86400000;
-        const known = readNotified();
-        let changed = false;
+        const { set: known, hadHistory } = readNotified();
+        let changed = !hadHistory;
 
         for (const ev of alerts) {
           if (!ev || !ev.id) continue;
@@ -515,16 +534,21 @@ function AppContent() {
           known.add(evId);
           changed = true;
 
-          // Do not double-notify the initiating device, stale events on cold boot, or alerts already handled locally/natively
+          // Do not double-notify the initiating device, historical alerts on fresh install, or alerts already handled locally/natively
           const fromSelf = Boolean(ev.sourceDeviceId && ev.sourceDeviceId === deviceId);
           const recentlyHandledLocal = prodId
             ? wasStockTransitionRecentlyHandled(prodId, type, stock)
             : false;
           if (
-            !fromSelf &&
-            !alreadyHandledNative &&
-            !recentlyHandledLocal &&
-            (!firstSnap || ts >= Date.now() - 120000)
+            shouldNotifyFeedStockAlert({
+              eventTimestamp: ts,
+              baselineTimestamp,
+              isFirstSnapshot: firstSnap,
+              hasPriorNotifiedHistory: hadHistory,
+              fromSelf,
+              alreadyHandledNative,
+              recentlyHandledLocal,
+            })
           ) {
             if (prodId) {
               markStockTransitionHandled(prodId, type, stock);

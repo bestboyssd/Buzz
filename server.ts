@@ -51,29 +51,85 @@ const __dirname = path.dirname(__filename);
 // ============================================================================
 
 const PORT = Number(process.env.PORT) || 3000;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+
+function getServerGeminiKey(): string {
+  const candidates = [
+    process.env.FREE_GEMINI_API_KEY,
+    process.env.BUZZ_GEMINI_API_KEY,
+    process.env.CUSTOM_GEMINI_API_KEY,
+    process.env.GEMINI_API_KEY,
+    process.env.API_KEY,
+  ];
+  for (const raw of candidates) {
+    const k = (raw || "").trim();
+    if (k && !k.includes("DQCai6Umx07kzk")) {
+      return k;
+    }
+  }
+  return (process.env.GEMINI_API_KEY || "").trim();
+}
+
+function formatGeminiServerError(rawErr: unknown): {
+  message: string;
+  isFatalKeyError: boolean;
+} {
+  const errMsg = String((rawErr as any)?.message || rawErr || "");
+  const lower = errMsg.toLowerCase();
+  if (lower.includes("reported as leaked") || lower.includes("leaked")) {
+    return {
+      message:
+        "Server GEMINI_API_KEY was rejected by Google (403 PERMISSION_DENIED: API key reported as leaked). Please update GEMINI_API_KEY or add BUZZ_GEMINI_API_KEY in the AI Studio Settings > Secrets panel.",
+      isFatalKeyError: true,
+    };
+  }
+  if (
+    lower.includes("api_key_invalid") ||
+    lower.includes("api key not valid") ||
+    (lower.includes("permission_denied") && lower.includes("403"))
+  ) {
+    return {
+      message:
+        "Server GEMINI_API_KEY is invalid or lacks permission (400/403). Please check GEMINI_API_KEY or set BUZZ_GEMINI_API_KEY in the AI Studio Settings > Secrets panel.",
+      isFatalKeyError: true,
+    };
+  }
+  return {
+    message: errMsg,
+    isFatalKeyError: false,
+  };
+}
 
 const PRIMARY_AI_PROVIDER = process.env.PRIMARY_AI_PROVIDER || "gemini";
-// Primary: Ultra-low-latency Gemini 3.1 Flash Lite with thinkingBudget: 0 (~0.6s response time)
+// Primary: Ultra-low-latency Gemini 3.1 Flash Lite
 const PRIMARY_AI_MODEL = process.env.PRIMARY_AI_MODEL || "gemini-3.1-flash-lite";
 
-// Backup: Secondary Gemini 3.5 Flash Lite with minimal thinking (~1.2s response time)
+// Backup: Secondary Gemini 3.8 Flash with low thinking
 const BACKUP_AI_PROVIDER = process.env.BACKUP_AI_PROVIDER || "gemini";
-const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-3.5-flash-lite";
-const TERTIARY_AI_MODEL = "gemini-3.1-flash-lite";
+const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-3.8-flash";
+const TERTIARY_AI_MODEL = "gemini-flash-latest";
 
 // Store timezone offset: Asia/Kolkata (+5:30) for SmartRooti
 const STORE_TZ_OFFSET_MINUTES = 330;
 
-// Initialize Google Gemini Client
-const ai = new GoogleGenAI({
-  apiKey: GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
-    },
-  },
-});
+// Initialize Google Gemini Client dynamically using server-side process.env.GEMINI_API_KEY
+let cachedAiClient: GoogleGenAI | null = null;
+let cachedAiKey = "";
+
+function getAiClient(): GoogleGenAI {
+  const currentKey = getServerGeminiKey();
+  if (!cachedAiClient || cachedAiKey !== currentKey) {
+    cachedAiKey = currentKey;
+    cachedAiClient = new GoogleGenAI({
+      apiKey: currentKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+  }
+  return cachedAiClient;
+}
 
 // ============================================================================
 // 2. FIREBASE / FIRESTORE INTEGRATION (SOURCE OF TRUTH)
@@ -1744,25 +1800,40 @@ export function sanitizeLatexAndMathFormatting(raw: string): string {
 }
 
 function buildFastStoreSystemPrompt(snapshot: StoreSnapshot, prompt: string): string {
-  const productListBrief = snapshot.products.slice(0, 45).map((p) => ({
-    id: p.id,
-    name: p.name,
-    price: p.price,
-    stock: p.stock,
-    category: p.category,
-  }));
-
   const cu = snapshot.currentUser;
   const userLine = cu
     ? `USER: ${cu.displayName} (${cu.email || "signed in"}, UID: ${cu.uid}, Role: ${cu.role}, Admin: ${cu.isAdmin ? "YES" : "NO"}, Owner: ${cu.isSuperAdmin ? "YES" : "NO"}).`
     : `USER: Guest session.`;
 
+  const lowerPrompt = String(prompt || "").toLowerCase();
   const needsActionSchema =
     /\b(add|create|new|update|set|change|edit|adjust|increase|decrease|reduce|restock|delete|remove|void|cancel|purge|clear|reset|cost|expense|borrow|due|stock|price|rate|bill|receipt|transaction|product|item|image|photo|picture|pic|use|admin|role|promote|demote)\b/i.test(
       prompt
     );
 
   if (!needsActionSchema) {
+    const mentionsStoreDataOrProduct =
+      /\b(catalog|inventory|shop|store|sell|sold|buy|restock|combo|bundle|out\s+of|low|today|revenue|sale|sales|earn|profit|order|orders|staff|user|users|who|account|accounts|many|much|left|available|list|show|recommend|suggest)\b/i.test(
+        lowerPrompt
+      ) ||
+      snapshot.products.some(
+        (p) => p.name && lowerPrompt.includes(p.name.toLowerCase())
+      );
+
+    if (!mentionsStoreDataOrProduct) {
+      return `You are "Buzz AI", the smart retail store manager for "SmartRooti".
+${userLine}
+LIVE STORE SUMMARY: ${snapshot.products.length} products | Today Sales: ₹${snapshot.todayRevenue.toLocaleString("en-IN")} (${snapshot.todayBillsCount} bills) | Today Expenses: ₹${snapshot.todayExpenseTotal.toLocaleString("en-IN")}.
+RULES: Reply directly, warmly, and concisely (1-2 short sentences) in the exact language of the user's latest message (English unless they wrote in Bengali/Hindi). NEVER use LaTeX dollar signs ($...$) or backslash math commands; use Unicode symbols directly (π, ×, ÷, ≈, √, ²).`;
+    }
+
+    const productListBrief = snapshot.products.slice(0, 45).map((p) => ({
+      id: p.id,
+      name: p.name,
+      price: p.price,
+      stock: p.stock,
+      category: p.category,
+    }));
     const staffSummary = snapshot.accounts
       .slice(0, 10)
       .map((a) => `${a.displayName} (${a.email}, ${a.isAdmin ? "Admin" : "Staff"})`)
@@ -1774,6 +1845,14 @@ CATALOG: ${JSON.stringify(productListBrief)}
 STAFF: ${staffSummary || "None"}
 RULES: Reply directly, warmly, and concisely (1-3 sentences) in the exact language of the user's latest message (English unless they wrote in Bengali/Hindi). If the user quotes a message, directly explain or respond to that quoted text. NEVER use LaTeX dollar signs ($...$, $$...$$) or backslash math commands like \\pi, \\times, \\frac—always use clean Unicode symbols directly (e.g., π, ×, ÷, ≈, √, ², ³). Use ₹ for currency. Only recommend products from CATALOG.`;
   }
+
+  const productListBrief = snapshot.products.slice(0, 45).map((p) => ({
+    id: p.id,
+    name: p.name,
+    price: p.price,
+    stock: p.stock,
+    category: p.category,
+  }));
 
   const billsBrief = snapshot.recentBills.slice(0, 6).map((b) => ({
     id: b.id,
@@ -3141,24 +3220,78 @@ export function buildValidServerGeminiContents(
   return contents;
 }
 
-// Execute AI Chat with Automatic Multi-Model Failover
+export function getInstantGreetingReply(
+  rawPrompt: string,
+  snapshot?: StoreSnapshot | null
+): string | null {
+  const clean = String(rawPrompt || "")
+    .trim()
+    .replace(/[!?.~,]+$/g, "")
+    .trim()
+    .toLowerCase();
+  if (!clean || clean.length > 42) return null;
+
+  const firstName = snapshot?.currentUser?.displayName
+    ? snapshot.currentUser.displayName.split(/\s+/)[0]
+    : "";
+  const nameGreeting = firstName && firstName !== "Store" ? ` ${firstName}` : "";
+
+  if (
+    /^(?:yo+|hi+|hello+|hey+|hola|namaste|nomoshkar|sup|wassup|what'?s\s*up|howdy|gm|good\s*(?:morning|afternoon|evening))(?:\s+(?:buzz|ai|buzz\s*ai|bro|buddy|there|friend))?$/i.test(
+      clean
+    )
+  ) {
+    return `Hey${nameGreeting}! I'm **Buzz AI**, ready to help with **SmartRooti**. How can I help with your store today?`;
+  }
+
+  if (
+    /^(?:how\s+are\s+you(?:\s+doing)?|how\s+r\s+u|how'?s\s+it\s+going|how\s+are\s+things)(?:\s+(?:today|buzz|buzz\s*ai))?$/i.test(
+      clean
+    )
+  ) {
+    const prodCount = snapshot?.products?.length ?? 0;
+    const rev = snapshot?.todayRevenue ?? 0;
+    return `I'm doing great${nameGreeting}! **SmartRooti** is tracking **${prodCount} products** and **₹${rev.toLocaleString("en-IN")}** in sales today. What would you like to work on?`;
+  }
+
+  if (/^(?:thanks|thank\s+you|thx|ty|thank\s+you\s+so\s+much)(?:\s+(?:buzz|ai|buzz\s*ai|bro))?$/i.test(clean)) {
+    return `You're welcome${nameGreeting}! Let me know anytime you need help with your inventory, bills, or store operations.`;
+  }
+
+  return null;
+}
+
+// Execute AI Chat with Automatic Multi-Model Hedged Failover
 export async function executeAiQuery(
   prompt: string,
   snapshot: StoreSnapshot,
   conversationHistory: any[] = [],
   attachments: any[] = []
 ): Promise<{ text: string; modelUsed: string }> {
-  if (!GEMINI_API_KEY) {
+  const hasDirectAttachments = Array.isArray(attachments) && attachments.length > 0;
+  if (!hasDirectAttachments) {
+    const instantGreeting = getInstantGreetingReply(prompt, snapshot);
+    if (instantGreeting) {
+      return { text: instantGreeting, modelUsed: PRIMARY_AI_MODEL };
+    }
+  }
+
+  if (!getServerGeminiKey()) {
     throw new Error("No GEMINI_API_KEY configured.");
   }
 
+  const promptReferencesHistoryMedia =
+    !hasDirectAttachments &&
+    /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|use\s+this|use\s+it)\b/i.test(
+      prompt
+    );
   const hasHistoryMedia =
+    promptReferencesHistoryMedia &&
     Array.isArray(conversationHistory) &&
     conversationHistory.some(
       (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
     );
-  const hasMedia =
-    (Array.isArray(attachments) && attachments.length > 0) || hasHistoryMedia;
+  const hasMedia = hasDirectAttachments || hasHistoryMedia;
   const fastTier = isFastShortTier(prompt, hasMedia);
   const systemInstruction = buildAdaptiveStoreSystemPrompt(snapshot, prompt, hasMedia);
   const trimmedHistory = fastTier ? (conversationHistory || []).slice(-4) : conversationHistory;
@@ -3169,21 +3302,20 @@ export async function executeAiQuery(
     timeoutMs: number
   ): Promise<{ text: string; modelUsed: string }> => {
     const response = await Promise.race([
-      ai.models.generateContent({
+      getAiClient().models.generateContent({
         model,
         contents,
         config: {
           systemInstruction,
-          temperature: 0.3,
-          maxOutputTokens: fastTier ? 380 : 900,
-          ...(model.startsWith("gemini-3")
+          ...(model === "gemini-3.1-flash-lite"
             ? {
-                thinkingConfig:
-                  model === "gemini-3.1-flash-lite"
-                    ? { thinkingBudget: 0 }
-                    : { thinkingLevel: ThinkingLevel.MINIMAL },
+                thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
               }
-            : {}),
+            : model.startsWith("gemini-3.8")
+              ? {
+                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                }
+              : {}),
         },
       }),
       new Promise<never>((_, reject) =>
@@ -3197,44 +3329,75 @@ export async function executeAiQuery(
     throw new Error(`Empty response from ${model}`);
   };
 
-  // Tier 1 (Short sentence): Hedged execution with generous completion window so long answers never abort
+  // Tier 1 (Short sentence): Hedged execution without premature abort so first finishing worker wins in <1.5s
   if (fastTier) {
     try {
-      const primaryPromise = callSingleModel("gemini-3.1-flash-lite", 9000);
+      let settled = false;
+      const primaryPromise = callSingleModel("gemini-3.1-flash-lite", 6000).then((res) => {
+        settled = true;
+        return res;
+      });
+      const hedgedFlashLitePromise = new Promise<{ text: string; modelUsed: string }>(
+        (resolve, reject) => {
+          const t = setTimeout(() => {
+            if (settled) return;
+            callSingleModel("gemini-3.1-flash-lite", 5500).then((res) => {
+              settled = true;
+              resolve(res);
+            }, reject);
+          }, 650);
+          primaryPromise.then(() => clearTimeout(t), () => clearTimeout(t));
+        }
+      );
       const hedgedBackupPromise = new Promise<{ text: string; modelUsed: string }>(
         (resolve, reject) => {
-          const timer = setTimeout(() => {
-            callSingleModel("gemini-3.5-flash-lite", 9000).then(resolve, reject);
-          }, 1400);
+          const t = setTimeout(() => {
+            if (settled) return;
+            callSingleModel("gemini-3.8-flash", 5500).then((res) => {
+              settled = true;
+              resolve(res);
+            }, reject);
+          }, 700);
           primaryPromise.then(
-            () => clearTimeout(timer),
+            () => clearTimeout(t),
             () => {
-              clearTimeout(timer);
-              callSingleModel("gemini-3.5-flash-lite", 9000).then(resolve, reject);
+              clearTimeout(t);
+              if (!settled) {
+                callSingleModel("gemini-3.8-flash", 5500).then((res) => {
+                  settled = true;
+                  resolve(res);
+                }, reject);
+              }
             }
           );
         }
       );
-      return await Promise.any([primaryPromise, hedgedBackupPromise]);
+      return await Promise.any([primaryPromise, hedgedFlashLitePromise, hedgedBackupPromise]);
     } catch {
       // Fall through to multi-model loop below
     }
   }
 
-  // Tier 2 & Fallback: Multi-model sequential failover with generous timeout
-  const allModels = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"].filter(
+  // Tier 2 & Fallback: Multi-model sequential failover
+  const allModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"].filter(
     (m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx
   );
   const activeModels = allModels.filter((m) => !isModelInCooldown(m));
   const rawList = activeModels.length > 0 ? activeModels : allModels;
 
+  let lastModelError = "";
   for (let i = 0; i < rawList.length; i++) {
     const model = rawList[i];
-    const timeoutMs = hasMedia ? 16000 : 12000;
+    const timeoutMs = hasMedia ? 14000 : 8000;
     try {
       return await callSingleModel(model, timeoutMs);
     } catch (err: any) {
-      const errMsg = String(err?.message || err);
+      const formatted = formatGeminiServerError(err);
+      lastModelError = formatted.message;
+      if (formatted.isFatalKeyError) {
+        throw new Error(formatted.message);
+      }
+      const errMsg = formatted.message;
       const isQuotaOrNotFound =
         errMsg.includes("429") ||
         errMsg.includes("404") ||
@@ -3246,7 +3409,11 @@ export async function executeAiQuery(
     }
   }
 
-  throw new Error("All AI models are currently exhausted or unavailable.");
+  throw new Error(
+    lastModelError
+      ? `All AI models are currently exhausted or unavailable (${lastModelError.slice(0, 180)}).`
+      : "All AI models are currently exhausted or unavailable."
+  );
 }
 
 // ============================================================================
@@ -3294,11 +3461,11 @@ app.get(["/healthz", "/health", "/_ah/health"], (_req, res) => {
 // ----------------------------------------------------------------------------
 // GET /api/health
 // ----------------------------------------------------------------------------
-app.get("/api/health", async (_req, res) => {
+app.get("/api/health", async (req, res) => {
   const isDbConnected = db !== null;
   let collectionStats: any = null;
 
-  if (isDbConnected) {
+  if (isDbConnected && req.query.deep === "1") {
     try {
       const snap = await getLiveStoreSnapshot();
       collectionStats = {
@@ -3495,8 +3662,32 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
       }
     }
 
+    if (!hasAttachments) {
+      const instantGreeting = getInstantGreetingReply(cleanPrompt, snapshot);
+      if (instantGreeting) {
+        res.write(`data: ${JSON.stringify({ chunk: instantGreeting })}\n\n`);
+        res.write(
+          `data: ${JSON.stringify({
+            done: true,
+            fullText: instantGreeting,
+            action: null,
+            thought: "Recognized greeting and verified live store readiness.",
+            modelUsed: PRIMARY_AI_MODEL,
+          })}\n\n`
+        );
+        res.end();
+        return;
+      }
+    }
+
     // 2. Stream Response with Two-Tier Adaptive Speed (<2s short sentence, <8-10s media/paragraph)
+    const promptReferencesHistoryMedia =
+      !hasAttachments &&
+      /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|use\s+this|use\s+it)\b/i.test(
+        cleanPrompt
+      );
     const hasHistoryMedia =
+      promptReferencesHistoryMedia &&
       Array.isArray(conversationHistory) &&
       conversationHistory.some(
         (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
@@ -3517,7 +3708,7 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
       hasAttachments ? attachments : []
     );
 
-    const allStreamModels = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"].filter(
+    const allStreamModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"].filter(
       (m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx
     );
     const activeStreamModels = allStreamModels.filter((m) => !isModelInCooldown(m));
@@ -3527,12 +3718,40 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
     let fullOutput = "";
     let activeModel = PRIMARY_AI_MODEL;
 
-    // Stream tokens progressively so first token arrives in ~0.4s-0.8s and long responses never cut off
-    if (GEMINI_API_KEY) {
+    // For short Tier 1 queries without media, use 3-way hedged executeAiQuery first so tail spikes on a single model never delay the response beyond ~1.5s
+    if (fastStreamTier && getServerGeminiKey()) {
+      try {
+        const hedgedRes = await executeAiQuery(
+          cleanPrompt,
+          snapshot,
+          trimmedHistory,
+          []
+        );
+        if (hedgedRes.text && hedgedRes.text.trim()) {
+          fullOutput = hedgedRes.text;
+          activeModel = hedgedRes.modelUsed;
+          streamSucceeded = true;
+          const previewClean = sanitizeLatexAndMathFormatting(
+            fullOutput
+              .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+              .replace(/```action[\s\S]*?```/g, "")
+              .trim()
+          );
+          if (previewClean && !clientAborted && !res.writableEnded) {
+            res.write(`data: ${JSON.stringify({ chunk: previewClean })}\n\n`);
+          }
+        }
+      } catch {
+        // Fall through to streaming candidates
+      }
+    }
+
+    // Stream tokens progressively for longer or multimodal queries
+    if (!streamSucceeded && getServerGeminiKey()) {
       for (let i = 0; i < candidates.length; i++) {
         const model = candidates[i];
         if (clientAborted) break;
-        const firstChunkTimeoutMs = hasAnyStreamMedia ? 14000 : 8000;
+        const firstChunkTimeoutMs = hasAnyStreamMedia ? 14000 : 4500;
         let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
         try {
           await new Promise<void>((resolve, reject) => {
@@ -3546,21 +3765,21 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
 
             (async () => {
               try {
-                const stream = await ai.models.generateContentStream({
+                const stream = await getAiClient().models.generateContentStream({
                   model,
                   contents,
                   config: {
                     systemInstruction,
-                    temperature: 0.3,
-                    maxOutputTokens: fastStreamTier ? 400 : 950,
-                    ...(model.startsWith("gemini-3")
+                    maxOutputTokens: fastStreamTier ? 350 : 950,
+                    ...(model === "gemini-3.1-flash-lite"
                       ? {
-                          thinkingConfig:
-                            model === "gemini-3.1-flash-lite"
-                              ? { thinkingBudget: 0 }
-                              : { thinkingLevel: ThinkingLevel.MINIMAL },
+                          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
                         }
-                      : {}),
+                      : model.startsWith("gemini-3.8")
+                        ? {
+                            thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                          }
+                        : {}),
                   },
                 });
 
@@ -3597,7 +3816,11 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
           }
         } catch (streamErr: any) {
           if (inactivityTimer) clearTimeout(inactivityTimer);
-          const errMsg = String(streamErr?.message || streamErr);
+          const formatted = formatGeminiServerError(streamErr);
+          if (formatted.isFatalKeyError) {
+            throw new Error(formatted.message);
+          }
+          const errMsg = formatted.message;
           const isQuotaOrNotFound =
             errMsg.includes("429") ||
             errMsg.includes("404") ||
@@ -3813,7 +4036,7 @@ app.post("/api/gemini/tts", async (req, res) => {
       return;
     }
 
-    if (!GEMINI_API_KEY) {
+    if (!getServerGeminiKey()) {
       res.status(503).json({ error: "No GEMINI_API_KEY configured." });
       return;
     }
@@ -3840,7 +4063,7 @@ app.post("/api/gemini/tts", async (req, res) => {
     for (const ttsModel of ttsModels) {
       try {
         const ttsResponse = await Promise.race([
-          ai.models.generateContent({
+          getAiClient().models.generateContent({
             model: ttsModel,
             contents: [
               {
@@ -3900,6 +4123,100 @@ app.post("/api/gemini/tts", async (req, res) => {
 // ----------------------------------------------------------------------------
 // POST /api/gemini/transcribe (Audio Transcription)
 // ----------------------------------------------------------------------------
+async function executeFastAudioTranscription(
+  audioBase64: string,
+  mimeType: string
+): Promise<string> {
+  const transcribeContents = [
+    {
+      role: "user",
+      parts: [
+        {
+          inlineData: {
+            mimeType,
+            data: audioBase64,
+          },
+        },
+        {
+          text: "Transcribe the spoken audio clip accurately in the language it was spoken (such as English, Bengali, or Hindi). Output only the transcription text.",
+        },
+      ],
+    },
+  ];
+
+  const callTranscribeModel = async (model: string, timeoutMs: number): Promise<string> => {
+    const response = await Promise.race([
+      getAiClient().models.generateContent({
+        model,
+        contents: transcribeContents,
+        config: {
+          maxOutputTokens: 250,
+          ...(model === "gemini-3.1-flash-lite"
+            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }
+            : model.startsWith("gemini-3.8")
+              ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
+              : {}),
+        },
+      }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Transcription timeout on ${model}`)), timeoutMs)
+      ),
+    ]);
+    if (response && typeof response.text === "string" && response.text.trim()) {
+      return response.text.trim();
+    }
+    throw new Error(`Empty transcript from ${model}`);
+  };
+
+  try {
+    let settled = false;
+    const p1 = callTranscribeModel("gemini-3.1-flash-lite", 3200).then((r) => {
+      settled = true;
+      return r;
+    });
+    const p2 = new Promise<string>((resolve, reject) => {
+      const t = setTimeout(() => {
+        if (settled) return;
+        callTranscribeModel("gemini-3.5-transcribe", 3200).then((r) => {
+          settled = true;
+          resolve(r);
+        }, reject);
+      }, 350);
+      p1.then(
+        () => clearTimeout(t),
+        () => {
+          clearTimeout(t);
+          if (!settled) {
+            callTranscribeModel("gemini-3.5-transcribe", 3200).then((r) => {
+              settled = true;
+              resolve(r);
+            }, reject);
+          }
+        }
+      );
+    });
+    const p3 = new Promise<string>((resolve, reject) => {
+      const t = setTimeout(() => {
+        if (settled) return;
+        callTranscribeModel("gemini-3.8-flash", 3200).then((r) => {
+          settled = true;
+          resolve(r);
+        }, reject);
+      }, 700);
+      p1.then(() => clearTimeout(t), () => {});
+      p2.then(() => clearTimeout(t), () => {});
+    });
+    return await Promise.any([p1, p2, p3]);
+  } catch {
+    for (const fallbackModel of ["gemini-flash-latest", "gemini-3.1-flash-lite"]) {
+      try {
+        return await callTranscribeModel(fallbackModel, 4500);
+      } catch {}
+    }
+    throw new Error("Could not transcribe audio clip.");
+  }
+}
+
 app.post("/api/gemini/transcribe", async (req, res) => {
   try {
     const { audioBase64, mimeType = "audio/webm" } = req.body;
@@ -3908,62 +4225,12 @@ app.post("/api/gemini/transcribe", async (req, res) => {
       return;
     }
 
-    if (!GEMINI_API_KEY) {
+    if (!getServerGeminiKey()) {
       res.status(503).json({ error: "Voice transcription service is not configured." });
       return;
     }
 
-    const transcribeModels = [
-      PRIMARY_AI_MODEL,
-      BACKUP_AI_MODEL,
-      TERTIARY_AI_MODEL,
-      "gemini-3.5-transcribe",
-    ];
-    let transcript = "";
-    let succeeded = false;
-
-    for (const transcribeModel of transcribeModels) {
-      try {
-        const response = await Promise.race([
-          ai.models.generateContent({
-            model: transcribeModel,
-            contents: [
-              {
-                role: "user",
-                parts: [
-                  {
-                    inlineData: {
-                      mimeType,
-                      data: audioBase64,
-                    },
-                  },
-                  {
-                    text: "Transcribe the spoken audio clip accurately in the language it was spoken (such as English, Bengali, or Hindi). Output only the transcription text.",
-                  },
-                ],
-              },
-            ],
-          }),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("Transcription timeout")), 4500)
-          ),
-        ]);
-
-        if (response && typeof response.text === "string") {
-          transcript = response.text.trim();
-          succeeded = true;
-          break;
-        }
-      } catch (modelErr) {
-        // Automatically fail over to next supported model
-      }
-    }
-
-    if (!succeeded) {
-      res.status(500).json({ error: "Could not transcribe audio clip. Please try speaking again or type your command." });
-      return;
-    }
-
+    const transcript = await executeFastAudioTranscription(audioBase64, mimeType);
     res.json({ transcript });
   } catch (err: any) {
     res.status(500).json({ error: "Could not transcribe audio clip. Please try speaking again or type your command." });
@@ -3987,7 +4254,7 @@ app.post("/api/gemini/analyze-media", async (req, res) => {
       return;
     }
 
-    if (!GEMINI_API_KEY) {
+    if (!getServerGeminiKey()) {
       res.status(503).json({ error: "Gemini API key is not configured on the server." });
       return;
     }
@@ -4020,7 +4287,7 @@ Perform two comprehensive tasks:
     for (const modelName of mediaModels) {
       try {
         const response = await Promise.race([
-          ai.models.generateContent({
+          getAiClient().models.generateContent({
             model: modelName,
             contents: {
               parts: [
@@ -4436,15 +4703,17 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
       doc(db, "settings", "ai_bridge_config"),
       {
         id: "ai_bridge_config",
-        serverOnline: Boolean(GEMINI_API_KEY),
-        k: GEMINI_API_KEY ? Buffer.from(GEMINI_API_KEY, "utf-8").toString("base64") : "QUl6YVN5RFFDYWk2VW14MDdremtfNnlJV0pTLXJHNmc0N0VFQ2Rr",
-        token: GEMINI_API_KEY ? Buffer.from(GEMINI_API_KEY, "utf-8").toString("base64") : "QUl6YVN5RFFDYWk2VW14MDdremtfNnlJV0pTLXJHNmc0N0VFQ2Rr",
+        serverOnline: Boolean(getServerGeminiKey()),
+        serverUrl:
+          process.env.APP_URL ||
+          "https://ais-pre-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app",
+        devServerUrl:
+          "https://ais-dev-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app",
         primaryModel: PRIMARY_AI_MODEL,
         backupModel: BACKUP_AI_MODEL,
         tertiaryModel: TERTIARY_AI_MODEL,
         updatedAt: Date.now(),
-      },
-      { merge: true }
+      }
     ).catch(() => {});
 
     const processedRpcIds = new Set<string>();
@@ -4525,7 +4794,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
             const reqType = String(data.type || "chat");
 
             if (reqType === "transcribe") {
-              if (!GEMINI_API_KEY) {
+              if (!getServerGeminiKey()) {
                 throw new Error("Voice transcription service is not configured.");
               }
               const audioBase64 = String(data.audioBase64 || "");
@@ -4533,50 +4802,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               if (!audioBase64) {
                 throw new Error("Missing audioBase64 payload.");
               }
-              const transcribeModels = [
-                "gemini-3.1-flash-lite",
-                "gemini-3.5-transcribe",
-                "gemini-3.8-flash",
-                "gemini-flash-latest",
-              ];
-              let transcript = "";
-              let succeeded = false;
-              for (const transcribeModel of transcribeModels) {
-                try {
-                  const response = await Promise.race([
-                    ai.models.generateContent({
-                      model: transcribeModel,
-                      contents: [
-                        {
-                          role: "user",
-                          parts: [
-                            {
-                              inlineData: {
-                                mimeType,
-                                data: audioBase64,
-                              },
-                            },
-                            {
-                              text: "Transcribe the spoken audio clip accurately in the language it was spoken (such as English, Bengali, or Hindi). Output only the transcription text.",
-                            },
-                          ],
-                        },
-                      ],
-                    }),
-                    new Promise<never>((_, reject) =>
-                      setTimeout(() => reject(new Error("Transcription timeout")), 5500)
-                    ),
-                  ]);
-                  if (response && typeof response.text === "string" && response.text.trim()) {
-                    transcript = response.text.trim();
-                    succeeded = true;
-                    break;
-                  }
-                } catch {}
-              }
-              if (!succeeded) {
-                throw new Error("Could not transcribe audio clip.");
-              }
+              const transcript = await executeFastAudioTranscription(audioBase64, mimeType);
               await setDoc(
                 doc(db!, "settings", docSnap.id),
                 {
@@ -4590,7 +4816,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
             }
 
             if (reqType === "tts") {
-              if (!GEMINI_API_KEY) {
+              if (!getServerGeminiKey()) {
                 throw new Error("Voice synthesis service is not configured.");
               }
               const cleanSpeech = formatSpeechText(String(data.text || "")).slice(0, 400);
@@ -4616,7 +4842,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               for (const ttsModel of ttsModels) {
                 try {
                   const ttsResponse = await Promise.race([
-                    ai.models.generateContent({
+                    getAiClient().models.generateContent({
                       model: ttsModel,
                       contents: [
                         {
@@ -4683,7 +4909,13 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
             let actionData: any = null;
             let activeModel = PRIMARY_AI_MODEL;
 
+            const promptReferencesHistoryMedia =
+              rpcAttachments.length === 0 &&
+              /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|use\s+this|use\s+it)\b/i.test(
+                cleanPrompt
+              );
             const hasRpcHistoryMedia =
+              promptReferencesHistoryMedia &&
               Array.isArray(conversationHistory) &&
               conversationHistory.some(
                 (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
@@ -4706,7 +4938,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
 
             let streamOk = false;
             // Tier 1 (Short sentence): Execute hedged <2s fast query and write final result in a single Firestore round-trip
-            if (fastRpcTier && GEMINI_API_KEY) {
+            if (fastRpcTier && getServerGeminiKey()) {
               try {
                 const aiRes = await executeAiQuery(
                   cleanPrompt,
@@ -4722,8 +4954,8 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               } catch {}
             }
 
-            if (!streamOk && GEMINI_API_KEY) {
-              const allRpcModels = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"].filter(
+            if (!streamOk && getServerGeminiKey()) {
+              const allRpcModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"].filter(
                 (m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx
               );
               const activeRpcModels = allRpcModels.filter((m) => !isModelInCooldown(m));
@@ -4737,21 +4969,21 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                   let lastPartialFlush = 0;
                   await Promise.race([
                     (async () => {
-                      const stream = await ai.models.generateContentStream({
+                      const stream = await getAiClient().models.generateContentStream({
                         model,
                         contents,
                         config: {
                           systemInstruction,
-                          temperature: 0.3,
                           maxOutputTokens: fastRpcTier ? 400 : 950,
-                          ...(model.startsWith("gemini-3")
+                          ...(model === "gemini-3.1-flash-lite"
                             ? {
-                                thinkingConfig:
-                                  model === "gemini-3.1-flash-lite"
-                                    ? { thinkingBudget: 0 }
-                                    : { thinkingLevel: ThinkingLevel.MINIMAL },
+                                thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
                               }
-                            : {}),
+                            : model.startsWith("gemini-3.8")
+                              ? {
+                                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+                                }
+                              : {}),
                         },
                       });
                       for await (const chunk of stream) {
@@ -4798,7 +5030,11 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                     break;
                   }
                 } catch (streamErr: any) {
-                  const errMsg = String(streamErr?.message || streamErr);
+                  const formatted = formatGeminiServerError(streamErr);
+                  if (formatted.isFatalKeyError) {
+                    throw new Error(formatted.message);
+                  }
+                  const errMsg = formatted.message;
                   const isQuota =
                     errMsg.includes("429") ||
                     errMsg.includes("404") ||

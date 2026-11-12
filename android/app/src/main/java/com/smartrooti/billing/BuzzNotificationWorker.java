@@ -62,14 +62,22 @@ public class BuzzNotificationWorker extends Worker {
         String cleanUid = userUid != null ? userUid.trim() : "";
         String cleanEmail = userEmail != null ? userEmail.trim().toLowerCase(Locale.US) : "";
         String cleanDeviceId = deviceId != null ? deviceId.trim() : "";
-        prefs.edit()
+        String prevUid = prefs.getString("current_uid", "");
+        long now = System.currentTimeMillis();
+        SharedPreferences.Editor editor = prefs.edit()
                 .putBoolean("auth_context_known", true)
                 .putString("current_uid", cleanUid)
                 .putString("current_email", cleanEmail)
                 .putBoolean("is_admin", isAdmin)
                 .putBoolean("is_real_admin", isRealAdmin)
-                .putString("device_id", cleanDeviceId)
-                .apply();
+                .putString("device_id", cleanDeviceId);
+        if (!cleanUid.isEmpty() && !cleanUid.equals(prevUid)) {
+            editor.putLong("last_broadcast_ts", Math.max(prefs.getLong("last_broadcast_ts", 0L), now))
+                    .putLong("last_security_ts", Math.max(prefs.getLong("last_security_ts", 0L), now))
+                    .putLong("last_stock_ts", Math.max(prefs.getLong("last_stock_ts", 0L), now))
+                    .putLong("last_conflict_ts", Math.max(prefs.getLong("last_conflict_ts", 0L), now));
+        }
+        editor.apply();
     }
 
     public static synchronized void markAlertHandled(Context context, String kind, String key, long timestamp) {
@@ -202,12 +210,15 @@ public class BuzzNotificationWorker extends Worker {
     public static void ensureBaselineInitialized(Context context) {
         if (context == null) return;
         SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        if (!prefs.getBoolean("worker_initialized_v1", false)) {
+        if (!prefs.getBoolean("baseline_timestamps_seeded_v2", false)) {
             long now = System.currentTimeMillis();
             prefs.edit()
+                    .putLong("install_baseline_ts", Math.max(prefs.getLong("install_baseline_ts", 0L), now))
                     .putLong("last_broadcast_ts", Math.max(prefs.getLong("last_broadcast_ts", 0L), now))
                     .putLong("last_security_ts", Math.max(prefs.getLong("last_security_ts", 0L), now))
-                    .putBoolean("worker_initialized_v1", true)
+                    .putLong("last_stock_ts", Math.max(prefs.getLong("last_stock_ts", 0L), now))
+                    .putLong("last_conflict_ts", Math.max(prefs.getLong("last_conflict_ts", 0L), now))
+                    .putBoolean("baseline_timestamps_seeded_v2", true)
                     .apply();
         }
     }
@@ -234,15 +245,16 @@ public class BuzzNotificationWorker extends Worker {
     public static synchronized void runAlertCheckNow(Context context) {
         if (context == null) return;
         ensureChannel(context);
+        ensureBaselineInitialized(context);
 
         SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         if (!prefs.getBoolean("notifications_enabled", true)) {
             return;
         }
-        // When JS auth state has synced and user is explicitly signed out, suppress alerts
+        // Only run background alert checks when a user is actively signed in
         boolean authContextKnown = prefs.getBoolean("auth_context_known", false);
         String currentUid = prefs.getString("current_uid", "");
-        if (authContextKnown && currentUid.isEmpty()) {
+        if (!authContextKnown || currentUid.isEmpty()) {
             return;
         }
 
@@ -251,7 +263,7 @@ public class BuzzNotificationWorker extends Worker {
         String apiKey = prefs.getString("api_key", DEFAULT_API_KEY);
         long now = System.currentTimeMillis();
         long cutoff = now - 86400000L; // 24 hours
-        boolean isFirstRun = !prefs.getBoolean("worker_initialized_v1", false);
+        boolean isFirstRun = !prefs.getBoolean("worker_initialized_v2", false);
 
         String docsRoot = "https://firestore.googleapis.com/v1/projects/" + projectId
                 + "/databases/" + databaseId + "/documents/";
@@ -278,7 +290,10 @@ public class BuzzNotificationWorker extends Worker {
         }
 
         if (isFirstRun) {
-            prefs.edit().putBoolean("worker_initialized_v1", true).apply();
+            prefs.edit()
+                    .putBoolean("worker_initialized_v1", true)
+                    .putBoolean("worker_initialized_v2", true)
+                    .apply();
         }
     }
 
@@ -294,6 +309,8 @@ public class BuzzNotificationWorker extends Worker {
         boolean userCanSeeAll = !authContextKnown
                 || prefs.getBoolean("is_real_admin", false)
                 || prefs.getBoolean("is_admin", false);
+        long lastConflictTs = Math.max(prefs.getLong("last_conflict_ts", 0L), prefs.getLong("install_baseline_ts", 0L));
+        long maxConflictTs = lastConflictTs;
         boolean modified = false;
 
         for (int i = 0; i < documents.length(); i++) {
@@ -323,8 +340,11 @@ public class BuzzNotificationWorker extends Worker {
             if (!notifiedConflicts.contains(conflictId)) {
                 notifiedConflicts.add(conflictId);
                 modified = true;
+                if (failedAt > maxConflictTs) {
+                    maxConflictTs = failedAt;
+                }
 
-                if (!isFirstRun) {
+                if (!isFirstRun && failedAt > lastConflictTs) {
                     String billId = getStringField(fields, "billId", conflictId);
                     String shortBill = billId.length() > 5 ? billId.substring(billId.length() - 5) : billId;
                     String userName = getStringField(fields, "userName", "Staff");
@@ -339,8 +359,11 @@ public class BuzzNotificationWorker extends Worker {
             }
         }
 
-        if (modified) {
-            prefs.edit().putStringSet("notified_conflict_keys", trimStringSet(notifiedConflicts, 200)).apply();
+        if (modified || maxConflictTs > lastConflictTs) {
+            prefs.edit()
+                    .putLong("last_conflict_ts", maxConflictTs)
+                    .putStringSet("notified_conflict_keys", trimStringSet(notifiedConflicts, 200))
+                    .apply();
         }
     }
 
@@ -489,6 +512,8 @@ public class BuzzNotificationWorker extends Worker {
 
         String currentDeviceId = prefs.getString("device_id", "");
         Set<String> notifiedIds = new HashSet<>(prefs.getStringSet("notified_stock_keys", new HashSet<>()));
+        long lastStockTs = Math.max(prefs.getLong("last_stock_ts", 0L), prefs.getLong("install_baseline_ts", 0L));
+        long maxStockTs = lastStockTs;
         SharedPreferences.Editor editor = prefs.edit();
         boolean modified = false;
         long now = System.currentTimeMillis();
@@ -511,14 +536,20 @@ public class BuzzNotificationWorker extends Worker {
                     notifiedIds.add(uniqueKey);
                     modified = true;
                 }
+                if (ts > maxStockTs) {
+                    maxStockTs = ts;
+                }
                 continue;
             }
 
             if (!notifiedIds.contains(uniqueKey)) {
                 notifiedIds.add(uniqueKey);
                 modified = true;
+                if (ts > maxStockTs) {
+                    maxStockTs = ts;
+                }
 
-                if (!isFirstRun && !wasCanonicalStockRecentlyHandled(prefs, canonicalKey, now)) {
+                if (!isFirstRun && ts > lastStockTs && !wasCanonicalStockRecentlyHandled(prefs, canonicalKey, now)) {
                     recordCanonicalStockHandled(prefs, editor, canonicalKey, now);
                     String title = "out_of_stock".equals(type)
                             ? "🚫 Out of Stock Alert"
@@ -540,7 +571,8 @@ public class BuzzNotificationWorker extends Worker {
             }
         }
 
-        if (modified) {
+        if (modified || maxStockTs > lastStockTs) {
+            editor.putLong("last_stock_ts", maxStockTs);
             editor.putStringSet("notified_stock_keys", trimStringSet(notifiedIds, 250));
             editor.apply();
         }

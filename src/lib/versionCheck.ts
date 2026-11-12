@@ -493,8 +493,8 @@ export async function triggerInstantApkDownload(
     streamUrlsToTry.push(`${baseApiUrl}/api/github/apk-download${proxyQuery}`);
   }
   streamUrlsToTry.push(
-    `https://ais-pre-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app/api/github/apk-download${proxyQuery}`,
-    `https://ais-dev-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app/api/github/apk-download${proxyQuery}`
+    `https://ais-pre-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app/api/github/apk-download${proxyQuery}`,
+    `https://ais-dev-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app/api/github/apk-download${proxyQuery}`
   );
 
   const uniqueStreamUrls = Array.from(new Set(streamUrlsToTry));

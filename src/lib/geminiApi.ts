@@ -133,236 +133,37 @@ export interface AssistantResponse {
 
 // Tracks whether direct HTTP /api/gemini/* is reachable from the current origin/device
 let lastHttpFailureAt = 0;
+let cachedBridgeServerUrl = "";
+let lastBridgeSyncAt = 0;
 
-function isMobileClientDevice(): boolean {
-  if (Capacitor.isNativePlatform()) return true;
-  if (typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)) {
-    return true;
-  }
-  return false;
+function syncBridgeServerUrl(): void {
+  const now = Date.now();
+  if (now - lastBridgeSyncAt < 30000) return;
+  lastBridgeSyncAt = now;
+  getDoc(doc(db, "settings", "ai_bridge_config"))
+    .then((snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (typeof data?.serverUrl === "string" && data.serverUrl.startsWith("https://")) {
+          cachedBridgeServerUrl = data.serverUrl.replace(/\/$/, "");
+        }
+      }
+    })
+    .catch(() => {});
 }
 
 function shouldPreferFirestoreBridge(): boolean {
-  // On native Android APK, direct client Gemini engine is prioritized for instantaneous responses
   if (Capacitor.isNativePlatform()) {
-    const customHost = localStorage.getItem("buzz_api_server_url");
+    const customHost =
+      typeof localStorage !== "undefined" ? localStorage.getItem("buzz_api_server_url") : null;
     if (!customHost) {
-      return false;
+      return true;
+    }
+    if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 300000) {
+      return true;
     }
   }
   return false;
-}
-
-// Never commit literal Gemini API keys to public source control (Google Secret Scanner automatically revokes exposed keys).
-export const EMBEDDED_GEMINI_API_KEY = "";
-let cachedGeminiApiKey: string = "";
-let keyResolutionPromise: Promise<string> | null = null;
-let lastGeminiPrewarmAt = 0;
-const rejectedGeminiApiKeys = new Set<string>();
-
-export class GeminiApiKeyError extends Error {
-  code: "MISSING_KEY" | "REVOKED_KEY" | "INVALID_KEY";
-  constructor(
-    message: string,
-    code: "MISSING_KEY" | "REVOKED_KEY" | "INVALID_KEY" = "MISSING_KEY"
-  ) {
-    super(message);
-    this.name = "GeminiApiKeyError";
-    this.code = code;
-  }
-}
-
-function isApiKeyErrorResponse(status: number, bodyText: string): "REVOKED_KEY" | "INVALID_KEY" | null {
-  const lower = bodyText.toLowerCase();
-  if (lower.includes("reported as leaked") || lower.includes("leaked")) {
-    return "REVOKED_KEY";
-  }
-  if (
-    status === 400 &&
-    (lower.includes("api_key_invalid") || lower.includes("api key not valid"))
-  ) {
-    return "INVALID_KEY";
-  }
-  if (status === 403 && (lower.includes("permission_denied") || lower.includes("api key"))) {
-    return "REVOKED_KEY";
-  }
-  return null;
-}
-
-export function markGeminiKeyRejected(badKey: string): void {
-  const clean = (badKey || "").trim();
-  if (!clean) return;
-  rejectedGeminiApiKeys.add(clean);
-  if (cachedGeminiApiKey === clean) {
-    cachedGeminiApiKey = "";
-  }
-  keyResolutionPromise = null;
-  try {
-    if (localStorage.getItem("buzz_gemini_api_key")?.trim() === clean) {
-      localStorage.removeItem("buzz_gemini_api_key");
-    }
-  } catch {}
-}
-
-function getViteEnvGeminiKey(): string {
-  try {
-    const viteEnv = (import.meta as any).env?.VITE_GEMINI_API_KEY;
-    if (viteEnv && typeof viteEnv === "string") {
-      const trimmed = viteEnv.trim();
-      if (trimmed && !rejectedGeminiApiKeys.has(trimmed)) return trimmed;
-    }
-  } catch {}
-  return "";
-}
-
-/**
- * Validates a Gemini API key against Google's API and saves it to localStorage + Firestore
- * so all devices receive the active key without requiring an APK rebuild or committing keys to git.
- */
-export async function testAndSaveGeminiApiKey(rawKey: string): Promise<{ ok: boolean; error?: string }> {
-  const clean = (rawKey || "").trim();
-  if (!clean || clean.length < 20) {
-    return { ok: false, error: "Please enter a valid Google AI Studio Gemini API key." };
-  }
-  try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key=${encodeURIComponent(clean)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ role: "user", parts: [{ text: "Reply OK" }] }],
-          generationConfig: { maxOutputTokens: 8, temperature: 0 },
-        }),
-      }
-    );
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      if (errText.toLowerCase().includes("leaked")) {
-        return { ok: false, error: "This API key was already reported as leaked by Google. Generate a new key." };
-      }
-      if (res.status === 400 || res.status === 403) {
-        return { ok: false, error: "Google rejected this API key. Check that Gemini API is enabled and copy the full key." };
-      }
-      return { ok: false, error: `Key check failed (HTTP ${res.status}).` };
-    }
-  } catch {
-    return { ok: false, error: "Network error while verifying key. Check internet connection." };
-  }
-
-  rejectedGeminiApiKeys.delete(clean);
-  cachedGeminiApiKey = clean;
-  keyResolutionPromise = null;
-  try {
-    localStorage.setItem("buzz_gemini_api_key", clean);
-  } catch {}
-  try {
-    const encoded = typeof btoa === "function" ? btoa(clean) : "";
-    if (encoded) {
-      await Promise.race([
-        setDoc(
-          doc(db, "settings", "ai_bridge_config"),
-          { k: encoded, updatedAt: Date.now() },
-          { merge: true }
-        ),
-        new Promise((resolve) => setTimeout(resolve, 2500)),
-      ]);
-    }
-  } catch {}
-  return { ok: true };
-}
-
-/**
- * Resolves the Gemini API key dynamically (localStorage -> Firestore remote config -> build env),
- * never allowing a stale build key to block a newly synced remote key.
- */
-export async function resolveGeminiApiKey(): Promise<string> {
-  if (cachedGeminiApiKey && !rejectedGeminiApiKeys.has(cachedGeminiApiKey)) {
-    return cachedGeminiApiKey;
-  }
-
-  // 1. localStorage override / synced key (zero network wait)
-  try {
-    const local = localStorage.getItem("buzz_gemini_api_key");
-    if (local) {
-      const trimmed = local.trim();
-      if (trimmed && !rejectedGeminiApiKeys.has(trimmed)) {
-        cachedGeminiApiKey = trimmed;
-        return cachedGeminiApiKey;
-      }
-    }
-  } catch {}
-
-  if (!keyResolutionPromise) {
-    keyResolutionPromise = (async () => {
-      // 2. Cloud Firestore dynamic key (server read first with fast cache fallback)
-      try {
-        const readRemote = async () => {
-          try {
-            return await getDocFromServer(doc(db, "settings", "ai_bridge_config"));
-          } catch {
-            return await getDoc(doc(db, "settings", "ai_bridge_config"));
-          }
-        };
-        const snap: any = await Promise.race([
-          readRemote(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error("key timeout")), 1500)),
-        ]);
-        if (snap && snap.exists()) {
-          const data = snap.data();
-          const raw = data?.k || data?.token;
-          if (typeof raw === "string" && raw.trim()) {
-            try {
-              const decoded = atob(raw.trim()).trim();
-              if (decoded && decoded.startsWith("AIzaSy") && !rejectedGeminiApiKeys.has(decoded)) {
-                cachedGeminiApiKey = decoded;
-                try {
-                  localStorage.setItem("buzz_gemini_api_key", decoded);
-                } catch {}
-                return cachedGeminiApiKey;
-              }
-            } catch {}
-          }
-        }
-      } catch {}
-
-      // 3. Vite environment variable (.env, excluded from git)
-      const viteKey = getViteEnvGeminiKey();
-      if (viteKey) {
-        cachedGeminiApiKey = viteKey;
-        return cachedGeminiApiKey;
-      }
-
-      if (EMBEDDED_GEMINI_API_KEY && !rejectedGeminiApiKeys.has(EMBEDDED_GEMINI_API_KEY)) {
-        cachedGeminiApiKey = EMBEDDED_GEMINI_API_KEY;
-        return cachedGeminiApiKey;
-      }
-
-      return "";
-    })().finally(() => {
-      keyResolutionPromise = null;
-    });
-  }
-
-  return keyResolutionPromise;
-}
-
-/**
- * Pre-warms DNS, TLS socket, and API key for direct client Gemini REST requests.
- */
-export function prewarmGeminiConnection(): void {
-  const now = Date.now();
-  if (now - lastGeminiPrewarmAt < 20000) return;
-  lastGeminiPrewarmAt = now;
-  resolveGeminiApiKey()
-    .then((key) => {
-      if (!key || typeof fetch !== "function") return;
-      fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite?key=" + encodeURIComponent(key), {
-        method: "GET",
-        cache: "no-store",
-      }).catch(() => {});
-    })
-    .catch(() => {});
 }
 
 // Determines the best API URL depending on web vs native Android Capacitor
@@ -370,29 +171,36 @@ export function getApiBaseUrl(): string {
   if (Capacitor.isNativePlatform()) {
     const customHost = localStorage.getItem("buzz_api_server_url");
     if (customHost) return customHost.replace(/\/$/, "");
-    return "https://ais-pre-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app";
+    if (cachedBridgeServerUrl) return cachedBridgeServerUrl;
+    return "https://ais-pre-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app";
   }
   return "";
 }
 
 function getCandidateApiBaseUrls(): string[] {
   const urls: string[] = [];
-  const customHost = typeof localStorage !== "undefined" ? localStorage.getItem("buzz_api_server_url") : null;
+  const customHost =
+    typeof localStorage !== "undefined" ? localStorage.getItem("buzz_api_server_url") : null;
   if (customHost) {
     urls.push(customHost.replace(/\/$/, ""));
   }
   if (!Capacitor.isNativePlatform()) {
     urls.push("");
   }
-  urls.push("https://ais-pre-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app");
-  urls.push("https://ais-dev-2tctwvbwywftkcy73fkqkj-549311647835.asia-southeast1.run.app");
+  if (cachedBridgeServerUrl) {
+    urls.push(cachedBridgeServerUrl);
+  }
+  urls.push("https://ais-pre-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app");
+  urls.push("https://ais-dev-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app");
   return Array.from(new Set(urls));
 }
 
 export function wakeUpBuzzServer(): void {
-  prewarmGeminiConnection();
+  syncBridgeServerUrl();
   for (const baseUrl of getCandidateApiBaseUrls()) {
-    fetch(`${baseUrl}/api/health`, { method: "GET", mode: "no-cors", cache: "no-store" }).catch(() => {});
+    fetch(`${baseUrl}/api/health`, { method: "GET", mode: "no-cors", cache: "no-store" }).catch(
+      () => {}
+    );
   }
 }
 
@@ -1223,6 +1031,65 @@ function buildFallbackStoreReply(
   };
 }
 
+function serializeChatAttachments(attachments?: ChatAttachment[]) {
+  return (attachments || [])
+    .map((a) => {
+      const rawData =
+        a.dataBase64 ||
+        (a.previewUrl && a.previewUrl.startsWith("data:")
+          ? a.previewUrl.slice(a.previewUrl.indexOf(",") + 1)
+          : "");
+      return {
+        name: a.name || "attachment",
+        mimeType: a.mimeType || "image/jpeg",
+        kind: a.kind || "image",
+        data: rawData,
+      };
+    })
+    .filter((a) => Boolean(a.data));
+}
+
+export function getClientInstantGreetingReply(
+  rawPrompt: string,
+  storeContext?: StoreContext | null
+): string | null {
+  const clean = String(rawPrompt || "")
+    .trim()
+    .replace(/[!?.~,]+$/g, "")
+    .trim()
+    .toLowerCase();
+  if (!clean || clean.length > 42) return null;
+
+  const firstName = storeContext?.currentUser?.displayName
+    ? storeContext.currentUser.displayName.split(/\s+/)[0]
+    : "";
+  const nameGreeting = firstName && firstName !== "Store" ? ` ${firstName}` : "";
+
+  if (
+    /^(?:yo+|hi+|hello+|hey+|hola|namaste|nomoshkar|sup|wassup|what'?s\s*up|howdy|gm|good\s*(?:morning|afternoon|evening))(?:\s+(?:buzz|ai|buzz\s*ai|bro|buddy|there|friend))?$/i.test(
+      clean
+    )
+  ) {
+    return `Hey${nameGreeting}! I'm **Buzz AI**, ready to help with **SmartRooti**. How can I help with your store today?`;
+  }
+
+  if (
+    /^(?:how\s+are\s+you(?:\s+doing)?|how\s+r\s+u|how'?s\s+it\s+going|how\s+are\s+things)(?:\s+(?:today|buzz|buzz\s*ai))?$/i.test(
+      clean
+    )
+  ) {
+    const prodCount = storeContext?.products?.length ?? 0;
+    const rev = Number(storeContext?.totalRevenueToday ?? 0);
+    return `I'm doing great${nameGreeting}! **SmartRooti** is tracking **${prodCount} products** and **₹${rev.toLocaleString("en-IN")}** in sales today. What would you like to work on?`;
+  }
+
+  if (/^(?:thanks|thank\s+you|thx|ty|thank\s+you\s+so\s+much)(?:\s+(?:buzz|ai|buzz\s*ai|bro))?$/i.test(clean)) {
+    return `You're welcome${nameGreeting}! Let me know anytime you need help with your inventory, bills, or store operations.`;
+  }
+
+  return null;
+}
+
 async function askViaFirestoreBridge(
   prompt: string,
   compactedHistory: { role: "user" | "assistant"; content: string }[],
@@ -1233,12 +1100,7 @@ async function askViaFirestoreBridge(
 ): Promise<AssistantResponse> {
   const reqId = `ai_rpc_req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const reqRef = doc(db, "settings", reqId);
-  const serializedAttachments = (attachments || []).map((a) => ({
-    name: a.name,
-    mimeType: a.mimeType,
-    kind: a.kind,
-    data: a.dataBase64,
-  }));
+  const serializedAttachments = serializeChatAttachments(attachments);
 
   return new Promise<AssistantResponse>((resolve, reject) => {
     let settled = false;
@@ -1380,7 +1242,7 @@ async function askViaFirestoreBridge(
           handleDocData(snap.data());
         }
       } catch {}
-    }, 220);
+    }, 120);
 
     const rawPayloadObj: any = {
       type: "chat",
@@ -1404,7 +1266,9 @@ async function askViaFirestoreBridge(
     }
     const safePayload = JSON.parse(serializedJson);
 
-    wakeUpBuzzServer();
+    if (!Capacitor.isNativePlatform()) {
+      wakeUpBuzzServer();
+    }
     setDoc(reqRef, safePayload)
       .then(() => {
         if (settled || serverAcknowledged) return;
@@ -1484,627 +1348,6 @@ export function buildValidGeminiContents(
   return contents;
 }
 
-/**
- * Builds low-latency generationConfig with minimal thinking where supported by Gemini 3.x models.
- */
-function getDirectModelGenerationConfig(
-  model: string,
-  temperature: number = 0.3,
-  maxOutputTokens: number = 1100
-): Record<string, any> {
-  const supportsMinimalThinking =
-    model === "gemini-3.5-flash-lite" ||
-    model === "gemini-3.1-flash-lite" ||
-    model === "gemini-3.5-flash";
-  return {
-    temperature,
-    maxOutputTokens,
-    ...(supportsMinimalThinking
-      ? { thinkingConfig: { thinkingLevel: "MINIMAL" } }
-      : {}),
-  };
-}
-
-function attachMediaToGeminiContents(
-  baseContents: Array<{ role: "user" | "model"; parts: Array<any> }>,
-  attachments?: ChatAttachment[]
-): Array<{ role: "user" | "model"; parts: Array<any> }> {
-  const cloned = baseContents.map((t) => ({ role: t.role, parts: [...t.parts] }));
-  if (attachments && attachments.length > 0) {
-    const lastUserTurn = cloned[cloned.length - 1];
-    if (lastUserTurn && lastUserTurn.role === "user") {
-      for (const att of attachments) {
-        if (att.dataBase64) {
-          lastUserTurn.parts.unshift({
-            inlineData: {
-              mimeType: att.mimeType || "image/jpeg",
-              data: att.dataBase64,
-            },
-          });
-        }
-      }
-    }
-  }
-  return cloned;
-}
-
-function finalizeDirectAssistantReply(
-  accumulatedRaw: string,
-  prompt: string,
-  compactedContext: StoreContext
-): AssistantResponse {
-  const cleanText = accumulatedRaw
-    .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-    .replace(/```action[\s\S]*?```/g, "")
-    .trim();
-
-  let actionData: any = null;
-  const actionMatch = accumulatedRaw.match(/```action\s*([\s\S]*?)\s*```/);
-  if (actionMatch && actionMatch[1]) {
-    try {
-      actionData = JSON.parse(actionMatch[1]);
-    } catch {}
-  }
-
-  const validatedAction = validateClientAction(
-    actionData,
-    prompt,
-    cleanText,
-    compactedContext
-  );
-
-  return {
-    reply: cleanText || "I've processed your request.",
-    action: validatedAction,
-    thought: generateDynamicThought(prompt, cleanText, compactedContext),
-    rawText: accumulatedRaw,
-  };
-}
-
-async function streamSingleDirectModel(
-  model: string,
-  apiKey: string,
-  contents: Array<{ role: "user" | "model"; parts: Array<any> }>,
-  systemPrompt: string,
-  prompt: string,
-  compactedContext: StoreContext,
-  onFirstToken: () => void,
-  onChunk: (cleanDisplay: string) => void,
-  signal: AbortSignal
-): Promise<AssistantResponse> {
-  const streamUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
-  const res = await fetch(streamUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents,
-      systemInstruction: {
-        parts: [{ text: systemPrompt }],
-      },
-      generationConfig: getDirectModelGenerationConfig(model, 0.3, 1100),
-    }),
-    signal,
-  });
-
-  if (!res.ok || !res.body) {
-    const errBody = await res.text().catch(() => "");
-    const keyErr = isApiKeyErrorResponse(res.status, errBody);
-    if (keyErr) {
-      markGeminiKeyRejected(apiKey);
-      throw new GeminiApiKeyError(
-        keyErr === "REVOKED_KEY"
-          ? "Buzz AI key was blocked by Google (reported as leaked). Tap 'Set AI Key' to add a fresh Gemini key."
-          : "Buzz AI key is invalid. Tap 'Set AI Key' to enter a valid Gemini key.",
-        keyErr
-      );
-    }
-    throw new Error(`Model ${model} returned HTTP ${res.status}`);
-  }
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let accumulatedRaw = "";
-  let emittedFirst = false;
-
-  while (true) {
-    if (signal.aborted) {
-      try {
-        reader.cancel();
-      } catch {}
-      throw new Error("Aborted");
-    }
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n");
-    buffer = lines.pop() || "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith("data:")) continue;
-      const jsonStr = trimmed.replace(/^data:\s*/, "");
-      try {
-        const data = JSON.parse(jsonStr);
-        const chunkText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (chunkText) {
-          if (!emittedFirst) {
-            emittedFirst = true;
-            onFirstToken();
-          }
-          accumulatedRaw += chunkText;
-          const cleanDisplay = accumulatedRaw
-            .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-            .replace(/<thought>[\s\S]*$/g, "")
-            .replace(/```action[\s\S]*?```/g, "")
-            .replace(/```action[\s\S]*$/g, "")
-            .trim();
-          if (cleanDisplay) {
-            onChunk(cleanDisplay);
-          }
-        }
-      } catch {}
-    }
-  }
-
-  if (!accumulatedRaw.trim()) {
-    throw new Error(`Model ${model} returned empty stream`);
-  }
-
-  return finalizeDirectAssistantReply(accumulatedRaw, prompt, compactedContext);
-}
-
-export async function directGeminiChatStream(
-  prompt: string,
-  compactedHistory: { role: "user" | "assistant"; content: string }[],
-  compactedContext: StoreContext,
-  onChunk: (chunk: string) => void,
-  externalSignal?: AbortSignal,
-  attachments?: ChatAttachment[]
-): Promise<AssistantResponse> {
-  const apiKey = await resolveGeminiApiKey();
-  if (!apiKey) {
-    throw new GeminiApiKeyError(
-      "Buzz AI needs a Gemini API key. Tap 'Set AI Key' to add your Google AI Studio key.",
-      "MISSING_KEY"
-    );
-  }
-  const hasAttachments = Boolean(attachments && attachments.length > 0);
-  // Race fast Flash-Lite variants and seamlessly fall back to stable Gemini 2.5 GA models
-  const primaryModel = hasAttachments ? "gemini-3.1-flash-lite" : "gemini-3.5-flash-lite";
-  const hedgeModel = hasAttachments ? "gemini-2.5-flash-lite" : "gemini-2.5-flash-lite";
-  const backupModels = hasAttachments
-    ? ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash"]
-    : ["gemini-3.1-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash"];
-
-  const systemPrompt = buildClientSystemPrompt(compactedContext);
-  const contents = attachMediaToGeminiContents(
-    buildValidGeminiContents(compactedHistory, prompt),
-    attachments
-  );
-
-  // Hedged execution: if primary hasn't produced first token within 2.2s (text) or 3.4s (vision), race hedgeModel
-  const primaryCtrl = new AbortController();
-  const hedgeCtrl = new AbortController();
-  let winner: "primary" | "hedge" | null = null;
-  let hedgeStarted = false;
-
-  const forwardAbort = () => {
-    primaryCtrl.abort();
-    hedgeCtrl.abort();
-  };
-  if (externalSignal) {
-    if (externalSignal.aborted) throw new Error("Aborted");
-    externalSignal.addEventListener("abort", forwardAbort, { once: true });
-  }
-
-  try {
-    const hedgeDelayMs = hasAttachments ? 3400 : 2200;
-    const primaryPromise = streamSingleDirectModel(
-      primaryModel,
-      apiKey,
-      contents,
-      systemPrompt,
-      prompt,
-      compactedContext,
-      () => {
-        if (!winner) {
-          winner = "primary";
-          hedgeCtrl.abort();
-        }
-      },
-      (cleanDisplay) => {
-        if (winner === "primary") onChunk(cleanDisplay);
-      },
-      primaryCtrl.signal
-    );
-
-    const hedgePromise = new Promise<AssistantResponse>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        if (winner || externalSignal?.aborted) {
-          reject(new Error("Skipped hedge"));
-          return;
-        }
-        hedgeStarted = true;
-        streamSingleDirectModel(
-          hedgeModel,
-          apiKey,
-          contents,
-          systemPrompt,
-          prompt,
-          compactedContext,
-          () => {
-            if (!winner) {
-              winner = "hedge";
-              primaryCtrl.abort();
-            }
-          },
-          (cleanDisplay) => {
-            if (winner === "hedge") onChunk(cleanDisplay);
-          },
-          hedgeCtrl.signal
-        ).then(resolve, reject);
-      }, hedgeDelayMs);
-
-      primaryPromise.then(
-        () => clearTimeout(timer),
-        () => {
-          clearTimeout(timer);
-          if (!hedgeStarted && !winner && !externalSignal?.aborted) {
-            hedgeStarted = true;
-            streamSingleDirectModel(
-              hedgeModel,
-              apiKey,
-              contents,
-              systemPrompt,
-              prompt,
-              compactedContext,
-              () => {
-                if (!winner) {
-                  winner = "hedge";
-                }
-              },
-              (cleanDisplay) => {
-                if (winner === "hedge") onChunk(cleanDisplay);
-              },
-              hedgeCtrl.signal
-            ).then(resolve, reject);
-          }
-        }
-      );
-    });
-
-    try {
-      return await Promise.any([primaryPromise, hedgePromise]);
-    } catch (aggErr: any) {
-      if (externalSignal?.aborted) throw new Error("Aborted");
-      const firstKeyErr = Array.isArray(aggErr?.errors)
-        ? aggErr.errors.find((e: any) => e instanceof GeminiApiKeyError)
-        : aggErr instanceof GeminiApiKeyError
-        ? aggErr
-        : null;
-      if (firstKeyErr) {
-        throw firstKeyErr;
-      }
-      // Sequential fallback across remaining models (handles 404 alias differences cleanly)
-      for (const fallbackModel of backupModels) {
-        if (externalSignal?.aborted) throw new Error("Aborted");
-        const fallbackCtrl = new AbortController();
-        const abortFallback = () => fallbackCtrl.abort();
-        externalSignal?.addEventListener("abort", abortFallback, { once: true });
-        try {
-          return await streamSingleDirectModel(
-            fallbackModel,
-            apiKey,
-            contents,
-            systemPrompt,
-            prompt,
-            compactedContext,
-            () => {},
-            onChunk,
-            fallbackCtrl.signal
-          );
-        } catch (err: any) {
-          if (err instanceof GeminiApiKeyError) throw err;
-        } finally {
-          externalSignal?.removeEventListener("abort", abortFallback);
-        }
-      }
-      throw new Error("All Gemini streaming models failed for this request.");
-    }
-  } finally {
-    if (externalSignal) {
-      externalSignal.removeEventListener("abort", forwardAbort);
-    }
-  }
-}
-
-export async function directGeminiChat(
-  prompt: string,
-  compactedHistory: { role: "user" | "assistant"; content: string }[],
-  compactedContext: StoreContext,
-  attachments?: ChatAttachment[]
-): Promise<AssistantResponse> {
-  const apiKey = await resolveGeminiApiKey();
-  if (!apiKey) {
-    throw new GeminiApiKeyError(
-      "Buzz AI needs a Gemini API key. Tap 'Set AI Key' to add your Google AI Studio key.",
-      "MISSING_KEY"
-    );
-  }
-  const hasAttachments = Boolean(attachments && attachments.length > 0);
-  const models = hasAttachments
-    ? ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
-    : ["gemini-3.5-flash-lite", "gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-2.5-flash"];
-  const systemPrompt = buildClientSystemPrompt(compactedContext);
-  const baseContents = attachMediaToGeminiContents(
-    buildValidGeminiContents(compactedHistory, prompt),
-    attachments
-  );
-
-  for (const model of models) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: baseContents,
-          systemInstruction: {
-            parts: [{ text: systemPrompt }],
-          },
-          generationConfig: getDirectModelGenerationConfig(model, 0.3, 1100),
-        }),
-      });
-
-      if (!res.ok) {
-        const errBody = await res.text().catch(() => "");
-        const keyErr = isApiKeyErrorResponse(res.status, errBody);
-        if (keyErr) {
-          markGeminiKeyRejected(apiKey);
-          throw new GeminiApiKeyError(
-            keyErr === "REVOKED_KEY"
-              ? "Buzz AI key was blocked by Google (reported as leaked). Tap 'Set AI Key' to add a fresh Gemini key."
-              : "Buzz AI key is invalid. Tap 'Set AI Key' to enter a valid Gemini key.",
-            keyErr
-          );
-        }
-        continue;
-      }
-      const data = await res.json();
-      const rawText = String(data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
-      if (!rawText) continue;
-
-      return finalizeDirectAssistantReply(rawText, prompt, compactedContext);
-    } catch (err: any) {
-      if (err instanceof GeminiApiKeyError) throw err;
-    }
-  }
-
-  throw new Error("Could not connect to Buzz AI.");
-}
-
-export async function directGeminiTts(cleanText: string, timeoutMs: number = 5000): Promise<string> {
-  const apiKey = await resolveGeminiApiKey();
-  const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-2.5-flash-preview-tts", "gemini-3.8-flash-tts"];
-
-  for (const model of ttsModels) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [{ text: cleanText }],
-            },
-          ],
-          generationConfig: {
-            responseModalities: ["AUDIO"],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: {
-                  voiceName: "Kore",
-                },
-              },
-            },
-          },
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timer);
-
-      if (!res.ok) continue;
-      const data = await res.json();
-      const pcmBase64 = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (pcmBase64) {
-        const wavB64 = clientPcmToWavBase64(pcmBase64, 24000);
-        return `data:audio/wav;base64,${wavB64}`;
-      }
-    } catch {
-      clearTimeout(timer);
-    }
-  }
-
-  throw new Error("Direct TTS failed");
-}
-
-export async function directGeminiTranscribe(audioBase64: string, mimeType: string): Promise<string> {
-  const apiKey = await resolveGeminiApiKey();
-  const models = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.5-transcribe"];
-
-  for (const model of models) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
-            {
-              role: "user",
-              parts: [
-                {
-                  inlineData: {
-                    mimeType,
-                    data: audioBase64,
-                  },
-                },
-                {
-                  text: "Transcribe this audio clip accurately. Output ONLY the verbatim spoken words without commentary, quotes, punctuation formatting, or timestamps.",
-                },
-              ],
-            },
-          ],
-        }),
-      });
-
-      if (!res.ok) continue;
-      const data = await res.json();
-      const transcript = String(data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
-      if (transcript) return transcript;
-    } catch {}
-  }
-
-  throw new Error("Direct audio transcription failed");
-}
-
-export async function directGeminiAnalyzeMedia(
-  mediaBase64: string,
-  mimeType: string,
-  fileName: string,
-  customPrompt?: string
-): Promise<MediaAnalysisResult> {
-  const apiKey = await resolveGeminiApiKey();
-  if (!apiKey) {
-    throw new GeminiApiKeyError(
-      "Buzz AI needs a Gemini API key. Tap 'Set AI Key' to add your Google AI Studio key.",
-      "MISSING_KEY"
-    );
-  }
-  const isVideo = mimeType.startsWith("video/");
-  const mediaKind: "video" | "image" = isVideo ? "video" : "image";
-
-  const userQuestion = String(customPrompt || "").trim();
-  const promptText = `Analyze this uploaded ${mediaKind} ("${fileName}").
-${userQuestion ? `User's specific question: "${userQuestion}"\n` : ""}
-Provide two things:
-1. SUMMARY: A concise summary of the items, bills, store shelves, or events shown.
-2. TEXT: Extract all visible text, numbers, prices, or spoken dialogue. If none, write "No visible text detected."`;
-
-  const callVisionModel = async (model: string, signal: AbortSignal): Promise<MediaAnalysisResult> => {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            role: "user",
-            parts: [
-              {
-                inlineData: {
-                  mimeType,
-                  data: mediaBase64,
-                },
-              },
-              {
-                text: promptText,
-              },
-            ],
-          },
-        ],
-        generationConfig: getDirectModelGenerationConfig(model, 0.2, 700),
-      }),
-      signal,
-    });
-
-    if (!res.ok) {
-      const errBody = await res.text().catch(() => "");
-      const keyErr = isApiKeyErrorResponse(res.status, errBody);
-      if (keyErr) {
-        markGeminiKeyRejected(apiKey);
-        throw new GeminiApiKeyError(
-          keyErr === "REVOKED_KEY"
-            ? "Buzz AI key was blocked by Google (reported as leaked). Tap 'Set AI Key' to add a fresh Gemini key."
-            : "Buzz AI key is invalid. Tap 'Set AI Key' to enter a valid Gemini key.",
-          keyErr
-        );
-      }
-      throw new Error(`Vision ${model} HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    const reply = String(data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
-    if (!reply) throw new Error(`Vision ${model} empty reply`);
-    return {
-      summary: reply,
-      transcribedText: reply,
-      detectedLanguage: "Auto-detected",
-      keyHighlights: [],
-      mediaKind,
-      fileName,
-      mimeType,
-      previewUrl: `data:${mimeType};base64,${mediaBase64.slice(0, 50)}...`,
-    };
-  };
-
-  // Hedged vision execution: gemini-3.1-flash-lite first, race gemini-2.5-flash-lite if >2.5s
-  const primaryCtrl = new AbortController();
-  const hedgeCtrl = new AbortController();
-  const primaryPromise = callVisionModel("gemini-3.1-flash-lite", primaryCtrl.signal).then((r) => {
-    hedgeCtrl.abort();
-    return r;
-  });
-
-  const hedgePromise = new Promise<MediaAnalysisResult>((resolve, reject) => {
-    let launched = false;
-    const launchHedge = () => {
-      if (launched) return;
-      launched = true;
-      callVisionModel("gemini-2.5-flash-lite", hedgeCtrl.signal)
-        .then((r) => {
-          primaryCtrl.abort();
-          resolve(r);
-        })
-        .catch(reject);
-    };
-    const timer = setTimeout(launchHedge, 2500);
-    primaryPromise.then(
-      () => clearTimeout(timer),
-      () => {
-        clearTimeout(timer);
-        launchHedge();
-      }
-    );
-  });
-
-  try {
-    return await Promise.any([primaryPromise, hedgePromise]);
-  } catch (aggErr: any) {
-    const keyErr = Array.isArray(aggErr?.errors)
-      ? aggErr.errors.find((e: any) => e instanceof GeminiApiKeyError)
-      : aggErr instanceof GeminiApiKeyError
-      ? aggErr
-      : null;
-    if (keyErr) throw keyErr;
-    for (const model of ["gemini-3.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash"]) {
-      const fallbackCtrl = new AbortController();
-      try {
-        return await callVisionModel(model, fallbackCtrl.signal);
-      } catch (err: any) {
-        if (err instanceof GeminiApiKeyError) throw err;
-      }
-    }
-    throw new Error("Vision analysis failed across all Gemini models.");
-  }
-}
-
 export async function askGeminiAssistant(
   prompt: string,
   conversationHistory: ConversationTurnInput[],
@@ -2126,18 +1369,26 @@ export async function askGeminiAssistant(
     compactedContext,
     compactedHistory
   ).action;
-  const serializedAttachments = (attachments || []).map((a) => ({
-    name: a.name,
-    mimeType: a.mimeType,
-    kind: a.kind,
-    data: a.dataBase64,
-  }));
+  const serializedAttachments = serializeChatAttachments(attachments);
   const hasAttachments = serializedAttachments.length > 0;
+  if (!hasAttachments) {
+    const instantGreeting = getClientInstantGreetingReply(prompt, storeContext);
+    if (instantGreeting) {
+      return {
+        reply: instantGreeting,
+        action: null,
+        thought: "Recognized greeting and verified live store readiness.",
+        thoughtDuration: 1,
+      };
+    }
+  }
 
   const hasHistoryMedia = (compactedHistory || []).some(
     (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
   );
   const hasAnyMedia = hasAttachments || hasHistoryMedia;
+
+  let lastHttpError = "";
 
   const tryHttpChat = async (): Promise<AssistantResponse | null> => {
     for (const baseUrl of getCandidateApiBaseUrls()) {
@@ -2162,63 +1413,51 @@ export async function askGeminiAssistant(
         clearTimeout(timer);
 
         const contentType = response.headers.get("content-type") || "";
-        if (response.ok && contentType.includes("application/json")) {
-          lastHttpFailureAt = 0;
-          const data = await response.json();
-          const replyStr = String(data?.reply || "").trim();
-          if (replyStr) {
-            data.reply = replyStr;
-            data.action =
-              validateClientAction(data.action, prompt, data.reply, compactedContext) ||
-              localActionCandidate ||
-              null;
-            return data;
+        if (contentType.includes("application/json")) {
+          const data = await response.json().catch(() => ({}));
+          if (response.ok) {
+            lastHttpFailureAt = 0;
+            const replyStr = String(data?.reply || "").trim();
+            if (replyStr) {
+              data.reply = replyStr;
+              data.action =
+                validateClientAction(data.action, prompt, data.reply, compactedContext) ||
+                localActionCandidate ||
+                null;
+              return data;
+            }
+          } else if (data?.error) {
+            lastHttpError = String(data.error);
+            if (
+              lastHttpError.includes("PERMISSION_DENIED") ||
+              lastHttpError.includes("Settings > Secrets") ||
+              lastHttpError.includes("leaked")
+            ) {
+              throw new Error(lastHttpError);
+            }
           }
-        } else {
-          lastHttpFailureAt = Date.now();
         }
-      } catch {
+        lastHttpFailureAt = Date.now();
+      } catch (err: any) {
         clearTimeout(timer);
         lastHttpFailureAt = Date.now();
+        const msg = String(err?.message || "");
+        if (
+          msg.includes("PERMISSION_DENIED") ||
+          msg.includes("Settings > Secrets") ||
+          msg.includes("leaked")
+        ) {
+          throw err;
+        }
       }
     }
     return null;
   };
 
-  // 1. Prioritize Direct Client Gemini Chat on native Android APK
-  if (Capacitor.isNativePlatform()) {
-    try {
-      const directRes = await directGeminiChat(
-        prompt,
-        compactedHistory,
-        compactedContext,
-        attachments
-      );
-      if (directRes && directRes.reply) {
-        return directRes;
-      }
-    } catch (err) {
-      console.warn("Direct native chat error, trying fallbacks:", err);
-    }
-  }
-
   if (!shouldPreferFirestoreBridge()) {
     const httpRes = await tryHttpChat();
     if (httpRes) return httpRes;
   }
-
-  // 2. Direct Gemini Chat fallback for web
-  try {
-    const directRes = await directGeminiChat(
-      prompt,
-      compactedHistory,
-      compactedContext,
-      attachments
-    );
-    if (directRes && directRes.reply) {
-      return directRes;
-    }
-  } catch {}
 
   try {
     return await askViaFirestoreBridge(
@@ -2233,7 +1472,8 @@ export async function askGeminiAssistant(
     const retryHttp = await tryHttpChat();
     if (retryHttp) return retryHttp;
     throw new Error(
-      bridgeErr?.message ||
+      lastHttpError ||
+        bridgeErr?.message ||
         "Could not get a response from Buzz AI right now. Please try again."
     );
   }
@@ -2265,13 +1505,21 @@ export async function askGeminiAssistantStream(
     compactedContext,
     compactedHistory
   ).action;
-  const serializedAttachments = (attachments || []).map((a) => ({
-    name: a.name,
-    mimeType: a.mimeType,
-    kind: a.kind,
-    data: a.dataBase64,
-  }));
+  const serializedAttachments = serializeChatAttachments(attachments);
   const hasAttachments = serializedAttachments.length > 0;
+  if (!hasAttachments) {
+    const instantGreeting = getClientInstantGreetingReply(prompt, storeContext);
+    if (instantGreeting) {
+      onChunk(instantGreeting);
+      onComplete({
+        reply: instantGreeting,
+        action: null,
+        thought: "Recognized greeting and verified live store readiness.",
+        thoughtDuration: 1,
+      });
+      return;
+    }
+  }
 
   let completed = false;
   let userAborted = false;
@@ -2353,31 +1601,6 @@ export async function askGeminiAssistantStream(
       } catch {}
     }, ms);
   };
-
-  // 1. On native Android APK, use Direct Client Gemini Streaming for instantaneous streaming text
-  let capturedKeyError: GeminiApiKeyError | null = null;
-  if (Capacitor.isNativePlatform()) {
-    try {
-      const res = await directGeminiChatStream(
-        prompt,
-        compactedHistory,
-        compactedContext,
-        emitChunk,
-        externalSignal,
-        attachments
-      );
-      if (res && res.reply) {
-        safeComplete(res);
-        return;
-      }
-    } catch (err: any) {
-      if (userAborted || completed || externalSignal?.aborted) return;
-      if (err instanceof GeminiApiKeyError) {
-        throw err;
-      }
-      console.warn("Direct native Gemini stream failed, trying fallbacks:", err);
-    }
-  }
 
   if (!shouldPreferFirestoreBridge()) {
     refreshStreamTimeout(tierTimeoutMs);
@@ -2514,11 +1737,20 @@ export async function askGeminiAssistantStream(
         });
         return;
       }
-    } catch {
+    } catch (streamErr: any) {
       lastHttpFailureAt = Date.now();
       if (timeoutId !== null) {
         clearTimeout(timeoutId);
         timeoutId = null;
+      }
+      const streamErrMsg = String(streamErr?.message || "");
+      if (
+        streamErrMsg.includes("PERMISSION_DENIED") ||
+        streamErrMsg.includes("Settings > Secrets") ||
+        streamErrMsg.includes("leaked") ||
+        streamErrMsg.includes("API_KEY_INVALID")
+      ) {
+        throw streamErr;
       }
     }
   } else if (timeoutId !== null) {
@@ -2528,28 +1760,42 @@ export async function askGeminiAssistantStream(
 
   if (userAborted || completed || externalSignal?.aborted) return;
 
-  // Fallback: Direct Client Gemini Stream if server endpoint was unreachable
-  try {
-    const res = await directGeminiChatStream(
-      prompt,
-      compactedHistory,
-      compactedContext,
-      emitChunk,
-      externalSignal,
-      attachments
-    );
-    if (res && res.reply) {
-      safeComplete(res);
-      return;
-    }
-  } catch (err: any) {
-    if (userAborted || completed || externalSignal?.aborted) return;
-    if (err instanceof GeminiApiKeyError) {
-      throw err;
+  let lastFallbackError = "";
+
+  const bridgePromise = askViaFirestoreBridge(
+    prompt,
+    compactedHistory,
+    compactedContext,
+    emitChunk,
+    externalSignal,
+    attachments
+  ).then((bridgeRes) => {
+    const replyStr = String(bridgeRes.reply || "").trim();
+    if (!replyStr) throw new Error("Empty bridge reply");
+    return {
+      ...bridgeRes,
+      reply: replyStr,
+      action:
+        validateClientAction(bridgeRes.action, prompt, replyStr, compactedContext) ||
+        localActionCandidate ||
+        null,
+    };
+  });
+
+  if (shouldPreferFirestoreBridge()) {
+    try {
+      const winner = await bridgePromise;
+      if (!userAborted && !completed && !externalSignal?.aborted && String(winner.reply || "").trim()) {
+        emitChunk(winner.reply);
+        safeComplete(winner);
+        return;
+      }
+    } catch (bridgeErr: any) {
+      lastFallbackError = String(bridgeErr?.message || "");
     }
   }
 
-  // Fallback 1 & 2: Race Firestore RPC bridge with parallel direct HTTP endpoints so whichever completes first wins
+  // Fallback: Race server-side Firestore RPC bridge with parallel server HTTP endpoints so whichever completes first wins
   const directHttpPromise = Promise.any(
     getCandidateApiBaseUrls().map(async (baseUrl): Promise<AssistantResponse> => {
       if (userAborted || completed || externalSignal?.aborted) {
@@ -2572,18 +1818,23 @@ export async function askGeminiAssistantStream(
         });
         clearTimeout(chatTimer);
         const contentType = response.headers.get("content-type") || "";
-        if (response.ok && contentType.includes("application/json")) {
-          const data = await response.json();
-          const replyStr = String(data?.reply || "").trim();
-          if (replyStr) {
-            return {
-              reply: replyStr,
-              action:
-                validateClientAction(data.action, prompt, replyStr, compactedContext) ||
-                localActionCandidate ||
-                null,
-              thought: data.thought || generateDynamicThought(prompt, replyStr, storeContext),
-            };
+        if (contentType.includes("application/json")) {
+          const data = await response.json().catch(() => ({}));
+          if (response.ok) {
+            const replyStr = String(data?.reply || "").trim();
+            if (replyStr) {
+              return {
+                reply: replyStr,
+                action:
+                  validateClientAction(data.action, prompt, replyStr, compactedContext) ||
+                  localActionCandidate ||
+                  null,
+                thought: data.thought || generateDynamicThought(prompt, replyStr, storeContext),
+              };
+            }
+          } else if (data?.error) {
+            lastFallbackError = String(data.error);
+            throw new Error(lastFallbackError);
           }
         }
         throw new Error(`Status ${response.status}`);
@@ -2594,26 +1845,6 @@ export async function askGeminiAssistantStream(
     })
   );
 
-  const bridgePromise = askViaFirestoreBridge(
-    prompt,
-    compactedHistory,
-    compactedContext,
-    emitChunk,
-    externalSignal,
-    attachments
-  ).then((bridgeRes) => {
-    const replyStr = String(bridgeRes.reply || "").trim();
-    if (!replyStr) throw new Error("Empty bridge reply");
-    return {
-      ...bridgeRes,
-      reply: replyStr,
-      action:
-        validateClientAction(bridgeRes.action, prompt, replyStr, compactedContext) ||
-        localActionCandidate ||
-        null,
-    };
-  });
-
   try {
     const winner = await Promise.any([directHttpPromise, bridgePromise]);
     if (!userAborted && !completed && !externalSignal?.aborted && String(winner.reply || "").trim()) {
@@ -2621,9 +1852,17 @@ export async function askGeminiAssistantStream(
       safeComplete(winner);
       return;
     }
-  } catch {}
+  } catch (err: any) {
+    if (!lastFallbackError && err?.errors && Array.isArray(err.errors)) {
+      const firstMeaningful = err.errors
+        .map((e: any) => String(e?.message || ""))
+        .find((m: string) => m && !m.startsWith("Status ") && m !== "Aborted");
+      if (firstMeaningful) {
+        lastFallbackError = firstMeaningful;
+      }
+    }
+  }
 
-  // If partial chunks were already streamed from the real AI, complete with those; otherwise throw a real error (never emit a dummy recorded reply)
   if (!userAborted && !completed && !externalSignal?.aborted) {
     if (lastStreamedChunk) {
       safeComplete({
@@ -2631,10 +1870,11 @@ export async function askGeminiAssistantStream(
         action: validateClientAction(null, prompt, lastStreamedChunk, compactedContext) || localActionCandidate || null,
         thought: generateDynamicThought(prompt, lastStreamedChunk, storeContext),
       });
-    } else if (capturedKeyError) {
-      throw capturedKeyError;
     } else {
-      throw new Error("Buzz AI is taking longer than expected or could not reach the server. Please try again.");
+      throw new Error(
+        lastFallbackError ||
+          "Buzz AI is taking longer than expected or could not reach the server. Please try again."
+      );
     }
   }
 }
@@ -3986,7 +3226,7 @@ async function transcribeViaFirestoreBridge(
           handleDocData(snap.data());
         }
       } catch {}
-    }, 650);
+    }, 120);
 
     setDoc(reqRef, {
       type: "transcribe",
@@ -4021,20 +3261,12 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
   const rawType = (audioBlob.type || "audio/webm").split(";")[0].trim();
   const mimeType = rawType || "audio/webm";
 
-  // 1. Direct Client Gemini Transcription (works natively on Android APK & Web)
-  try {
-    const transcript = await directGeminiTranscribe(audioBase64, mimeType);
-    if (transcript) return transcript;
-  } catch (err) {
-    console.warn("Direct client transcription error, checking server fallback:", err);
-  }
-
-  // 2. Call server endpoint /api/gemini/transcribe when direct HTTP is available
+  // 1. Call server endpoint /api/gemini/transcribe when direct HTTP is available
   if (!shouldPreferFirestoreBridge()) {
     for (const baseUrl of getCandidateApiBaseUrls()) {
       const endpoint = `${baseUrl}/api/gemini/transcribe`;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
+      const timer = setTimeout(() => controller.abort(), 6000);
 
       try {
         const response = await fetch(endpoint, {
@@ -4192,27 +3424,12 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
     return clientTtsCache.get(cleanKey)!;
   }
 
-  // 1. Direct Client Gemini Neural TTS (works on Android APK and Web)
-  try {
-    const dataUri = await directGeminiTts(cleanKey, Math.min(timeoutMs, 4500));
-    if (dataUri) {
-      if (clientTtsCache.size > 40) {
-        const oldestKey = clientTtsCache.keys().next().value;
-        if (oldestKey) clientTtsCache.delete(oldestKey);
-      }
-      clientTtsCache.set(cleanKey, dataUri);
-      return dataUri;
-    }
-  } catch (err) {
-    console.warn("Direct client TTS error, trying server fallback:", err);
-  }
-
-  // 2. Call server endpoint /api/gemini/tts when direct HTTP is available
+  // 1. Call server endpoint /api/gemini/tts when direct HTTP is available
   if (!shouldPreferFirestoreBridge()) {
     for (const baseUrl of getCandidateApiBaseUrls()) {
       const endpoint = `${baseUrl}/api/gemini/tts`;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 4200));
+      const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 4800));
 
       try {
         const response = await fetch(endpoint, {
@@ -4251,7 +3468,7 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
 
   // 2. Server-side Firestore RPC bridge fallback
   try {
-    const audioBase64 = await ttsViaFirestoreBridge(cleanKey, Math.min(timeoutMs, 4200));
+    const audioBase64 = await ttsViaFirestoreBridge(cleanKey, Math.min(timeoutMs, 4800));
     if (audioBase64) {
       const wavB64 = clientPcmToWavBase64(audioBase64, 24000);
       const dataUri = `data:audio/wav;base64,${wavB64}`;
@@ -4409,21 +3626,7 @@ export async function analyzeMediaWithGemini(
     previewUrl = URL.createObjectURL(file);
   }
 
-  // 1. Direct Client Gemini Multimodal Analysis (works natively on Android APK & Web)
-  try {
-    const directResult = await directGeminiAnalyzeMedia(mediaBase64, effectiveMimeType, file.name, customPrompt);
-    if (directResult) {
-      return {
-        ...directResult,
-        fileSize: file.size,
-        previewUrl,
-      };
-    }
-  } catch (err) {
-    console.warn("Direct client media analysis error, trying server endpoints:", err);
-  }
-
-  // 2. Try HTTP endpoints if on Web
+  // Call server endpoint /api/gemini/analyze-media
   for (const baseUrl of getCandidateApiBaseUrls()) {
     const endpoint = `${baseUrl}/api/gemini/analyze-media`;
     const controller = new AbortController();

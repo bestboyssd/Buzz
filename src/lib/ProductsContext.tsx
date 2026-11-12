@@ -28,6 +28,7 @@ import {
   wasStockTransitionRecentlyHandled,
   markStockTransitionHandled,
   formatStockAlertNotification,
+  shouldSuppressInitialInstallStockReminder,
 } from "./stockAlerts";
 import { getImageUrl, preloadProductImages } from "./imageUtils";
 import {
@@ -800,6 +801,7 @@ export function ProductsProvider({ children }: { children: React.ReactNode }) {
     const unsubscribe = onSnapshot(
       collRef,
       (snapshot) => {
+        const isFirstCloudSnapshot = !hasReceivedFirestoreSnapshot.current;
         hasReceivedFirestoreSnapshot.current = true;
         setIsCloudSynced(true);
         const deletedIds = getDeletedProductIds();
@@ -866,7 +868,12 @@ export function ProductsProvider({ children }: { children: React.ReactNode }) {
         persistLocalProductsFallback(cleanData);
 
         // Instant real-time cross-device stock drop detection (out-of-stock / critical / low)
-        const hadBaselineStocks = Object.keys(lastSeenStocks.current).length > 0;
+        // Never fire on the first cloud snapshot of a session or when no user is signed in
+        const activeUid = userRef.current?.uid || "";
+        const hadBaselineStocks =
+          !isFirstCloudSnapshot &&
+          Boolean(activeUid) &&
+          Object.keys(lastSeenStocks.current).length > 0;
         const nextStockMap: Record<string, number> = { ...lastSeenStocks.current };
         for (const prod of cleanData) {
           if (!prod?.id) continue;
@@ -877,8 +884,7 @@ export function ProductsProvider({ children }: { children: React.ReactNode }) {
             if (severity && !wasStockTransitionRecentlyHandled(prod.id, severity, nextStock)) {
               markStockTransitionHandled(prod.id, severity, nextStock);
               const canonicalKey = buildCanonicalStockKey(severity, prod.id, nextStock);
-              const uid = userRef.current?.uid;
-              const storageKey = uid ? `notifications_${uid}` : "notifications";
+              const storageKey = `notifications_${activeUid}`;
               const alreadyHandledNative = wasNativeAlertHandled("stock", canonicalKey, Date.now());
               markNativeAlertHandled("stock", canonicalKey, Date.now());
               if (localStorage.getItem(storageKey) !== "false" && !alreadyHandledNative) {
@@ -1035,12 +1041,25 @@ export function ProductsProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // If this user account was just created within the last 3 minutes, silently seed today's set
-      // so a brand-new account is never showered with notifications upon registration.
+      // Check if we already fired the daily morning stock summary today on this device or for this user
+      const dailySummarySentKey = `daily_stock_summary_sent_${todayKey}`;
+      const userSummarySentKey = `daily_stock_summary_sent_${uid}_${todayKey}`;
+      const deviceBaselineSeededKey = "buzz_device_stock_baseline_seeded_v1";
+      const userBaselineSeededKey = `first_install_stock_seeded_v1_${uid}`;
+
+      // If this app was just installed on this device, this user is logging in on this device for
+      // the first time, or the account was just created, silently seed existing out-of-stock / low-stock
+      // items as baseline so a fresh install or new user never gets an immediate Out of Stock notification.
       const creationTimeStr = (user as any)?.metadata?.creationTime;
       const creationMs = creationTimeStr ? new Date(creationTimeStr).getTime() : 0;
       const isBrandNewAccount = creationMs > 0 && now - creationMs < 3 * 60 * 1000;
-      if (isBrandNewAccount) {
+      const shouldSeedSilently = shouldSuppressInitialInstallStockReminder({
+        hasDeviceBaselineSeeded: Boolean(localStorage.getItem(deviceBaselineSeededKey)),
+        hasUserBaselineSeeded: Boolean(localStorage.getItem(userBaselineSeededKey)),
+        isBrandNewAccount,
+      });
+
+      if (shouldSeedSilently) {
         allAttentionItems.forEach((p) => {
           if (p.id) {
             userNotifiedSet.add(p.id);
@@ -1048,15 +1067,16 @@ export function ProductsProvider({ children }: { children: React.ReactNode }) {
           }
         });
         try {
+          localStorage.setItem(deviceBaselineSeededKey, String(now));
+          localStorage.setItem(userBaselineSeededKey, String(now));
           localStorage.setItem(userDailyKey, JSON.stringify(Array.from(userNotifiedSet)));
           localStorage.setItem(deviceDailyKey, JSON.stringify(Array.from(deviceNotifiedSet)));
+          localStorage.setItem(dailySummarySentKey, "true");
+          localStorage.setItem(userSummarySentKey, "true");
         } catch {}
         return;
       }
 
-      // Check if we already fired the daily morning stock summary today on this device or for this user
-      const dailySummarySentKey = `daily_stock_summary_sent_${todayKey}`;
-      const userSummarySentKey = `daily_stock_summary_sent_${uid}_${todayKey}`;
       const alreadySentDailySummary =
         localStorage.getItem(dailySummarySentKey) === "true" ||
         localStorage.getItem(userSummarySentKey) === "true";
