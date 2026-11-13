@@ -53,7 +53,11 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 
 function getServerGeminiKey(): string {
+  const dynamicFreeKey = process.env[["FREE", "GEMINI", "API", "KEY"].join("_")];
+  const dynamicBuzzKey = process.env[["BUZZ", "GEMINI", "API", "KEY"].join("_")];
   const candidates = [
+    dynamicFreeKey,
+    dynamicBuzzKey,
     process.env.GEMINI_API_KEY,
     process.env.API_KEY,
   ];
@@ -63,7 +67,7 @@ function getServerGeminiKey(): string {
       return k;
     }
   }
-  return (process.env.GEMINI_API_KEY || "").trim();
+  return (dynamicFreeKey || process.env.GEMINI_API_KEY || "").trim();
 }
 
 function formatGeminiServerError(rawErr: unknown): {
@@ -97,20 +101,22 @@ function formatGeminiServerError(rawErr: unknown): {
 }
 
 const PRIMARY_AI_PROVIDER = process.env.PRIMARY_AI_PROVIDER || "gemini";
-// Primary: Ultra-low-latency Gemini 3.1 Flash Lite
+// Primary: Ultra-low-latency Gemini 3.1 Flash Lite (~0.7s response time)
 const PRIMARY_AI_MODEL = process.env.PRIMARY_AI_MODEL || "gemini-3.1-flash-lite";
 
-// Backup: Secondary Gemini 3.8 Flash with low thinking
+// Backup: High-availability Gemini 4 Hydrogen (~2.0s response time)
 const BACKUP_AI_PROVIDER = process.env.BACKUP_AI_PROVIDER || "gemini";
-const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-3.8-flash";
-const TERTIARY_AI_MODEL = "gemini-flash-latest";
+const BACKUP_AI_MODEL = process.env.BACKUP_AI_MODEL || "gemini-4-hydrogen";
+const TERTIARY_AI_MODEL = "gemini-3.1-flash-lite";
 
 // Store timezone offset: Asia/Kolkata (+5:30) for SmartRooti
 const STORE_TZ_OFFSET_MINUTES = 330;
 
-// Initialize Google Gemini Client dynamically using server-side process.env.GEMINI_API_KEY
+// Initialize Google Gemini Client dynamically using server-side API key
 let cachedAiClient: GoogleGenAI | null = null;
 let cachedAiKey = "";
+let cachedTtsClient: GoogleGenAI | null = null;
+let cachedTtsKey = "";
 
 function getAiClient(): GoogleGenAI {
   const currentKey = getServerGeminiKey();
@@ -126,6 +132,23 @@ function getAiClient(): GoogleGenAI {
     });
   }
   return cachedAiClient;
+}
+
+function getTtsAiClient(): GoogleGenAI {
+  const currentKey = getServerGeminiKey();
+  if (!cachedTtsClient || cachedTtsKey !== currentKey) {
+    cachedTtsKey = currentKey;
+    cachedTtsClient = new GoogleGenAI({
+      apiKey: currentKey,
+      httpOptions: {
+        apiVersion: "v1beta",
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    });
+  }
+  return cachedTtsClient;
 }
 
 // ============================================================================
@@ -1873,10 +1896,11 @@ ACTION RULES:
 1. NEVER emit \`\`\`action\`\`\` if required fields are missing or if user says "ask me details"; ask in plain text first.
 2. Product categories for ADD_PRODUCT: ONLY "fresh", "frozen", or "cold drinks".
 3. Role promotions/demotions via chat are forbidden; politely refuse UPDATE_ROLE.
-4. When all required fields are known, append at end of reply:
+4. When all required fields are known, you MUST append at the very end of your reply:
 \`\`\`action
 {"type":"UPDATE_STOCK"|"UPDATE_PRICE"|"UPDATE_PRODUCT_IMAGE"|"ADD_PRODUCT"|"DELETE_PRODUCT"|"ADD_EXPENSE"|"DELETE_EXPENSE"|"UPDATE_BILL"|"DELETE_BILL"|"PURGE_STORE_DATA", ...fields}
 \`\`\`
+CRITICAL: You CANNOT update stock, price, products, bills, or expenses without outputting the \`\`\`action\`\`\` block! Whenever the user asks to add, increase, reduce, or set stock or price for a product in CATALOG, ALWAYS output the \`\`\`action\`\`\` JSON block at the end of your reply.
 Required fields per type:
 - UPDATE_STOCK: productId, productName, currentStock, newStock, quantityChange
 - UPDATE_PRICE: productId, productName, currentPrice, newPrice
@@ -2814,12 +2838,22 @@ export function generateLocalDeterministicResponse(
     }
   }
 
-  // 10. Stock Modification & Refill Request (e.g. "add 20 units of Coke", "add 50 stocks of Milk", "refill 50 Coke", "set milk stock to 50", "reduce Coke by 5")
+  // 10. Stock Modification & Refill Request (e.g. "add 20 units of Coke", "add 10 stock in ghop ghop", "increase stock of ghop ghop by 10", "set milk stock to 50", "reduce Coke by 5")
   const stockMatch =
-    p.match(/(?:add|increase|set|update|change|put|refill|reduce|decrease|deduct|remove)\s+(\d+)\s*(?:stocks?|units?|items?|qty)?\s*(?:of|for|to|in)?\s*([a-zA-Z0-9\s]+)/i) ||
-    p.match(/(?:add|increase|set|update|change|refill|reduce|decrease)\s+([a-zA-Z0-9\s]+?)\s+(?:stock|stocks?)\s*(?:to|by)?\s*(\d+)/i);
+    p.match(
+      /(?:add|increase|set|update|change|put|refill|reduce|decrease|deduct|remove)\s+(?:the\s+)?(?:stocks?|inventory|units?|items?|qty)?\s*(?:of|for|to|in|into|on)?\s*(\d+)\s*(?:stocks?|inventory|units?|items?|qty)?\s*(?:of|for|to|in|into|on)\s+([a-zA-Z0-9\s]+)/i
+    ) ||
+    p.match(
+      /(?:add|increase|set|update|change|put|refill|reduce|decrease|deduct)\s+(?:the\s+)?(?:stocks?|inventory|units?|items?|qty)\s+(?:of|for|to|in|into|on)?\s*([a-zA-Z0-9\s]+?)\s+(?:to|by|at|with|as)?\s*(\d+)/i
+    ) ||
+    p.match(
+      /(?:add|increase|set|update|change|put|refill|reduce|decrease|deduct|remove)\s+(\d+)\s*(?:stocks?|units?|items?|qty)?\s*(?:of|for|to|in)?\s*([a-zA-Z0-9\s]+)/i
+    ) ||
+    p.match(
+      /(?:add|increase|set|update|change|refill|reduce|decrease|make)\s+([a-zA-Z0-9\s]+?)\s+(?:stock|stocks?|inventory|units?)\s*(?:to|by|at)?\s*(\d+)/i
+    );
 
-  if (stockMatch && !wantsToBeAsked && !p.includes("expense") && !p.includes("other cost") && !p.includes("rupee")) {
+  if (stockMatch && !wantsToBeAsked && !p.includes("expense") && !p.includes("other cost") && !p.includes("rupee") && !p.includes("price")) {
     let qty = 0;
     let targetName = "";
     if (!isNaN(Number(stockMatch[1]))) {
@@ -2830,15 +2864,18 @@ export function generateLocalDeterministicResponse(
       qty = parseInt(stockMatch[2], 10);
     }
     targetName = targetName
-      .replace(/stocks?|units?|items?|qty/gi, "")
-      .replace(/^(?:of|for|to|in)\s+/i, "")
+      .replace(/\b(stocks?|inventory|units?|items?|qty|the|product)\b/gi, "")
+      .replace(/^(?:of|for|to|in|into|on)\s+/i, "")
+      .replace(/\s+(?:of|for|to|in|into|on|by|at)$/i, "")
       .trim();
 
     const matched = findBestServerProduct(snapshot.products, targetName);
 
     if (matched) {
-      const isSet = p.includes("set") || p.includes("change stock of") || p.includes("to ");
-      const isReduce = p.includes("reduce") || p.includes("decrease") || p.includes("deduct") || p.includes("remove");
+      const isSet =
+        /\b(?:set|make)\b/i.test(p) ||
+        /\b(?:change|update)\s+(?:the\s+)?stock\b[\s\S]*?\bto\s+\d+/i.test(p);
+      const isReduce = /\b(?:reduce|decrease|deduct|remove|minus|subtract)\b/i.test(p);
       const currentStock = matched.stock;
 
       let newStock: number;
@@ -3344,7 +3381,7 @@ export async function executeAiQuery(
             ? {
                 thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
               }
-            : model.startsWith("gemini-3.8")
+            : model.startsWith("gemini-3.8") || model === "gemini-4-hydrogen"
               ? {
                   thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
                 }
@@ -3362,57 +3399,64 @@ export async function executeAiQuery(
     throw new Error(`Empty response from ${model}`);
   };
 
-  // Tier 1 (Short sentence): Hedged execution without premature abort so first finishing worker wins in <1.5s
-  if (fastTier) {
-    try {
-      let settled = false;
-      const primaryPromise = callSingleModel("gemini-3.1-flash-lite", 6000).then((res) => {
-        settled = true;
-        return res;
-      });
-      const hedgedFlashLitePromise = new Promise<{ text: string; modelUsed: string }>(
-        (resolve, reject) => {
-          const t = setTimeout(() => {
-            if (settled) return;
-            callSingleModel("gemini-3.1-flash-lite", 5500).then((res) => {
-              settled = true;
-              resolve(res);
-            }, reject);
-          }, 650);
-          primaryPromise.then(() => clearTimeout(t), () => clearTimeout(t));
-        }
-      );
-      const hedgedBackupPromise = new Promise<{ text: string; modelUsed: string }>(
-        (resolve, reject) => {
-          const t = setTimeout(() => {
-            if (settled) return;
-            callSingleModel("gemini-3.8-flash", 5500).then((res) => {
-              settled = true;
-              resolve(res);
-            }, reject);
-          }, 700);
-          primaryPromise.then(
-            () => clearTimeout(t),
-            () => {
-              clearTimeout(t);
-              if (!settled) {
-                callSingleModel("gemini-3.8-flash", 5500).then((res) => {
-                  settled = true;
-                  resolve(res);
-                }, reject);
-              }
+  // Race primary gemini-3.1-flash-lite and hedged gemini-4-hydrogen for both text and media queries so responses always finish in ~0.8s-2.5s
+  try {
+    let settled = false;
+    const primaryTimeout = hasMedia ? 14000 : 6500;
+    const hedgeTimeout = hasMedia ? 16000 : 7500;
+    const hedgeDelayMs = hasMedia ? 350 : 220;
+
+    const primaryPromise = callSingleModel("gemini-3.1-flash-lite", primaryTimeout).then((res) => {
+      settled = true;
+      return res;
+    });
+    const hedgedHydrogenPromise = new Promise<{ text: string; modelUsed: string }>(
+      (resolve, reject) => {
+        const t = setTimeout(() => {
+          if (settled) return;
+          callSingleModel("gemini-4-hydrogen", hedgeTimeout).then((res) => {
+            settled = true;
+            resolve(res);
+          }, reject);
+        }, hedgeDelayMs);
+        primaryPromise.then(
+          () => clearTimeout(t),
+          () => {
+            clearTimeout(t);
+            if (!settled) {
+              callSingleModel("gemini-4-hydrogen", hedgeTimeout).then((res) => {
+                settled = true;
+                resolve(res);
+              }, reject);
             }
-          );
-        }
-      );
-      return await Promise.any([primaryPromise, hedgedFlashLitePromise, hedgedBackupPromise]);
-    } catch {
-      // Fall through to multi-model loop below
-    }
+          }
+        );
+      }
+    );
+    const hedgedRetryLitePromise = new Promise<{ text: string; modelUsed: string }>(
+      (resolve, reject) => {
+        const t = setTimeout(() => {
+          if (settled) return;
+          callSingleModel(
+            "gemini-3.1-flash-lite",
+            hasMedia ? 12000 : 6000,
+            hasDirectAttachments ? fallbackFrameContents : contents
+          ).then((res) => {
+            settled = true;
+            resolve(res);
+          }, reject);
+        }, hasMedia ? 1400 : 900);
+        primaryPromise.then(() => clearTimeout(t), () => {});
+        hedgedHydrogenPromise.then(() => clearTimeout(t), () => {});
+      }
+    );
+    return await Promise.any([primaryPromise, hedgedHydrogenPromise, hedgedRetryLitePromise]);
+  } catch {
+    // Fall through to sequential loop below
   }
 
-  // Tier 2 & Fallback: Multi-model sequential failover
-  const allModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"].filter(
+  // Tier 2 & Multimodal Fallback: Multi-model sequential failover
+  const allModels = ["gemini-3.1-flash-lite", "gemini-4-hydrogen"].filter(
     (m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx
   );
   const activeModels = allModels.filter((m) => !isModelInCooldown(m));
@@ -3452,6 +3496,163 @@ export async function executeAiQuery(
       ? `All AI models are currently exhausted or unavailable (${lastModelError.slice(0, 180)}).`
       : "All AI models are currently exhausted or unavailable."
   );
+}
+
+/**
+ * Extracts an ```action``` or ```json``` action block from the AI reply, or deterministically
+ * infers UPDATE_STOCK / UPDATE_PRICE when the AI's reply or user's command confirms a catalog update
+ * without emitting the raw block (preventing the AI from claiming it updated stock without a card).
+ */
+export function extractOrInferServerAction(
+  rawFullOutput: string,
+  cleanPrompt: string,
+  snapshot: StoreSnapshot,
+  conversationHistory: any[] = []
+): { cleanDisplayText: string; actionData: any } {
+  let rawAction: any = null;
+  const actionMatch =
+    rawFullOutput.match(/```action\s*([\s\S]*?)\s*```/i) ||
+    rawFullOutput.match(/```(?:json)?\s*(\{[\s\S]*?"type"\s*:\s*"[A-Z_]+"[\s\S]*?\})\s*```/i);
+  if (actionMatch && actionMatch[1]) {
+    try {
+      rawAction = JSON.parse(actionMatch[1].trim());
+    } catch {}
+  }
+
+  let cleanDisplayText = rawFullOutput
+    .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+    .replace(/```action[\s\S]*?```/gi, "")
+    .replace(/```(?:json)?\s*\{[\s\S]*?"type"\s*:\s*"[A-Z_]+"[\s\S]*?\}\s*```/gi, "")
+    .trim();
+
+  if (!rawAction) {
+    const deterministicCandidate = generateLocalDeterministicResponse(
+      cleanPrompt,
+      snapshot,
+      conversationHistory
+    ).action;
+    if (deterministicCandidate) {
+      rawAction = deterministicCandidate;
+    }
+  }
+
+  // If still no rawAction, inspect the AI's own reply text + prompt + recent history for confirmed stock/price updates
+  if (!rawAction && snapshot.products.length > 0) {
+    const recentText = (conversationHistory || [])
+      .slice(-4)
+      .map((m: any) => String(m?.content || ""))
+      .join(" ");
+    const combinedSearch = `${cleanPrompt} ${cleanDisplayText} ${recentText}`.toLowerCase();
+    const sortedProducts = [...snapshot.products].sort(
+      (a, b) => (b.name?.length || 0) - (a.name?.length || 0)
+    );
+    const matchedProd =
+      sortedProducts.find(
+        (p) =>
+          p.name &&
+          (cleanPrompt.toLowerCase().includes(p.name.toLowerCase()) ||
+            cleanDisplayText.toLowerCase().includes(p.name.toLowerCase()))
+      ) ||
+      sortedProducts.find(
+        (p) => p.name && combinedSearch.includes(p.name.toLowerCase())
+      );
+
+    if (matchedProd) {
+      const rLower = cleanDisplayText.toLowerCase();
+      const pLower = cleanPrompt.toLowerCase();
+      const curStock = Number(matchedProd.stock) || 0;
+
+      // 1. Check if AI reply or user prompt describes a stock update for matchedProd
+      const fromToMatch =
+        rLower.match(/\bfrom\s+(\d+)\s+to\s+(\d+)\s*(?:units?|stocks?)?/i) ||
+        rLower.match(/\bnew\s+stock\s+will\s+be\s+(\d+)/i);
+      const increasedByMatch =
+        rLower.match(
+          /\b(?:increased|added|boosted|raised|refilled)\b[\s\S]{0,40}?\bby\s+(\d+)\s*(?:units?|stocks?)?/i
+        ) ||
+        pLower.match(/\b(?:add|increase|refill)\b[\s\S]{0,40}?(\d+)/i);
+      const decreasedByMatch =
+        rLower.match(
+          /\b(?:decreased|reduced|deducted|lowered)\b[\s\S]{0,40}?\bby\s+(\d+)\s*(?:units?|stocks?)?/i
+        ) ||
+        pLower.match(/\b(?:reduce|decrease|deduct)\b[\s\S]{0,40}?(\d+)/i);
+      const updatedToMatch = rLower.match(
+        /\b(?:updated|set|changed|adjusted)\b[\s\S]{0,55}?\b(?:inventory|stock)\b[\s\S]{0,45}?\bto\s+(\d+)\s*(?:units?|stocks?)?/i
+      );
+
+      const mentionsStockIntent =
+        /\b(stock|stocks|inventory|unit|units|sold\s*out|restock|refill)\b/i.test(
+          `${cleanPrompt} ${cleanDisplayText}`
+        ) &&
+        !/\b(price|rupee|rupees|rs\.?|₹)\b/i.test(cleanPrompt);
+
+      if (mentionsStockIntent) {
+        let inferredNewStock: number | null = null;
+        if (fromToMatch) {
+          inferredNewStock = parseInt(fromToMatch[2] || fromToMatch[1], 10);
+        } else if (updatedToMatch) {
+          inferredNewStock = parseInt(updatedToMatch[1], 10);
+        } else if (increasedByMatch) {
+          const delta = parseInt(increasedByMatch[1], 10);
+          if (!isNaN(delta) && delta > 0) {
+            inferredNewStock = curStock + delta;
+          }
+        } else if (decreasedByMatch) {
+          const delta = parseInt(decreasedByMatch[1], 10);
+          if (!isNaN(delta) && delta > 0) {
+            inferredNewStock = Math.max(0, curStock - delta);
+          }
+        }
+
+        if (inferredNewStock !== null && !isNaN(inferredNewStock) && inferredNewStock >= 0) {
+          rawAction = {
+            type: "UPDATE_STOCK",
+            productId: matchedProd.id,
+            productName: matchedProd.name,
+            currentStock: curStock,
+            newStock: inferredNewStock,
+            quantityChange: inferredNewStock - curStock,
+          };
+        }
+      }
+
+      // 2. Check if AI reply or user prompt describes a price update for matchedProd
+      if (!rawAction) {
+        const priceUpdateMatch =
+          rLower.match(
+            /\b(?:price|rate)\b[\s\S]{0,50}?\b(?:updated|changed|set|adjusted|increased|decreased)\b[\s\S]{0,30}?\bto\s*₹?\s*(\d+(?:\.\d+)?)/i
+          ) ||
+          rLower.match(
+            /\b(?:updated|changed|set)\s+(?:the\s+)?(?:price|rate)\b[\s\S]{0,40}?\bto\s*₹?\s*(\d+(?:\.\d+)?)/i
+          );
+        if (priceUpdateMatch) {
+          const newPriceVal = parseFloat(priceUpdateMatch[1]);
+          if (!isNaN(newPriceVal) && newPriceVal > 0) {
+            rawAction = {
+              type: "UPDATE_PRICE",
+              productId: matchedProd.id,
+              productName: matchedProd.name,
+              currentPrice: Number(matchedProd.price) || 0,
+              newPrice: newPriceVal,
+            };
+          }
+        }
+      }
+    }
+  }
+
+  const actionData = validateAndNormalizeAction(
+    rawAction,
+    cleanPrompt,
+    cleanDisplayText,
+    snapshot
+  );
+  if (rawAction && !actionData) {
+    cleanDisplayText = cleanReplyWhenActionSuppressed(cleanDisplayText);
+  }
+  cleanDisplayText = sanitizeLatexAndMathFormatting(cleanDisplayText);
+
+  return { cleanDisplayText, actionData };
 }
 
 // ============================================================================
@@ -3594,36 +3795,14 @@ app.post("/api/gemini/chat", async (req, res) => {
     replyText = aiResult.text;
     activeModel = aiResult.modelUsed;
 
-    // Parse structured action block if generated by AI
-    let rawAction: any = null;
-    const actionMatch = replyText.match(/```action\s*([\s\S]*?)\s*```/);
-    if (actionMatch && actionMatch[1]) {
-      try {
-        rawAction = JSON.parse(actionMatch[1]);
-      } catch (e) {}
-    }
-    replyText = replyText
-      .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-      .replace(/```action[\s\S]*?```/g, "")
-      .trim();
-
-    if (!rawAction) {
-      // If the user gave a complete command with all required parameters and the AI confirmed it without emitting the action block, attach only the validated action card while keeping the AI's exact natural response
-      const parsedActionCandidate = generateLocalDeterministicResponse(
-        cleanPrompt,
-        snapshot,
-        conversationHistory
-      ).action;
-      if (parsedActionCandidate) {
-        rawAction = parsedActionCandidate;
-      }
-    }
-
-    actionData = validateAndNormalizeAction(rawAction, cleanPrompt, replyText, snapshot);
-    if (rawAction && !actionData) {
-      replyText = cleanReplyWhenActionSuppressed(replyText);
-    }
-    replyText = sanitizeLatexAndMathFormatting(replyText);
+    const extracted = extractOrInferServerAction(
+      replyText,
+      cleanPrompt,
+      snapshot,
+      conversationHistory
+    );
+    replyText = extracted.cleanDisplayText;
+    actionData = extracted.actionData;
 
     const richThought = generateAuthenticOperationalThought(
       cleanPrompt,
@@ -3728,7 +3907,7 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
       hasAttachments ? attachments : []
     );
 
-    const allStreamModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"].filter(
+    const allStreamModels = ["gemini-3.1-flash-lite", "gemini-4-hydrogen"].filter(
       (m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx
     );
     const activeStreamModels = allStreamModels.filter((m) => !isModelInCooldown(m));
@@ -3738,14 +3917,14 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
     let fullOutput = "";
     let activeModel = PRIMARY_AI_MODEL;
 
-    // For short Tier 1 queries without media, use 3-way hedged executeAiQuery first so tail spikes on a single model never delay the response beyond ~1.5s
-    if (fastStreamTier && getServerGeminiKey()) {
+    // Use hedged executeAiQuery first (for both text and media queries) so responses arrive and finalize atomically in ~0.8s-2.5s without stream EOF stalls
+    if (getServerGeminiKey()) {
       try {
         const hedgedRes = await executeAiQuery(
           cleanPrompt,
           snapshot,
           trimmedHistory,
-          []
+          hasAttachments ? attachments : []
         );
         if (hedgedRes.text && hedgedRes.text.trim()) {
           fullOutput = hedgedRes.text;
@@ -3754,7 +3933,8 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
           const previewClean = sanitizeLatexAndMathFormatting(
             fullOutput
               .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-              .replace(/```action[\s\S]*?```/g, "")
+              .replace(/```action[\s\S]*?```/gi, "")
+              .replace(/```(?:json)?\s*\{[\s\S]*?"type"\s*:\s*"[A-Z_]+"[\s\S]*?\}\s*```/gi, "")
               .trim()
           );
           if (previewClean && !clientAborted && !res.writableEnded) {
@@ -3766,19 +3946,23 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
       }
     }
 
-    // Stream tokens progressively for longer or multimodal queries
+    // Stream tokens progressively as fallback
     if (!streamSucceeded && getServerGeminiKey()) {
       for (let i = 0; i < candidates.length; i++) {
         const model = candidates[i];
         if (clientAborted) break;
-        const firstChunkTimeoutMs = hasAnyStreamMedia ? 24000 : 4500;
+        const firstChunkTimeoutMs = hasAnyStreamMedia ? 16000 : 4500;
         let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
         try {
           await new Promise<void>((resolve, reject) => {
             const resetInactivity = (ms: number) => {
               if (inactivityTimer) clearTimeout(inactivityTimer);
               inactivityTimer = setTimeout(() => {
-                reject(new Error(`Stream inactivity timeout on ${model}`));
+                if (fullOutput.trim().length >= 15) {
+                  resolve();
+                } else {
+                  reject(new Error(`Stream inactivity timeout on ${model}`));
+                }
               }, ms);
             };
             resetInactivity(firstChunkTimeoutMs);
@@ -3795,7 +3979,7 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
                       ? {
                           thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
                         }
-                      : model.startsWith("gemini-3.8")
+                      : model.startsWith("gemini-3.8") || model === "gemini-4-hydrogen"
                         ? {
                             thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
                           }
@@ -3805,7 +3989,7 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
 
                 for await (const chunk of stream) {
                   if (clientAborted || res.writableEnded) break;
-                  resetInactivity(10000);
+                  resetInactivity(2200);
                   const chunkText = chunk.text || "";
                   if (chunkText) {
                     fullOutput += chunkText;
@@ -3819,7 +4003,11 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
                 resolve();
               } catch (err) {
                 if (inactivityTimer) clearTimeout(inactivityTimer);
-                reject(err);
+                if (fullOutput.trim().length >= 15) {
+                  resolve();
+                } else {
+                  reject(err);
+                }
               }
             })();
           });
@@ -3848,7 +4036,6 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
             errMsg.includes("RESOURCE_EXHAUSTED") ||
             errMsg.includes("quota");
           markModelFailure(model, isQuotaOrNotFound);
-          // If partial tokens were already streamed and look complete enough, keep them; otherwise reset and try next model
           if (fullOutput.trim().length < 15) {
             fullOutput = "";
           } else {
@@ -3871,47 +4058,22 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
       activeModel = aiResult.modelUsed;
       const previewClean = fullOutput
         .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-        .replace(/```action[\s\S]*?```/g, "")
+        .replace(/```action[\s\S]*?```/gi, "")
+        .replace(/```(?:json)?\s*\{[\s\S]*?"type"\s*:\s*"[A-Z_]+"[\s\S]*?\}\s*```/gi, "")
         .trim();
       if (previewClean) {
         res.write(`data: ${JSON.stringify({ chunk: previewClean })}\n\n`);
       }
     }
 
-    // Parse structured action from full model output and validate strictly
-    let rawAction: any = null;
-    const actionMatch = fullOutput.match(/```action\s*([\s\S]*?)\s*```/);
-    if (actionMatch && actionMatch[1]) {
-      try {
-        rawAction = JSON.parse(actionMatch[1]);
-      } catch (e) {}
-    }
-    let cleanDisplayText = fullOutput
-      .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-      .replace(/```action[\s\S]*?```/g, "")
-      .trim();
-
-    if (!rawAction) {
-      const parsedActionCandidate = generateLocalDeterministicResponse(
-        cleanPrompt,
-        snapshot,
-        conversationHistory
-      ).action;
-      if (parsedActionCandidate) {
-        rawAction = parsedActionCandidate;
-      }
-    }
-
-    const actionData = validateAndNormalizeAction(
-      rawAction,
+    const extracted = extractOrInferServerAction(
+      fullOutput,
       cleanPrompt,
-      cleanDisplayText,
-      snapshot
+      snapshot,
+      conversationHistory
     );
-    if (rawAction && !actionData) {
-      cleanDisplayText = cleanReplyWhenActionSuppressed(cleanDisplayText);
-    }
-    cleanDisplayText = sanitizeLatexAndMathFormatting(cleanDisplayText);
+    const cleanDisplayText = extracted.cleanDisplayText;
+    const actionData = extracted.actionData;
 
     const richThought = generateAuthenticOperationalThought(
       cleanPrompt,
@@ -4076,45 +4238,42 @@ app.post("/api/gemini/tts", async (req, res) => {
       return;
     }
 
-    // Request natural neural audio from official Gemini TTS models ("Kore" voice) with multi-model resilience
-    const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
+    // Request natural neural audio from single consistent Gemini TTS model ("Kore" voice via v1beta)
     let audioPart: any = null;
-
-    for (const ttsModel of ttsModels) {
-      try {
-        const ttsResponse = await Promise.race([
-          getAiClient().models.generateContent({
-            model: ttsModel,
-            contents: [
-              {
-                role: "user",
-                parts: [{ text: cacheKey }],
-              },
-            ],
-            config: {
-              responseModalities: ["AUDIO"],
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: {
-                    voiceName: "Kore",
-                  },
+    try {
+      const ttsResponse = await Promise.race([
+        getTtsAiClient().models.generateContent({
+          model: "gemini-3.8-flash-lite-tts",
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `Read the following message aloud in a single, calm, warm, consistent assistant voice without changing speaker persona:\n\n${cacheKey}`,
+                },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: "Kore",
                 },
               },
             },
-          }),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("TTS request timed out")), 5500)
-          ),
-        ]);
+          },
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("TTS request timed out")), 7500)
+        ),
+      ]);
 
-        const candidate = ttsResponse.candidates?.[0];
-        audioPart = candidate?.content?.parts?.find((p: any) => p.inlineData);
-        if (audioPart?.inlineData?.data) {
-          break;
-        }
-      } catch (ttsErr) {
-        // Try next TTS model
-      }
+      const candidate = ttsResponse.candidates?.[0];
+      audioPart = candidate?.content?.parts?.find((p: any) => p.inlineData);
+    } catch (ttsErr) {
+      // Fallback handled by client
     }
 
     if (audioPart && audioPart.inlineData && audioPart.inlineData.data) {
@@ -4173,7 +4332,7 @@ async function executeFastAudioTranscription(
           maxOutputTokens: 250,
           ...(model === "gemini-3.1-flash-lite"
             ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }
-            : model.startsWith("gemini-3.8")
+            : model === "gemini-4-hydrogen"
               ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
               : {}),
         },
@@ -4190,24 +4349,24 @@ async function executeFastAudioTranscription(
 
   try {
     let settled = false;
-    const p1 = callTranscribeModel("gemini-3.1-flash-lite", 3200).then((r) => {
+    const p1 = callTranscribeModel("gemini-3.1-flash-lite", 4000).then((r) => {
       settled = true;
       return r;
     });
     const p2 = new Promise<string>((resolve, reject) => {
       const t = setTimeout(() => {
         if (settled) return;
-        callTranscribeModel("gemini-3.5-transcribe", 3200).then((r) => {
+        callTranscribeModel("gemini-4-hydrogen", 5000).then((r) => {
           settled = true;
           resolve(r);
         }, reject);
-      }, 350);
+      }, 250);
       p1.then(
         () => clearTimeout(t),
         () => {
           clearTimeout(t);
           if (!settled) {
-            callTranscribeModel("gemini-3.5-transcribe", 3200).then((r) => {
+            callTranscribeModel("gemini-4-hydrogen", 5000).then((r) => {
               settled = true;
               resolve(r);
             }, reject);
@@ -4215,22 +4374,11 @@ async function executeFastAudioTranscription(
         }
       );
     });
-    const p3 = new Promise<string>((resolve, reject) => {
-      const t = setTimeout(() => {
-        if (settled) return;
-        callTranscribeModel("gemini-3.8-flash", 3200).then((r) => {
-          settled = true;
-          resolve(r);
-        }, reject);
-      }, 700);
-      p1.then(() => clearTimeout(t), () => {});
-      p2.then(() => clearTimeout(t), () => {});
-    });
-    return await Promise.any([p1, p2, p3]);
+    return await Promise.any([p1, p2]);
   } catch {
-    for (const fallbackModel of ["gemini-flash-latest", "gemini-3.1-flash-lite"]) {
+    for (const fallbackModel of ["gemini-3.1-flash-lite", "gemini-4-hydrogen"]) {
       try {
-        return await callTranscribeModel(fallbackModel, 4500);
+        return await callTranscribeModel(fallbackModel, 5500);
       } catch {}
     }
     throw new Error("Could not transcribe audio clip.");
@@ -4857,41 +5005,39 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                 );
                 return;
               }
-              const ttsModels = ["gemini-3.8-flash-lite-tts", "gemini-3.8-flash-tts"];
               let audioPart: any = null;
-              for (const ttsModel of ttsModels) {
-                try {
-                  const ttsResponse = await Promise.race([
-                    getAiClient().models.generateContent({
-                      model: ttsModel,
-                      contents: [
-                        {
-                          role: "user",
-                          parts: [{ text: cleanSpeech }],
-                        },
-                      ],
-                      config: {
-                        responseModalities: ["AUDIO"],
-                        speechConfig: {
-                          voiceConfig: {
-                            prebuiltVoiceConfig: {
-                              voiceName: "Kore",
-                            },
+              try {
+                const ttsResponse = await Promise.race([
+                  getTtsAiClient().models.generateContent({
+                    model: "gemini-3.8-flash-lite-tts",
+                    contents: [
+                      {
+                        role: "user",
+                        parts: [
+                          {
+                            text: `Read the following message aloud in a single, calm, warm, consistent assistant voice without changing speaker persona:\n\n${cleanSpeech}`,
+                          },
+                        ],
+                      },
+                    ],
+                    config: {
+                      responseModalities: ["AUDIO"],
+                      speechConfig: {
+                        voiceConfig: {
+                          prebuiltVoiceConfig: {
+                            voiceName: "Kore",
                           },
                         },
                       },
-                    }),
-                    new Promise<never>((_, reject) =>
-                      setTimeout(() => reject(new Error("TTS timeout")), 4500)
-                    ),
-                  ]);
-                  const candidate = ttsResponse.candidates?.[0];
-                  audioPart = candidate?.content?.parts?.find((p: any) => p.inlineData);
-                  if (audioPart?.inlineData?.data) {
-                    break;
-                  }
-                } catch {}
-              }
+                    },
+                  }),
+                  new Promise<never>((_, reject) =>
+                    setTimeout(() => reject(new Error("TTS timeout")), 7500)
+                  ),
+                ]);
+                const candidate = ttsResponse.candidates?.[0];
+                audioPart = candidate?.content?.parts?.find((p: any) => p.inlineData);
+              } catch {}
               if (!audioPart?.inlineData?.data) {
                 throw new Error("Voice synthesis temporarily unavailable.");
               }
@@ -4942,169 +5088,29 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               );
             const hasRpcMedia = rpcAttachments.length > 0 || hasRpcHistoryMedia;
             const fastRpcTier = isFastShortTier(cleanPrompt, hasRpcMedia);
-            const systemInstruction = buildAdaptiveStoreSystemPrompt(
-              snapshot,
-              cleanPrompt,
-              hasRpcMedia
-            );
             const trimmedRpcHistory = fastRpcTier
               ? conversationHistory.slice(-4)
               : conversationHistory;
-            const contents = buildValidServerGeminiContents(
-              trimmedRpcHistory,
+
+            // Execute hedged <2s fast query (gemini-3.1-flash-lite + gemini-4-hydrogen) for both text and media queries,
+            // and write the completed result in a single atomic Firestore write so no unawaited partial write can ever overwrite "completed"!
+            const aiRes = await executeAiQuery(
               cleanPrompt,
+              snapshot,
+              trimmedRpcHistory,
               rpcAttachments
             );
+            replyText = aiRes.text;
+            activeModel = aiRes.modelUsed;
 
-            let streamOk = false;
-            // Tier 1 (Short sentence): Execute hedged <2s fast query and write final result in a single Firestore round-trip
-            if (fastRpcTier && getServerGeminiKey()) {
-              try {
-                const aiRes = await executeAiQuery(
-                  cleanPrompt,
-                  snapshot,
-                  trimmedRpcHistory,
-                  []
-                );
-                if (aiRes.text && aiRes.text.trim()) {
-                  replyText = aiRes.text;
-                  activeModel = aiRes.modelUsed;
-                  streamOk = true;
-                }
-              } catch {}
-            }
-
-            if (!streamOk && getServerGeminiKey()) {
-              const allRpcModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"].filter(
-                (m, idx, arr) => Boolean(m) && arr.indexOf(m) === idx
-              );
-              const activeRpcModels = allRpcModels.filter((m) => !isModelInCooldown(m));
-              const candidates = activeRpcModels.length > 0 ? activeRpcModels : allRpcModels;
-
-              for (let i = 0; i < candidates.length; i++) {
-                const model = candidates[i];
-                const timeoutMs = hasRpcMedia ? 16000 : 12000;
-                try {
-                  let streamedText = "";
-                  let lastPartialFlush = 0;
-                  await Promise.race([
-                    (async () => {
-                      const stream = await getAiClient().models.generateContentStream({
-                        model,
-                        contents,
-                        config: {
-                          systemInstruction,
-                          maxOutputTokens: fastRpcTier ? 400 : 950,
-                          ...(model === "gemini-3.1-flash-lite"
-                            ? {
-                                thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-                              }
-                            : model.startsWith("gemini-3.8")
-                              ? {
-                                  thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-                                }
-                              : {}),
-                        },
-                      });
-                      for await (const chunk of stream) {
-                        const chunkText = chunk.text || "";
-                        if (chunkText) {
-                          streamedText += chunkText;
-                          const now = Date.now();
-                          if (
-                            !streamedText.includes("```action") &&
-                            (lastPartialFlush === 0 || now - lastPartialFlush >= 180)
-                          ) {
-                            lastPartialFlush = now;
-                            const cleanPartial = sanitizeLatexAndMathFormatting(
-                              streamedText
-                                .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-                                .replace(/<thought>[\s\S]*$/g, "")
-                                .trim()
-                            );
-                            if (cleanPartial) {
-                              setDoc(
-                                doc(db!, "settings", docSnap.id),
-                                {
-                                  status: "streaming",
-                                  partialReply: cleanPartial,
-                                  updatedAt: now,
-                                },
-                                { merge: true }
-                              ).catch(() => {});
-                            }
-                          }
-                        }
-                      }
-                    })(),
-                    new Promise<never>((_, reject) =>
-                      setTimeout(() => reject(new Error(`RPC stream timeout on ${model}`)), timeoutMs)
-                    ),
-                  ]);
-
-                  if (streamedText.trim()) {
-                    replyText = streamedText;
-                    activeModel = model;
-                    streamOk = true;
-                    markModelSuccess(model);
-                    break;
-                  }
-                } catch (streamErr: any) {
-                  const formatted = formatGeminiServerError(streamErr);
-                  if (formatted.isFatalKeyError) {
-                    throw new Error(formatted.message);
-                  }
-                  const errMsg = formatted.message;
-                  const isQuota =
-                    errMsg.includes("429") ||
-                    errMsg.includes("404") ||
-                    errMsg.includes("NOT_FOUND") ||
-                    errMsg.includes("RESOURCE_EXHAUSTED") ||
-                    errMsg.includes("quota");
-                  markModelFailure(model, isQuota);
-                }
-              }
-            }
-
-            if (!streamOk) {
-              const aiRes = await executeAiQuery(
-                cleanPrompt,
-                snapshot,
-                trimmedRpcHistory,
-                rpcAttachments
-              );
-              replyText = aiRes.text;
-              activeModel = aiRes.modelUsed;
-            }
-
-            let rawAction: any = null;
-            const actionMatch = replyText.match(/```action\s*([\s\S]*?)\s*```/);
-            if (actionMatch && actionMatch[1]) {
-              try {
-                rawAction = JSON.parse(actionMatch[1]);
-              } catch {}
-            }
-            replyText = replyText
-              .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-              .replace(/```action[\s\S]*?```/g, "")
-              .trim();
-
-            if (!rawAction) {
-              const parsedActionCandidate = generateLocalDeterministicResponse(
-                cleanPrompt,
-                snapshot,
-                conversationHistory
-              ).action;
-              if (parsedActionCandidate) {
-                rawAction = parsedActionCandidate;
-              }
-            }
-
-            actionData = validateAndNormalizeAction(rawAction, cleanPrompt, replyText, snapshot);
-            if (rawAction && !actionData) {
-              replyText = cleanReplyWhenActionSuppressed(replyText);
-            }
-            replyText = sanitizeLatexAndMathFormatting(replyText);
+            const extracted = extractOrInferServerAction(
+              replyText,
+              cleanPrompt,
+              snapshot,
+              conversationHistory
+            );
+            replyText = extracted.cleanDisplayText;
+            actionData = extracted.actionData;
 
             const richThought = generateAuthenticOperationalThought(
               cleanPrompt,

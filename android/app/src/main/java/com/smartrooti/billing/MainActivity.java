@@ -584,6 +584,8 @@ public class MainActivity extends BridgeActivity {
                             nativeTts.setLanguage(new Locale("en", "IN"));
                         }
                     }
+                    nativeTts.setPitch(1.0f);
+                    nativeTts.setSpeechRate(0.98f);
                     nativeTts.speak(trimmed, TextToSpeech.QUEUE_FLUSH, null, "buzz_tts_" + System.currentTimeMillis());
                     return true;
                 }

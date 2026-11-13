@@ -1239,15 +1239,38 @@ async function askViaFirestoreBridge(
       hasMedia ? 38000 : 28000
     );
 
+    let partialIdleTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearPartialIdleTimer = () => {
+      if (partialIdleTimer) {
+        clearTimeout(partialIdleTimer);
+        partialIdleTimer = null;
+      }
+    };
+
     const refreshStreamTimer = () => {
       clearTimeout(timer);
       timer = setTimeout(() => {
         if (!settled) {
           settled = true;
+          clearPartialIdleTimer();
           cleanup();
-          reject(new Error("Firestore AI bridge stream timed out"));
+          if (lastPartialSeen.trim()) {
+            const validatedAction = validateClientAction(
+              null,
+              prompt,
+              lastPartialSeen,
+              compactedContext
+            );
+            resolve({
+              reply: lastPartialSeen.trim(),
+              action: validatedAction,
+              thought: generateDynamicThought(prompt, lastPartialSeen, compactedContext),
+            });
+          } else {
+            reject(new Error("Firestore AI bridge stream timed out"));
+          }
         }
-      }, 20000);
+      }, 15000);
     };
 
     const handleDocData = (data: any) => {
@@ -1255,7 +1278,8 @@ async function askViaFirestoreBridge(
       if (
         data.status === "processing" ||
         data.status === "streaming" ||
-        data.status === "completed"
+        data.status === "completed" ||
+        Boolean(data.completedAt)
       ) {
         serverAcknowledged = true;
         if (ackTimer) {
@@ -1263,15 +1287,16 @@ async function askViaFirestoreBridge(
           ackTimer = null;
         }
       }
-      if (data.status === "streaming" && typeof data.partialReply === "string" && onChunk) {
-        if (data.partialReply !== lastPartialSeen) {
-          lastPartialSeen = data.partialReply;
-          refreshStreamTimer();
-          onChunk(data.partialReply);
-        }
-      } else if (data.status === "completed" && (data.reply || data.action)) {
+      // Prioritize completion check first so an out-of-order merge can never trap a finished reply in "streaming" state
+      if (
+        (data.status === "completed" ||
+          Boolean(data.completedAt) ||
+          (typeof data.reply === "string" && data.reply.trim().length > 0)) &&
+        (data.reply || data.action)
+      ) {
         settled = true;
         clearTimeout(timer);
+        clearPartialIdleTimer();
         const validatedAction = validateClientAction(
           data.action,
           prompt,
@@ -1279,7 +1304,7 @@ async function askViaFirestoreBridge(
           compactedContext
         );
         const finalReply =
-          String(data.reply || "").trim() ||
+          String(data.reply || lastPartialSeen || "").trim() ||
           formatActionSummaryReply(validatedAction) ||
           "Prepared your requested store update:";
         if (onChunk) {
@@ -1293,9 +1318,36 @@ async function askViaFirestoreBridge(
             data.thought ||
             generateDynamicThought(prompt, finalReply, compactedContext),
         });
+      } else if (data.status === "streaming" && typeof data.partialReply === "string" && onChunk) {
+        if (data.partialReply !== lastPartialSeen) {
+          lastPartialSeen = data.partialReply;
+          refreshStreamTimer();
+          onChunk(data.partialReply);
+          clearPartialIdleTimer();
+          partialIdleTimer = setTimeout(() => {
+            if (!settled && lastPartialSeen.trim().length >= 12) {
+              settled = true;
+              clearTimeout(timer);
+              const cleanPartial = lastPartialSeen.trim();
+              const validatedAction = validateClientAction(
+                null,
+                prompt,
+                cleanPartial,
+                compactedContext
+              );
+              cleanup();
+              resolve({
+                reply: cleanPartial,
+                action: validatedAction,
+                thought: generateDynamicThought(prompt, cleanPartial, compactedContext),
+              });
+            }
+          }, 2800);
+        }
       } else if (data.status === "error") {
         settled = true;
         clearTimeout(timer);
+        clearPartialIdleTimer();
         cleanup();
         reject(new Error(data.error || "Firestore AI bridge error"));
       }
@@ -1694,6 +1746,69 @@ export async function askGeminiAssistantStream(
       let finalPayload: AssistantResponse | null = null;
       let buffer = "";
 
+      const processSseLine = (rawLine: string): boolean => {
+        if (userAborted || completed || externalSignal?.aborted) return true;
+        const trimmed = rawLine.trim();
+        if (!trimmed || !trimmed.startsWith("data:")) return false;
+        const payloadStr = trimmed.replace(/^data:\s*/, "");
+        try {
+          const parsed = JSON.parse(payloadStr);
+          if (parsed.error) {
+            throw new Error(parsed.error);
+          }
+          if (parsed.chunk) {
+            accumulatedRaw += parsed.chunk;
+            const cleanDisplay = accumulatedRaw
+              .replace(/<thought>[\s\S]*?<\/thought>/g, "")
+              .replace(/<thought>[\s\S]*$/g, "")
+              .replace(/```action[\s\S]*?```/g, "")
+              .replace(/```action[\s\S]*$/g, "")
+              .trim();
+            if (cleanDisplay && !userAborted && !completed) {
+              emitChunk(cleanDisplay);
+              refreshStreamTimeout(3200);
+            }
+          }
+          if (parsed.done) {
+            let finalThought = parsed.thought;
+            if (!finalThought) {
+              const thMatch = accumulatedRaw.match(/<thought>\s*([\s\S]*?)\s*<\/thought>/);
+              if (thMatch && thMatch[1]) finalThought = thMatch[1].trim();
+            }
+            if (!finalThought) {
+              finalThought = generateDynamicThought(prompt, parsed.fullText, storeContext);
+            }
+
+            const validatedAction =
+              validateClientAction(
+                parsed.action,
+                prompt,
+                parsed.fullText,
+                compactedContext
+              ) || localActionCandidate || null;
+
+            finalPayload = {
+              reply: parsed.fullText || lastStreamedChunk,
+              action: validatedAction,
+              thought: finalThought,
+              rawText: accumulatedRaw,
+            };
+            if (String(finalPayload.reply || "").trim()) {
+              safeComplete(finalPayload);
+              try {
+                reader.cancel();
+              } catch {}
+              return true;
+            }
+          }
+        } catch (parseErr: any) {
+          if (parseErr?.message && !parseErr.message.includes("JSON")) {
+            throw parseErr;
+          }
+        }
+        return false;
+      };
+
       while (true) {
         if (userAborted || completed || externalSignal?.aborted) {
           try {
@@ -1702,65 +1817,23 @@ export async function askGeminiAssistantStream(
           return;
         }
         const { done, value } = await reader.read();
-        if (done || completed || userAborted) break;
+        if (done || completed || userAborted) {
+          if (done && buffer.trim() && !completed && !userAborted) {
+            for (const remLine of buffer.split("\n")) {
+              if (processSseLine(remLine)) return;
+            }
+            buffer = "";
+          }
+          break;
+        }
 
-        refreshStreamTimeout(45000);
+        refreshStreamTimeout(lastStreamedChunk ? 3200 : 18000);
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
 
         for (const line of lines) {
-          if (userAborted || completed || externalSignal?.aborted) return;
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith("data:")) continue;
-          const payloadStr = trimmed.replace(/^data:\s*/, "");
-          try {
-            const parsed = JSON.parse(payloadStr);
-            if (parsed.error) {
-              throw new Error(parsed.error);
-            }
-            if (parsed.chunk) {
-              accumulatedRaw += parsed.chunk;
-              const cleanDisplay = accumulatedRaw
-                .replace(/<thought>[\s\S]*?<\/thought>/g, "")
-                .replace(/<thought>[\s\S]*$/g, "")
-                .replace(/```action[\s\S]*?```/g, "")
-                .replace(/```action[\s\S]*$/g, "")
-                .trim();
-              if (cleanDisplay && !userAborted && !completed) {
-                emitChunk(cleanDisplay);
-              }
-            }
-            if (parsed.done) {
-              let finalThought = parsed.thought;
-              if (!finalThought) {
-                const thMatch = accumulatedRaw.match(/<thought>\s*([\s\S]*?)\s*<\/thought>/);
-                if (thMatch && thMatch[1]) finalThought = thMatch[1].trim();
-              }
-              if (!finalThought) {
-                finalThought = generateDynamicThought(prompt, parsed.fullText, storeContext);
-              }
-
-              const validatedAction =
-                validateClientAction(
-                  parsed.action,
-                  prompt,
-                  parsed.fullText,
-                  compactedContext
-                ) || localActionCandidate || null;
-
-              finalPayload = {
-                reply: parsed.fullText,
-                action: validatedAction,
-                thought: finalThought,
-                rawText: accumulatedRaw,
-              };
-            }
-          } catch (parseErr: any) {
-            if (parseErr?.message && !parseErr.message.includes("JSON")) {
-              throw parseErr;
-            }
-          }
+          if (processSseLine(line)) return;
         }
       }
 
@@ -2877,10 +2950,20 @@ export function generateClientStoreResponse(
 
   // 10. Add / Update Stock & Refills
   const stockMatch =
-    p.match(/(?:add|increase|set|update|change|put|refill|reduce|decrease|deduct|remove)\s+(\d+)\s*(?:stocks?|units?|items?|qty)?\s*(?:of|for|to|in)?\s*([a-zA-Z0-9\s]+)/i) ||
-    p.match(/(?:add|increase|set|update|change|refill|reduce|decrease)\s+([a-zA-Z0-9\s]+?)\s+(?:stock|stocks?)\s*(?:to|by)?\s*(\d+)/i);
+    p.match(
+      /(?:add|increase|set|update|change|put|refill|reduce|decrease|deduct|remove)\s+(?:the\s+)?(?:stocks?|inventory|units?|items?|qty)?\s*(?:of|for|to|in|into|on)?\s*(\d+)\s*(?:stocks?|inventory|units?|items?|qty)?\s*(?:of|for|to|in|into|on)\s+([a-zA-Z0-9\s]+)/i
+    ) ||
+    p.match(
+      /(?:add|increase|set|update|change|put|refill|reduce|decrease|deduct)\s+(?:the\s+)?(?:stocks?|inventory|units?|items?|qty)\s+(?:of|for|to|in|into|on)?\s*([a-zA-Z0-9\s]+?)\s+(?:to|by|at|with|as)?\s*(\d+)/i
+    ) ||
+    p.match(
+      /(?:add|increase|set|update|change|put|refill|reduce|decrease|deduct|remove)\s+(\d+)\s*(?:stocks?|units?|items?|qty)?\s*(?:of|for|to|in)?\s*([a-zA-Z0-9\s]+)/i
+    ) ||
+    p.match(
+      /(?:add|increase|set|update|change|refill|reduce|decrease|make)\s+([a-zA-Z0-9\s]+?)\s+(?:stock|stocks?|inventory|units?)\s*(?:to|by|at)?\s*(\d+)/i
+    );
 
-  if (stockMatch && !wantsToBeAsked && !p.includes("expense") && !p.includes("other cost") && !p.includes("rupee")) {
+  if (stockMatch && !wantsToBeAsked && !p.includes("expense") && !p.includes("other cost") && !p.includes("rupee") && !p.includes("price")) {
     let qty = 0;
     let targetName = "";
     if (!isNaN(Number(stockMatch[1]))) {
@@ -2891,15 +2974,18 @@ export function generateClientStoreResponse(
       qty = parseInt(stockMatch[2], 10);
     }
     targetName = targetName
-      .replace(/stocks?|units?|items?|qty/gi, "")
-      .replace(/^(?:of|for|to|in)\s+/i, "")
+      .replace(/\b(stocks?|inventory|units?|items?|qty|the|product)\b/gi, "")
+      .replace(/^(?:of|for|to|in|into|on)\s+/i, "")
+      .replace(/\s+(?:of|for|to|in|into|on|by|at)$/i, "")
       .trim();
 
     const matched = findBestClientProduct(products, targetName);
 
     if (matched) {
-      const isSet = p.includes("set") || p.includes("change stock of") || p.includes("to ");
-      const isReduce = p.includes("reduce") || p.includes("decrease") || p.includes("deduct") || p.includes("remove");
+      const isSet =
+        /\b(?:set|make)\b/i.test(p) ||
+        /\b(?:change|update)\s+(?:the\s+)?stock\b[\s\S]*?\bto\s+\d+/i.test(p);
+      const isReduce = /\b(?:reduce|decrease|deduct|remove|minus|subtract)\b/i.test(p);
       const currentStock = Number(matched.stock || 0);
 
       let newStock: number;
@@ -3487,7 +3573,7 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
     for (const baseUrl of getCandidateApiBaseUrls()) {
       const endpoint = `${baseUrl}/api/gemini/tts`;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 4800));
+      const timer = setTimeout(() => controller.abort(), Math.min(timeoutMs, 8000));
 
       try {
         const response = await fetch(endpoint, {
@@ -3526,7 +3612,7 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
 
   // 2. Server-side Firestore RPC bridge fallback
   try {
-    const audioBase64 = await ttsViaFirestoreBridge(cleanKey, Math.min(timeoutMs, 4800));
+    const audioBase64 = await ttsViaFirestoreBridge(cleanKey, Math.min(timeoutMs, 8000));
     if (audioBase64) {
       const wavB64 = clientPcmToWavBase64(audioBase64, 24000);
       const dataUri = `data:audio/wav;base64,${wavB64}`;
@@ -3540,6 +3626,127 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
   } catch {}
 
   throw new Error("Voice synthesis unavailable");
+}
+
+/**
+ * Client-side safety net: if the AI's reply text or user's command describes a stock or price
+ * update for a catalog product without returning an explicit action object, deterministically
+ * synthesize the validated AssistantAction so the AI never claims it updated stock without applying/attaching it.
+ */
+export function inferClientActionFromTurn(
+  rawPrompt: string,
+  replyText: string,
+  storeContext?: StoreContext,
+  conversationHistory: ConversationTurnInput[] = []
+): AssistantAction | null {
+  const products = storeContext?.products || [];
+  if (products.length === 0) return null;
+
+  if (storeContext) {
+    const det = generateClientStoreResponse(rawPrompt, storeContext, conversationHistory);
+    if (det?.action) {
+      return det.action;
+    }
+  }
+
+  const recentText = (conversationHistory || [])
+    .slice(-4)
+    .map((m) => String(m?.content || ""))
+    .join(" ");
+  const combinedSearch = `${rawPrompt} ${replyText} ${recentText}`.toLowerCase();
+  const sortedProducts = [...products].sort(
+    (a, b) => (b.name?.length || 0) - (a.name?.length || 0)
+  );
+  const matchedProd =
+    sortedProducts.find(
+      (p) =>
+        p.name &&
+        (rawPrompt.toLowerCase().includes(p.name.toLowerCase()) ||
+          replyText.toLowerCase().includes(p.name.toLowerCase()))
+    ) ||
+    sortedProducts.find(
+      (p) => p.name && combinedSearch.includes(p.name.toLowerCase())
+    );
+
+  if (!matchedProd) return null;
+
+  const rLower = replyText.toLowerCase();
+  const pLower = rawPrompt.toLowerCase();
+  const curStock = Number(matchedProd.stock) || 0;
+
+  const fromToMatch =
+    rLower.match(/\bfrom\s+(\d+)\s+to\s+(\d+)\s*(?:units?|stocks?)?/i) ||
+    rLower.match(/\bnew\s+stock\s+will\s+be\s+(\d+)/i);
+  const increasedByMatch =
+    rLower.match(
+      /\b(?:increased|added|boosted|raised|refilled)\b[\s\S]{0,40}?\bby\s+(\d+)\s*(?:units?|stocks?)?/i
+    ) ||
+    pLower.match(/\b(?:add|increase|refill)\b[\s\S]{0,40}?(\d+)/i);
+  const decreasedByMatch =
+    rLower.match(
+      /\b(?:decreased|reduced|deducted|lowered)\b[\s\S]{0,40}?\bby\s+(\d+)\s*(?:units?|stocks?)?/i
+    ) ||
+    pLower.match(/\b(?:reduce|decrease|deduct)\b[\s\S]{0,40}?(\d+)/i);
+  const updatedToMatch = rLower.match(
+    /\b(?:updated|set|changed|adjusted)\b[\s\S]{0,55}?\b(?:inventory|stock)\b[\s\S]{0,45}?\bto\s+(\d+)\s*(?:units?|stocks?)?/i
+  );
+
+  const mentionsStockIntent =
+    /\b(stock|stocks|inventory|unit|units|sold\s*out|restock|refill)\b/i.test(
+      `${rawPrompt} ${replyText}`
+    ) && !/\b(price|rupee|rupees|rs\.?|₹)\b/i.test(rawPrompt);
+
+  if (mentionsStockIntent) {
+    let inferredNewStock: number | null = null;
+    if (fromToMatch) {
+      inferredNewStock = parseInt(fromToMatch[2] || fromToMatch[1], 10);
+    } else if (updatedToMatch) {
+      inferredNewStock = parseInt(updatedToMatch[1], 10);
+    } else if (increasedByMatch) {
+      const delta = parseInt(increasedByMatch[1], 10);
+      if (!isNaN(delta) && delta > 0) {
+        inferredNewStock = curStock + delta;
+      }
+    } else if (decreasedByMatch) {
+      const delta = parseInt(decreasedByMatch[1], 10);
+      if (!isNaN(delta) && delta > 0) {
+        inferredNewStock = Math.max(0, curStock - delta);
+      }
+    }
+
+    if (inferredNewStock !== null && !isNaN(inferredNewStock) && inferredNewStock >= 0) {
+      return {
+        type: "UPDATE_STOCK",
+        productId: matchedProd.id,
+        productName: matchedProd.name,
+        currentStock: curStock,
+        newStock: inferredNewStock,
+        quantityChange: inferredNewStock - curStock,
+      };
+    }
+  }
+
+  const priceUpdateMatch =
+    rLower.match(
+      /\b(?:price|rate)\b[\s\S]{0,50}?\b(?:updated|changed|set|adjusted|increased|decreased)\b[\s\S]{0,30}?\bto\s*₹?\s*(\d+(?:\.\d+)?)/i
+    ) ||
+    rLower.match(
+      /\b(?:updated|changed|set)\s+(?:the\s+)?(?:price|rate)\b[\s\S]{0,40}?\bto\s*₹?\s*(\d+(?:\.\d+)?)/i
+    );
+  if (priceUpdateMatch) {
+    const newPriceVal = parseFloat(priceUpdateMatch[1]);
+    if (!isNaN(newPriceVal) && newPriceVal > 0) {
+      return {
+        type: "UPDATE_PRICE",
+        productId: matchedProd.id,
+        productName: matchedProd.name,
+        currentPrice: Number(matchedProd.price) || 0,
+        newPrice: newPriceVal,
+      };
+    }
+  }
+
+  return null;
 }
 
 export function blobToBase64Chunked(blob: Blob): Promise<string> {

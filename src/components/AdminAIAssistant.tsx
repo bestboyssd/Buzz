@@ -84,6 +84,7 @@ import {
   purgeChatMediaFromDatabase,
   wakeUpBuzzServer,
   sanitizeLatexAndMathFormatting,
+  inferClientActionFromTurn,
   ConversationTurnInput,
   ChatAttachment,
   ChatMessage,
@@ -761,16 +762,27 @@ export function AdminAIAssistant({
       }
     };
 
+    const getElementFromNode = (node: Node | null): HTMLElement | null => {
+      if (!node) return null;
+      return node instanceof HTMLElement ? node : node.parentElement;
+    };
+
+    const extractSelectableRangeText = (range: Range): string => {
+      try {
+        const frag = range.cloneContents();
+        frag
+          .querySelectorAll("[data-no-chat-select='true']")
+          .forEach((el) => el.remove());
+        return (frag.textContent || "").trim();
+      } catch {
+        return "";
+      }
+    };
+
     const evaluateSelection = () => {
       if (typeof window === "undefined" || isPointerDown) return;
       const sel = window.getSelection();
       if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-        setSelectionPopup((prev) => (prev?.copied ? prev : null));
-        return;
-      }
-
-      const rawText = sel.toString().trim();
-      if (!rawText) {
         setSelectionPopup((prev) => (prev?.copied ? prev : null));
         return;
       }
@@ -790,8 +802,35 @@ export function AdminAIAssistant({
         return;
       }
 
+      const anchorEl = getElementFromNode(anchorNode);
+      const focusEl = getElementFromNode(focusNode);
+      const anchorInBlocked = Boolean(anchorEl?.closest("[data-no-chat-select='true']"));
+      const focusInBlocked = Boolean(focusEl?.closest("[data-no-chat-select='true']"));
+      const anchorInSelectable = Boolean(
+        anchorEl?.closest("[data-selectable-message-body='true']")
+      );
+      const focusInSelectable = Boolean(
+        focusEl?.closest("[data-selectable-message-body='true']")
+      );
+
+      // If the user tried to select "Listen", "Copy", "Thought for Xs", "Thinking", or any non-message UI chrome,
+      // immediately clear the selection so those labels can never be highlighted or copied!
+      if ((anchorInBlocked && focusInBlocked) || (!anchorInSelectable && !focusInSelectable)) {
+        try {
+          sel.removeAllRanges();
+        } catch {}
+        setSelectionPopup(null);
+        return;
+      }
+
       try {
         const range = sel.getRangeAt(0);
+        const cleanText = extractSelectableRangeText(range);
+        if (!cleanText) {
+          setSelectionPopup((prev) => (prev?.copied ? prev : null));
+          return;
+        }
+
         const rect = range.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0) return;
 
@@ -807,7 +846,7 @@ export function AdminAIAssistant({
         const posY = showAbove ? rect.top - 10 : rect.bottom + 10;
 
         setSelectionPopup({
-          text: rawText.slice(0, 800),
+          text: cleanText.slice(0, 800),
           x: clampedX,
           y: posY,
           placement: showAbove ? "top" : "bottom",
@@ -848,6 +887,18 @@ export function AdminAIAssistant({
         setSelectionPopup((prev) => (prev?.copied ? prev : null));
         return;
       }
+      const anchorEl = getElementFromNode(sel.anchorNode);
+      const focusEl = getElementFromNode(sel.focusNode);
+      if (
+        anchorEl?.closest("[data-no-chat-select='true']") &&
+        focusEl?.closest("[data-no-chat-select='true']")
+      ) {
+        try {
+          sel.removeAllRanges();
+        } catch {}
+        setSelectionPopup(null);
+        return;
+      }
       // Never show or move the popup while the user is actively dragging/selecting
       if (isPointerDown) {
         setSelectionPopup(null);
@@ -860,6 +911,21 @@ export function AdminAIAssistant({
           evaluateSelection();
         }
       }, 360);
+    };
+
+    const handleCopyClean = (e: ClipboardEvent) => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+      const container = chatContainerRef.current;
+      if (!container || !sel.anchorNode || !container.contains(sel.anchorNode)) return;
+      const range = sel.getRangeAt(0);
+      const cleanText = extractSelectableRangeText(range);
+      if (cleanText && e.clipboardData) {
+        e.clipboardData.setData("text/plain", cleanText);
+        e.preventDefault();
+      } else if (!cleanText) {
+        e.preventDefault();
+      }
     };
 
     const handleScrollOrResize = () => {
@@ -877,6 +943,7 @@ export function AdminAIAssistant({
     document.addEventListener("selectionchange", handleSelectionChange);
     const scrollEl = chatContainerRef.current;
     scrollEl?.addEventListener("scroll", handleScrollOrResize, { passive: true });
+    scrollEl?.addEventListener("copy", handleCopyClean);
     window.addEventListener("resize", handleScrollOrResize);
 
     return () => {
@@ -890,6 +957,7 @@ export function AdminAIAssistant({
       document.removeEventListener("touchcancel", handlePointerUp, true);
       document.removeEventListener("selectionchange", handleSelectionChange);
       scrollEl?.removeEventListener("scroll", handleScrollOrResize);
+      scrollEl?.removeEventListener("copy", handleCopyClean);
       window.removeEventListener("resize", handleScrollOrResize);
     };
   }, [isOpen]);
@@ -1796,6 +1864,72 @@ export function AdminAIAssistant({
     }
   };
 
+  const lockedVoiceByLangRef = useRef<Record<string, SpeechSynthesisVoice>>({});
+
+  const resolveSingleConsistentBrowserVoice = (
+    langKey: "en" | "bn" | "hi"
+  ): SpeechSynthesisVoice | undefined => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return undefined;
+    if (lockedVoiceByLangRef.current[langKey]) {
+      return lockedVoiceByLangRef.current[langKey];
+    }
+    const voices = window.speechSynthesis.getVoices();
+    if (!voices || voices.length === 0) return undefined;
+
+    let picked: SpeechSynthesisVoice | undefined;
+    if (langKey === "bn") {
+      picked =
+        voices.find(
+          (v) =>
+            v.lang.toLowerCase().startsWith("bn") &&
+            (v.name.includes("Natural") || v.name.includes("Google"))
+        ) || voices.find((v) => v.lang.toLowerCase().startsWith("bn"));
+    } else if (langKey === "hi") {
+      picked =
+        voices.find(
+          (v) =>
+            v.lang.toLowerCase().startsWith("hi") &&
+            (v.name.includes("Natural") || v.name.includes("Google"))
+        ) || voices.find((v) => v.lang.toLowerCase().startsWith("hi"));
+    } else {
+      const preferredNames = [
+        "Google US English",
+        "Google UK English Female",
+        "Microsoft Aria Online (Natural)",
+        "Microsoft Jenny Online (Natural)",
+        "Samantha",
+        "Google हिन्दी",
+      ];
+      for (const targetName of preferredNames) {
+        const match = voices.find((v) => v.name.includes(targetName) && v.lang.startsWith("en"));
+        if (match) {
+          picked = match;
+          break;
+        }
+      }
+      if (!picked) {
+        picked =
+          voices.find(
+            (v) =>
+              v.lang.startsWith("en") &&
+              (v.name.includes("Natural") || v.name.includes("Google"))
+          ) ||
+          voices.find(
+            (v) =>
+              v.lang.startsWith("en-US") ||
+              v.lang.startsWith("en-GB") ||
+              v.lang.startsWith("en-IN")
+          ) ||
+          voices.find((v) => v.lang.startsWith("en"));
+      }
+    }
+
+    if (picked) {
+      lockedVoiceByLangRef.current[langKey] = picked;
+    }
+    return picked;
+  };
+
   const fallbackSpeechSynthesis = (id: string, rawText: string, reqId: number) => {
     if (speechRequestIdRef.current !== reqId) return;
     setSynthesizingId(null);
@@ -1805,7 +1939,7 @@ export function AdminAIAssistant({
       return;
     }
 
-    // Native Android TTS bridge (Android System WebView frequently lacks window.speechSynthesis)
+    // Native Android TTS bridge
     const androidBridge = (window as any).AndroidExporter;
     if (androidBridge && typeof androidBridge.speakText === "function") {
       try {
@@ -1831,58 +1965,50 @@ export function AdminAIAssistant({
       return;
     }
 
-    try {
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(speechReadyText);
-      const hasBengali = /[\u0980-\u09FF]/.test(speechReadyText);
-      const hasHindi = /[\u0900-\u097F]/.test(speechReadyText);
-      const voices = window.speechSynthesis.getVoices();
+    const speakWithLockedVoice = () => {
+      if (speechRequestIdRef.current !== reqId) return;
+      try {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(speechReadyText);
+        const hasBengali = /[\u0980-\u09FF]/.test(speechReadyText);
+        const hasHindi = /[\u0900-\u097F]/.test(speechReadyText);
+        const langKey: "en" | "bn" | "hi" = hasBengali ? "bn" : hasHindi ? "hi" : "en";
+        utterance.lang = hasBengali ? "bn-IN" : hasHindi ? "hi-IN" : "en-US";
 
-      let preferredVoice: SpeechSynthesisVoice | undefined;
-      if (hasBengali) {
-        utterance.lang = "bn-IN";
-        preferredVoice =
-          voices.find((v) => v.lang.toLowerCase().startsWith("bn") && (v.name.includes("Natural") || v.name.includes("Google"))) ||
-          voices.find((v) => v.lang.toLowerCase().startsWith("bn"));
-      } else if (hasHindi) {
-        utterance.lang = "hi-IN";
-        preferredVoice =
-          voices.find((v) => v.lang.toLowerCase().startsWith("hi") && (v.name.includes("Natural") || v.name.includes("Google"))) ||
-          voices.find((v) => v.lang.toLowerCase().startsWith("hi"));
-      } else {
-        utterance.lang = "en-IN";
-        preferredVoice =
-          voices.find(
-            (v) =>
-              v.lang.startsWith("en") &&
-              (v.name.includes("Natural") ||
-                v.name.includes("Online") ||
-                v.name.includes("Google UK English Female") ||
-                v.name.includes("Google US English") ||
-                v.name.includes("Samantha") ||
-                v.name.includes("Aria") ||
-                v.name.includes("Zira"))
-          ) ||
-          voices.find((v) => v.lang.startsWith("en-IN") || v.lang.startsWith("en-GB") || v.lang.startsWith("en-US")) ||
-          voices.find((v) => v.lang.startsWith("en"));
+        const lockedVoice = resolveSingleConsistentBrowserVoice(langKey);
+        if (lockedVoice) {
+          utterance.voice = lockedVoice;
+          utterance.lang = lockedVoice.lang || utterance.lang;
+        }
+        utterance.rate = 0.98;
+        utterance.pitch = 1.0;
+        utterance.onend = () => {
+          if (speechRequestIdRef.current === reqId) setSpeakingId(null);
+        };
+        utterance.onerror = () => {
+          if (speechRequestIdRef.current === reqId) setSpeakingId(null);
+        };
+
+        setSpeakingId(id);
+        window.speechSynthesis.speak(utterance);
+      } catch {
+        setSpeakingId(null);
       }
+    };
 
-      if (preferredVoice) {
-        utterance.voice = preferredVoice;
-      }
-      utterance.rate = 0.98;
-      utterance.pitch = 1.0;
-      utterance.onend = () => {
-        if (speechRequestIdRef.current === reqId) setSpeakingId(null);
+    const existingVoices = window.speechSynthesis.getVoices();
+    if (!existingVoices || existingVoices.length === 0) {
+      let fired = false;
+      const onVoicesReady = () => {
+        if (fired) return;
+        fired = true;
+        window.speechSynthesis.removeEventListener("voiceschanged", onVoicesReady);
+        speakWithLockedVoice();
       };
-      utterance.onerror = () => {
-        if (speechRequestIdRef.current === reqId) setSpeakingId(null);
-      };
-
-      setSpeakingId(id);
-      window.speechSynthesis.speak(utterance);
-    } catch (e) {
-      setSpeakingId(null);
+      window.speechSynthesis.addEventListener("voiceschanged", onVoicesReady);
+      window.setTimeout(onVoicesReady, 220);
+    } else {
+      speakWithLockedVoice();
     }
   };
 
@@ -1906,12 +2032,20 @@ export function AdminAIAssistant({
       return;
     }
 
+    // On Android native APK where AndroidExporter.speakText is available, use the locked native device TTS engine
+    // so every single message is spoken immediately by the exact same voice without switching between engines
+    const androidBridge = (window as any).AndroidExporter;
+    if (androidBridge && typeof androidBridge.speakText === "function") {
+      fallbackSpeechSynthesis(id, text, currentReqId);
+      return;
+    }
+
     setSynthesizingId(id);
     setSpeakingId(id);
 
     try {
-      // High-definition Gemini Neural TTS (Kore 24kHz voice) with fast 4.5s timeout before native fallback
-      const audioUrl = await synthesizeGeminiVoice(speechText, 4500);
+      // Single consistent Gemini Neural TTS ("Kore" 24kHz voice via v1beta) with 8s timeout
+      const audioUrl = await synthesizeGeminiVoice(speechText, 8000);
       if (speechRequestIdRef.current !== currentReqId) return;
       setSynthesizingId(null);
 
@@ -1935,7 +2069,6 @@ export function AdminAIAssistant({
       await audio.play();
     } catch (err) {
       if (speechRequestIdRef.current !== currentReqId) return;
-      // Smoothly fall back to native Android TTS or Web Speech synthesis
       fallbackSpeechSynthesis(id, text, currentReqId);
     }
   };
@@ -1974,12 +2107,8 @@ export function AdminAIAssistant({
     setLoading(false);
   };
 
-  const handleMediaFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const fileList = e.target.files;
-    if (!fileList || fileList.length === 0) return;
-    const allSelectedFiles: File[] = Array.from(fileList);
-    // Reset input so selecting the same file(s) again still triggers onChange
-    e.target.value = "";
+  const processIncomingMediaFiles = async (allSelectedFiles: File[]) => {
+    if (!allSelectedFiles || allSelectedFiles.length === 0) return;
 
     const currentCount = pendingAttachmentsRef.current.length;
     if (currentCount >= MAX_MEDIA_ATTACHMENTS) {
@@ -2004,7 +2133,7 @@ export function AdminAIAssistant({
       const added: ChatAttachment[] = [];
       for (const file of files) {
         const rawMime = (file.type || "").trim().toLowerCase();
-        const ext = (file.name.split(".").pop() || "").toLowerCase();
+        const ext = ((file.name || "").split(".").pop() || "").toLowerCase();
         let mimeType = rawMime;
         if (!mimeType) {
           if (["mp4", "m4v"].includes(ext)) mimeType = "video/mp4";
@@ -2038,7 +2167,7 @@ export function AdminAIAssistant({
           }
           added.push({
             id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            name: file.name,
+            name: file.name || `pasted-image-${Date.now()}.jpg`,
             mimeType: compressed.mimeType,
             kind: "image",
             dataBase64: compressed.dataBase64,
@@ -2057,7 +2186,7 @@ export function AdminAIAssistant({
           const previewUrl = URL.createObjectURL(file) || extracted.posterDataUrl;
           added.push({
             id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            name: file.name,
+            name: file.name || `pasted-video-${Date.now()}.mp4`,
             mimeType,
             kind: "video",
             dataBase64,
@@ -2083,6 +2212,87 @@ export function AdminAIAssistant({
       setIsPreparingAttachments(false);
     }
   };
+
+  const handleMediaFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const allSelectedFiles: File[] = Array.from(fileList);
+    e.target.value = "";
+    await processIncomingMediaFiles(allSelectedFiles);
+  };
+
+  const extractClipboardMediaFiles = (clipboardData: DataTransfer | null): File[] => {
+    if (!clipboardData) return [];
+    const mediaFiles: File[] = [];
+    const seenSizes = new Set<string>();
+
+    if (clipboardData.items && clipboardData.items.length > 0) {
+      for (let i = 0; i < clipboardData.items.length; i++) {
+        const item = clipboardData.items[i];
+        if (item.kind === "file") {
+          const blob = item.getAsFile();
+          if (blob) {
+            const type = (blob.type || item.type || "").toLowerCase();
+            if (type.startsWith("image/") || type.startsWith("video/")) {
+              const ext = type.split("/")[1]?.split(";")[0] || "png";
+              const namedFile =
+                blob.name && blob.name !== "image.png"
+                  ? blob
+                  : new File(
+                      [blob],
+                      `clipboard-${Date.now()}-${i}.${ext}`,
+                      { type: type || "image/png" }
+                    );
+              const sig = `${namedFile.size}-${type}`;
+              if (!seenSizes.has(sig)) {
+                seenSizes.add(sig);
+                mediaFiles.push(namedFile);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (mediaFiles.length === 0 && clipboardData.files && clipboardData.files.length > 0) {
+      for (let i = 0; i < clipboardData.files.length; i++) {
+        const f = clipboardData.files[i];
+        const type = (f.type || "").toLowerCase();
+        if (type.startsWith("image/") || type.startsWith("video/")) {
+          mediaFiles.push(f);
+        }
+      }
+    }
+
+    return mediaFiles;
+  };
+
+  const handlePasteMedia = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (isAiBusy || isRecording) return;
+    const mediaFiles = extractClipboardMediaFiles(e.clipboardData);
+    if (mediaFiles.length > 0) {
+      e.preventDefault();
+      processIncomingMediaFiles(mediaFiles);
+    }
+  };
+
+  // Also listen for window-level paste events while Buzz AI drawer is open (in case textarea isn't focused when pressing Ctrl+V)
+  useEffect(() => {
+    if (!isOpen) return;
+    const onWindowPaste = (e: ClipboardEvent) => {
+      if (isAiBusy || isRecording) return;
+      if (e.defaultPrevented) return;
+      const mediaFiles = extractClipboardMediaFiles(e.clipboardData);
+      if (mediaFiles.length > 0) {
+        e.preventDefault();
+        processIncomingMediaFiles(mediaFiles);
+      }
+    };
+    window.addEventListener("paste", onWindowPaste);
+    return () => {
+      window.removeEventListener("paste", onWindowPaste);
+    };
+  }, [isOpen, isAiBusy, isRecording]);
 
   const handleRemovePendingAttachment = (attId: string) => {
     triggerHaptic("light");
@@ -2489,8 +2699,16 @@ export function AdminAIAssistant({
           activeAssistantMsgIdRef.current = null;
 
           const effectiveReply = String(finalPayload.reply || "").trim();
+          const rawCandidateAction =
+            finalPayload.action ||
+            inferClientActionFromTurn(
+              rawPrompt,
+              effectiveReply,
+              storeContext,
+              historyPayload
+            );
           const effectiveAction = resolveUploadedImageForAction(
-            finalPayload.action || null,
+            rawCandidateAction,
             attachmentsToSend,
             newHistory,
             rawPrompt
@@ -2524,6 +2742,20 @@ export function AdminAIAssistant({
           setLoading(false);
           triggerHaptic("light");
           scrollToBottom(false);
+
+          // If the AI's reply claims the stock or price has already been updated (or user directly commanded a stock/price update),
+          // auto-execute the Firestore update immediately so the AI never claims it updated stock without actually updating the database!
+          if (
+            effectiveAction &&
+            (effectiveAction.type === "UPDATE_STOCK" || effectiveAction.type === "UPDATE_PRICE") &&
+            /\b(has\s+been\s+(?:successfully\s+)?(?:increased|decreased|reduced|updated|changed|set|added)|inventory\s+is\s+now\s+updated|have\s+now\s+(?:manually\s+)?updated|updated\s+the\s+(?:inventory|stock|price))\b/i.test(
+              effectiveReply
+            )
+          ) {
+            window.setTimeout(() => {
+              handleExecuteAction(assistantMsgId, effectiveAction);
+            }, 60);
+          }
         },
         abortController.signal,
         attachmentsToSend
@@ -3254,30 +3486,30 @@ export function AdminAIAssistant({
             <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(rgba(15,23,42,0.05)_1px,transparent_1px)] dark:bg-[radial-gradient(rgba(255,255,255,0.035)_1px,transparent_1px)] [background-size:26px_26px] opacity-50 dark:opacity-40" />
 
             {/* Refined Top Bar — padded below mobile status bar (clock, Wi-Fi, battery) */}
-            <header className="px-4 sm:px-6 pt-[max(calc(env(safe-area-inset-top,0px)+0.75rem),2.75rem)] sm:pt-3.5 pb-3 border-b border-slate-200/80 dark:border-white/[0.07] flex items-center justify-between shrink-0 bg-white dark:bg-[#090d18] relative z-20 [transform:translateZ(0)]">
-              <div className="flex items-center gap-3 min-w-0">
+            <header className="px-3.5 sm:px-6 pt-[max(calc(env(safe-area-inset-top,0px)+0.75rem),2.75rem)] sm:pt-3.5 pb-3 border-b border-slate-200/80 dark:border-white/[0.07] flex items-center justify-between gap-3 sm:gap-4 shrink-0 bg-white dark:bg-[#090d18] relative z-20 [transform:translateZ(0)]">
+              <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 overflow-hidden pr-1">
                 <motion.div
                   initial={{ scale: 0.85, rotate: -10 }}
                   animate={{ scale: 1, rotate: 0 }}
                   transition={{ type: "spring", stiffness: 500, damping: 26 }}
-                  className="relative w-9 h-9 rounded-2xl bg-indigo-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/25 shrink-0 overflow-hidden"
+                  className="relative w-8 h-8 sm:w-9 sm:h-9 rounded-xl sm:rounded-2xl bg-indigo-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/25 shrink-0 overflow-hidden"
                 >
                   <div className="absolute inset-0 bg-gradient-to-tr from-amber-400 via-indigo-500 to-purple-600" />
-                  <Zap size={17} className="relative z-10 fill-white text-white" />
+                  <Zap size={16} className="relative z-10 fill-white text-white" />
                 </motion.div>
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm sm:text-base font-extrabold tracking-tight text-slate-900 dark:text-white leading-none">
+                <div className="min-w-0 flex-1 overflow-hidden">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-sm sm:text-base font-extrabold tracking-tight text-slate-900 dark:text-white leading-none truncate">
                       Buzz AI
                     </span>
                   </div>
-                  <p className="text-[10px] sm:text-[11px] text-slate-500 dark:text-slate-400 font-medium leading-tight mt-0.5 whitespace-nowrap">
+                  <p className="text-[9.5px] sm:text-[11px] text-slate-500 dark:text-slate-400 font-medium tracking-tight leading-tight mt-0.5 truncate">
                     Store Operations & Inventory
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                 <input
                   ref={mediaFileInputRef}
                   type="file"
@@ -3292,9 +3524,9 @@ export function AdminAIAssistant({
                   transition={{ type: "spring", stiffness: 520, damping: 28 }}
                   onClick={handleClearHistory}
                   title="Start a new chat"
-                  className="h-9 px-3 rounded-xl flex items-center gap-1.5 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:text-slate-950 dark:hover:text-white bg-slate-100/90 dark:bg-white/[0.05] hover:bg-slate-200/80 dark:hover:bg-white/[0.1] border border-slate-200/90 dark:border-white/[0.08] transition-colors cursor-pointer"
+                  className="h-8 sm:h-9 px-2.5 sm:px-3 rounded-xl flex items-center gap-1.5 text-[11px] sm:text-xs font-semibold text-slate-700 dark:text-slate-200 hover:text-slate-950 dark:hover:text-white bg-slate-100/90 dark:bg-white/[0.05] hover:bg-slate-200/80 dark:hover:bg-white/[0.1] border border-slate-200/90 dark:border-white/[0.08] transition-colors cursor-pointer whitespace-nowrap shrink-0"
                 >
-                  <RotateCcw size={13} className="text-indigo-600 dark:text-indigo-400" />
+                  <RotateCcw size={12} className="text-indigo-600 dark:text-indigo-400 shrink-0" />
                   <span>New Chat</span>
                 </motion.button>
                 <motion.button
@@ -3307,9 +3539,9 @@ export function AdminAIAssistant({
                     onClose();
                   }}
                   title="Close"
-                  className="w-9 h-9 rounded-xl flex items-center justify-center bg-slate-100/90 dark:bg-white/[0.05] text-slate-600 dark:text-slate-300 hover:bg-slate-200/80 dark:hover:bg-white/[0.1] hover:text-slate-950 dark:hover:text-white transition-colors border border-slate-200/90 dark:border-white/[0.08] cursor-pointer"
+                  className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center bg-slate-100/90 dark:bg-white/[0.05] text-slate-600 dark:text-slate-300 hover:bg-slate-200/80 dark:hover:bg-white/[0.1] hover:text-slate-950 dark:hover:text-white transition-colors border border-slate-200/90 dark:border-white/[0.08] cursor-pointer shrink-0"
                 >
-                  <X size={16} />
+                  <X size={15} />
                 </motion.button>
               </div>
             </header>
@@ -3581,21 +3813,30 @@ export function AdminAIAssistant({
                             }`}
                           >
                             <div className="flex items-end gap-2.5 flex-wrap justify-between min-w-0 max-w-full">
-                              <div className="text-xs sm:text-sm leading-relaxed whitespace-pre-wrap font-semibold break-words [overflow-wrap:anywhere] [word-break:break-word] text-left min-w-0 max-w-full">
+                              <div
+                                data-selectable-message-body="true"
+                                className="text-xs sm:text-sm leading-relaxed whitespace-pre-wrap font-semibold break-words [overflow-wrap:anywhere] [word-break:break-word] text-left min-w-0 max-w-full"
+                              >
                                 {displayedUserText}
                               </div>
                               {!isLongUserMsg && (
-                                <span className="text-[9px] font-medium text-indigo-100/80 dark:text-indigo-200/75 font-mono shrink-0 translate-y-0.5 select-none ml-auto">
+                                <span
+                                  data-no-chat-select="true"
+                                  className="text-[9px] font-medium text-indigo-100/80 dark:text-indigo-200/75 font-mono shrink-0 translate-y-0.5 select-none [-webkit-user-select:none] ml-auto"
+                                >
                                   {formattedTime}
                                 </span>
                               )}
                             </div>
                             {isLongUserMsg && (
-                              <div className="flex items-center justify-between gap-3 mt-1.5 pt-1 border-t border-white/15">
+                              <div
+                                data-no-chat-select="true"
+                                className="flex items-center justify-between gap-3 mt-1.5 pt-1 border-t border-white/15 select-none [-webkit-user-select:none]"
+                              >
                                 <button
                                   type="button"
                                   onClick={() => toggleExpandMessage(msg.id)}
-                                  className="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-100 hover:text-white bg-white/10 hover:bg-white/20 px-2 py-0.5 rounded-full transition-colors cursor-pointer select-none"
+                                  className="inline-flex items-center gap-1 text-[10px] font-bold text-indigo-100 hover:text-white bg-white/10 hover:bg-white/20 px-2 py-0.5 rounded-full transition-colors cursor-pointer select-none [-webkit-user-select:none]"
                                 >
                                   {isUserExpanded ? (
                                     <>
@@ -3609,7 +3850,7 @@ export function AdminAIAssistant({
                                     </>
                                   )}
                                 </button>
-                                <span className="text-[9px] font-medium text-indigo-100/80 dark:text-indigo-200/75 font-mono shrink-0 select-none">
+                                <span className="text-[9px] font-medium text-indigo-100/80 dark:text-indigo-200/75 font-mono shrink-0 select-none [-webkit-user-select:none]">
                                   {formattedTime}
                                 </span>
                               </div>
@@ -3630,7 +3871,10 @@ export function AdminAIAssistant({
                   transition={{ type: "spring", stiffness: 460, damping: 32, mass: 0.68 }}
                   className="flex flex-col items-start gap-1.5 w-full max-w-full min-w-0 origin-top-left"
                 >
-                  <div className="flex items-center gap-2 mb-0.5 pl-1 text-[11px]">
+                  <div
+                    data-no-chat-select="true"
+                    className="flex items-center gap-2 mb-0.5 pl-1 text-[11px] select-none [-webkit-user-select:none] [-webkit-touch-callout:none]"
+                  >
                     <div className="relative w-5 h-5 rounded-lg bg-indigo-600 flex items-center justify-center text-white shadow-xs overflow-hidden">
                       <div className="absolute inset-0 bg-gradient-to-tr from-amber-400 via-indigo-500 to-purple-600" />
                       <Zap size={11} className="relative z-10 fill-white text-white" />
@@ -3649,7 +3893,10 @@ export function AdminAIAssistant({
                   <div className={`${msg.action ? "w-full sm:max-w-[430px]" : "w-fit max-w-[96%] sm:max-w-[88%]"} rounded-2xl rounded-tl-xs p-3.5 sm:p-4 bg-white dark:bg-[#0f172a] dark:bg-gradient-to-b dark:from-slate-900 dark:via-slate-900 dark:to-slate-950 border border-slate-200/90 dark:border-slate-700/70 text-slate-800 dark:text-slate-100 shadow-lg shadow-slate-900/[0.04] dark:shadow-xl dark:shadow-black/40 relative overflow-hidden break-words [overflow-wrap:anywhere] [word-break:break-word] min-w-0 [backface-visibility:hidden]`}>
                     {/* While Streaming: Compact Thinking Indicator with Live Stopwatch */}
                     {msg.isStreaming && !msg.content && (
-                      <div className="flex items-center gap-2.5 py-0.5 px-0.5">
+                      <div
+                        data-no-chat-select="true"
+                        className="flex items-center gap-2.5 py-0.5 px-0.5 select-none [-webkit-user-select:none] [-webkit-touch-callout:none]"
+                      >
                         <div className="relative w-7 h-7 rounded-xl bg-indigo-500/15 border border-indigo-400/30 flex items-center justify-center shrink-0 overflow-hidden">
                           <Sparkles size={13} className="text-indigo-500 dark:text-indigo-300 animate-pulse" />
                         </div>
@@ -3695,7 +3942,10 @@ export function AdminAIAssistant({
                     )}
 
                     {/* Formatted Markdown Content with progressive word-by-word streaming cursor */}
-                    <div className="text-xs sm:text-[13px] leading-relaxed break-words [overflow-wrap:anywhere] [word-break:break-word] min-w-0 max-w-full w-full">
+                    <div
+                      data-selectable-message-body="true"
+                      className="text-xs sm:text-[13px] leading-relaxed break-words [overflow-wrap:anywhere] [word-break:break-word] min-w-0 max-w-full w-full"
+                    >
                       <MarkdownContent
                         text={msg.content}
                         isStreaming={Boolean(msg.isStreaming)}
@@ -3705,10 +3955,11 @@ export function AdminAIAssistant({
                     {/* Interactive Action Confirmation Card (animates and fills in once words complete) */}
                     {!msg.isStreaming && msg.action && (
                       <motion.div
+                        data-no-chat-select="true"
                         initial={{ opacity: 0, y: 10, scale: 0.98 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         transition={{ type: "spring", stiffness: 460, damping: 30, mass: 0.7 }}
-                        className="mt-3.5 pt-3 border-t border-slate-200/80 dark:border-slate-800/80 w-full"
+                        className="mt-3.5 pt-3 border-t border-slate-200/80 dark:border-slate-800/80 w-full select-none [-webkit-user-select:none] [-webkit-touch-callout:none]"
                       >
                         {/* 1. UPDATE_STOCK */}
                         {msg.action.type === "UPDATE_STOCK" && (() => {
@@ -4812,57 +5063,87 @@ export function AdminAIAssistant({
 
                     {/* Toolbar under message (fills in once message is complete) */}
                     {!msg.isStreaming && msg.content && (
-                      <div className="mt-3 pt-2.5 border-t border-slate-200/80 dark:border-slate-800/70 space-y-2.5">
-                        <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 text-[10.5px]">
+                      <div
+                        data-no-chat-select="true"
+                        className="mt-3 pt-2.5 border-t border-slate-200/80 dark:border-slate-800/70 space-y-2.5 select-none [-webkit-user-select:none] [-webkit-touch-callout:none]"
+                      >
+                        <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 text-[10.5px] select-none [-webkit-user-select:none]">
                           {msg.thought ? (
-                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border bg-slate-100 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700/50 text-slate-600 dark:text-slate-300 text-[10.5px] font-medium select-none">
+                            <div
+                              data-no-chat-select="true"
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border bg-slate-100 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700/50 text-slate-600 dark:text-slate-300 text-[10.5px] font-medium select-none [-webkit-user-select:none]"
+                            >
                               <Sparkles size={11} className="text-indigo-500 dark:text-indigo-400 shrink-0" />
-                              <span>Thought for {msg.thoughtDuration || 1}s</span>
+                              <span className="select-none [-webkit-user-select:none]">
+                                Thought for {msg.thoughtDuration || 1}s
+                              </span>
                             </div>
                           ) : (
-                            <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400">
+                            <div
+                              data-no-chat-select="true"
+                              className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400 select-none [-webkit-user-select:none]"
+                            >
                               <Zap size={11} className="text-amber-500 dark:text-amber-400 fill-amber-500 dark:fill-amber-400" />
-                              <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400">Buzz AI</span>
+                              <span className="font-mono text-[10px] text-slate-500 dark:text-slate-400 select-none [-webkit-user-select:none]">
+                                Buzz AI
+                              </span>
                             </div>
                           )}
-                          <div className="flex items-center gap-3">
+                          <div
+                            data-no-chat-select="true"
+                            className="flex items-center gap-3 select-none [-webkit-user-select:none]"
+                          >
                             <button
+                              type="button"
+                              data-no-chat-select="true"
                               onClick={() => handleSpeakText(msg.id, msg.content)}
-                              className="hover:text-indigo-600 dark:hover:text-indigo-300 transition-colors flex items-center gap-1.5 cursor-pointer"
+                              className="hover:text-indigo-600 dark:hover:text-indigo-300 transition-colors flex items-center gap-1.5 cursor-pointer select-none [-webkit-user-select:none]"
                               title={speakingId === msg.id ? "Stop voice" : "Listen with Gemini Neural Voice"}
                             >
                               {synthesizingId === msg.id ? (
                                 <>
                                   <RefreshCw size={12} className="text-indigo-500 dark:text-indigo-400 animate-spin" />
-                                  <span className="text-indigo-600 dark:text-indigo-300 text-[10px] font-semibold">Synthesizing...</span>
+                                  <span className="text-indigo-600 dark:text-indigo-300 text-[10px] font-semibold select-none [-webkit-user-select:none]">
+                                    Synthesizing...
+                                  </span>
                                 </>
                               ) : speakingId === msg.id ? (
                                 <>
                                   <VolumeX size={12} className="text-rose-500 dark:text-rose-400 animate-pulse" />
-                                  <span className="text-rose-600 dark:text-rose-400 text-[10px] font-bold">Speaking...</span>
+                                  <span className="text-rose-600 dark:text-rose-400 text-[10px] font-bold select-none [-webkit-user-select:none]">
+                                    Speaking...
+                                  </span>
                                 </>
                               ) : (
                                 <>
                                   <Volume2 size={12} />
-                                  <span className="text-[10px]">Listen</span>
+                                  <span className="text-[10px] select-none [-webkit-user-select:none]">
+                                    Listen
+                                  </span>
                                 </>
                               )}
                             </button>
 
                             <button
+                              type="button"
+                              data-no-chat-select="true"
                               onClick={() => handleCopyText(msg.id, msg.content)}
-                              className="hover:text-slate-900 dark:hover:text-slate-200 transition-colors flex items-center gap-1.5 cursor-pointer"
+                              className="hover:text-slate-900 dark:hover:text-slate-200 transition-colors flex items-center gap-1.5 cursor-pointer select-none [-webkit-user-select:none]"
                               title="Copy text"
                             >
                               {copiedId === msg.id ? (
                                 <>
                                   <Check size={12} className="text-emerald-600 dark:text-emerald-400" />
-                                  <span className="text-emerald-600 dark:text-emerald-400 text-[10px] font-bold">Copied</span>
+                                  <span className="text-emerald-600 dark:text-emerald-400 text-[10px] font-bold select-none [-webkit-user-select:none]">
+                                    Copied
+                                  </span>
                                 </>
                               ) : (
                                 <>
                                   <Copy size={12} />
-                                  <span className="text-[10px]">Copy</span>
+                                  <span className="text-[10px] select-none [-webkit-user-select:none]">
+                                    Copy
+                                  </span>
                                 </>
                               )}
                             </button>
@@ -5236,6 +5517,7 @@ export function AdminAIAssistant({
                     ref={inputRef}
                     rows={1}
                     value={input}
+                    onPaste={handlePasteMedia}
                     onChange={(e) => {
                       if (isAiBusy || isRecording) return;
                       const val = e.target.value;
