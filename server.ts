@@ -54,9 +54,6 @@ const PORT = Number(process.env.PORT) || 3000;
 
 function getServerGeminiKey(): string {
   const candidates = [
-    process.env.FREE_GEMINI_API_KEY,
-    process.env.BUZZ_GEMINI_API_KEY,
-    process.env.CUSTOM_GEMINI_API_KEY,
     process.env.GEMINI_API_KEY,
     process.env.API_KEY,
   ];
@@ -78,7 +75,7 @@ function formatGeminiServerError(rawErr: unknown): {
   if (lower.includes("reported as leaked") || lower.includes("leaked")) {
     return {
       message:
-        "Server GEMINI_API_KEY was rejected by Google (403 PERMISSION_DENIED: API key reported as leaked). Please update GEMINI_API_KEY or add BUZZ_GEMINI_API_KEY in the AI Studio Settings > Secrets panel.",
+        "Server GEMINI_API_KEY was rejected by Google (403 PERMISSION_DENIED: API key reported as leaked). Please update GEMINI_API_KEY in Settings.",
       isFatalKeyError: true,
     };
   }
@@ -89,7 +86,7 @@ function formatGeminiServerError(rawErr: unknown): {
   ) {
     return {
       message:
-        "Server GEMINI_API_KEY is invalid or lacks permission (400/403). Please check GEMINI_API_KEY or set BUZZ_GEMINI_API_KEY in the AI Studio Settings > Secrets panel.",
+        "Server GEMINI_API_KEY is invalid or lacks permission (400/403). Please check GEMINI_API_KEY in Settings.",
       isFatalKeyError: true,
     };
   }
@@ -3076,9 +3073,10 @@ function detectLanguageInstructionForPrompt(cleanPrompt: string): string {
 export function buildValidServerGeminiContents(
   conversationHistory: any[],
   prompt: string,
-  attachments: any[] = []
+  attachments: any[] = [],
+  excludeRawVideoBinary: boolean = false
 ): Array<{ role: "user" | "model"; parts: Array<any> }> {
-  const validAttachments = Array.isArray(attachments)
+  const rawValidAttachments = Array.isArray(attachments)
     ? attachments.filter(
         (a) =>
           a &&
@@ -3088,9 +3086,30 @@ export function buildValidServerGeminiContents(
       )
     : [];
 
+  const hasVideoFrames = rawValidAttachments.some(
+    (a) => a.kind === "video_frame" || String(a.name || "").includes("video frame")
+  );
+  const validAttachments = rawValidAttachments
+    .filter((a) => {
+      if (excludeRawVideoBinary && hasVideoFrames && a.mimeType.startsWith("video/")) {
+        return false;
+      }
+      return true;
+    })
+    .slice(0, 20);
+
+  const hasVideoAttachment = rawValidAttachments.some(
+    (a) =>
+      a.kind === "video" ||
+      a.kind === "video_frame" ||
+      String(a.mimeType || "").startsWith("video/")
+  );
+
   const fallbackPrompt =
     validAttachments.length > 0
-      ? "Analyze the attached media (images/videos), describe what is shown, extract any visible text or spoken audio, and help me with my request."
+      ? hasVideoAttachment
+        ? "Analyze the attached video carefully. Describe the visual scenes, actions, objects, any visible text, and any spoken audio in detail, and help me with my request."
+        : "Analyze the attached media (images/videos), describe what is shown, extract any visible text or spoken audio, and help me with my request."
       : "";
   const cleanPrompt = (prompt || fallbackPrompt).trim().slice(0, 1600);
   const langInstruction = detectLanguageInstructionForPrompt(cleanPrompt);
@@ -3103,7 +3122,7 @@ export function buildValidServerGeminiContents(
 
   const promptReferencesHistoryMedia =
     validAttachments.length === 0 &&
-    /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|product|use\s+this|use\s+it)\b/i.test(
+    /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|clip|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|product|use\s+this|use\s+it)\b/i.test(
       cleanPrompt
     );
 
@@ -3119,13 +3138,15 @@ export function buildValidServerGeminiContents(
       isMostRecentMediaTurn &&
       keptHistoryMediaCount < 2 &&
       Array.isArray(msg?.attachments)
-        ? msg.attachments.filter(
-            (a: any) =>
-              a &&
-              typeof a.mimeType === "string" &&
-              typeof a.data === "string" &&
-              a.data.length > 0
-          )
+        ? msg.attachments
+            .filter(
+              (a: any) =>
+                a &&
+                typeof a.mimeType === "string" &&
+                typeof a.data === "string" &&
+                a.data.length > 0
+            )
+            .slice(0, 8)
         : [];
     if (rawTurnAttachments.length > 0) {
       keptHistoryMediaCount++;
@@ -3144,7 +3165,6 @@ export function buildValidServerGeminiContents(
         : "");
     if (!text && turnMediaParts.length === 0) continue;
     if (text.includes("I am **Buzz AI**, your intelligent retail store manager")) continue;
-    // Skip canned fallback messages from polluting multi-turn vision context
     if (
       msg?.role === "assistant" &&
       text.includes("I checked your store catalog (") &&
@@ -3196,14 +3216,29 @@ export function buildValidServerGeminiContents(
     }
   }
 
-  const mediaParts = validAttachments.map((att) => ({
-    inlineData: {
-      mimeType: att.mimeType,
-      data: att.data,
-    },
-  }));
+  const mediaParts: Array<any> = [];
+  for (const att of validAttachments) {
+    if (att.kind === "video_frame") {
+      mediaParts.push({
+        text: `[Video Frame from "${att.name || "uploaded video"}"]`,
+      });
+    } else if (att.kind === "video" || String(att.mimeType || "").startsWith("video/")) {
+      mediaParts.push({
+        text: `[Uploaded Video File: "${att.name || "video.mp4"}"]`,
+      });
+    }
+    mediaParts.push({
+      inlineData: {
+        mimeType: att.mimeType,
+        data: att.data,
+      },
+    });
+  }
 
-  const finalPromptWithLang = `${cleanPrompt}${langInstruction}`;
+  const videoContextNote = hasVideoAttachment
+    ? "\n[System Media Note: The user attached a video (provided as video stream and/or chronological keyframe snapshots). Analyze the video content directly as a video—describe what happens across the video, any products/items shown, visible text, or actions.]"
+    : "";
+  const finalPromptWithLang = `${cleanPrompt}${videoContextNote}${langInstruction}`;
 
   const last = contents[contents.length - 1];
   if (last && last.role === "user" && mediaParts.length === 0) {
@@ -3261,7 +3296,7 @@ export function getInstantGreetingReply(
   return null;
 }
 
-// Execute AI Chat with Automatic Multi-Model Hedged Failover
+// Execute AI Chat with Automatic Multi-Model Hedged Failover (100% Live AI — No Canned/Dummy Replies)
 export async function executeAiQuery(
   prompt: string,
   snapshot: StoreSnapshot,
@@ -3269,12 +3304,6 @@ export async function executeAiQuery(
   attachments: any[] = []
 ): Promise<{ text: string; modelUsed: string }> {
   const hasDirectAttachments = Array.isArray(attachments) && attachments.length > 0;
-  if (!hasDirectAttachments) {
-    const instantGreeting = getInstantGreetingReply(prompt, snapshot);
-    if (instantGreeting) {
-      return { text: instantGreeting, modelUsed: PRIMARY_AI_MODEL };
-    }
-  }
 
   if (!getServerGeminiKey()) {
     throw new Error("No GEMINI_API_KEY configured.");
@@ -3282,7 +3311,7 @@ export async function executeAiQuery(
 
   const promptReferencesHistoryMedia =
     !hasDirectAttachments &&
-    /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|use\s+this|use\s+it)\b/i.test(
+    /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|clip|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|use\s+this|use\s+it)\b/i.test(
       prompt
     );
   const hasHistoryMedia =
@@ -3295,16 +3324,20 @@ export async function executeAiQuery(
   const fastTier = isFastShortTier(prompt, hasMedia);
   const systemInstruction = buildAdaptiveStoreSystemPrompt(snapshot, prompt, hasMedia);
   const trimmedHistory = fastTier ? (conversationHistory || []).slice(-4) : conversationHistory;
-  const contents = buildValidServerGeminiContents(trimmedHistory, prompt, attachments);
+  const contents = buildValidServerGeminiContents(trimmedHistory, prompt, attachments, false);
+  const fallbackFrameContents = hasDirectAttachments
+    ? buildValidServerGeminiContents(trimmedHistory, prompt, attachments, true)
+    : contents;
 
   const callSingleModel = async (
     model: string,
-    timeoutMs: number
+    timeoutMs: number,
+    activeContents = contents
   ): Promise<{ text: string; modelUsed: string }> => {
     const response = await Promise.race([
       getAiClient().models.generateContent({
         model,
-        contents,
+        contents: activeContents,
         config: {
           systemInstruction,
           ...(model === "gemini-3.1-flash-lite"
@@ -3388,10 +3421,15 @@ export async function executeAiQuery(
   let lastModelError = "";
   for (let i = 0; i < rawList.length; i++) {
     const model = rawList[i];
-    const timeoutMs = hasMedia ? 14000 : 8000;
+    const timeoutMs = hasMedia ? 24000 : 8000;
     try {
-      return await callSingleModel(model, timeoutMs);
+      return await callSingleModel(model, timeoutMs, contents);
     } catch (err: any) {
+      if (hasDirectAttachments && fallbackFrameContents !== contents) {
+        try {
+          return await callSingleModel(model, timeoutMs, fallbackFrameContents);
+        } catch {}
+      }
       const formatted = formatGeminiServerError(err);
       lastModelError = formatted.message;
       if (formatted.isFatalKeyError) {
@@ -3662,28 +3700,10 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
       }
     }
 
-    if (!hasAttachments) {
-      const instantGreeting = getInstantGreetingReply(cleanPrompt, snapshot);
-      if (instantGreeting) {
-        res.write(`data: ${JSON.stringify({ chunk: instantGreeting })}\n\n`);
-        res.write(
-          `data: ${JSON.stringify({
-            done: true,
-            fullText: instantGreeting,
-            action: null,
-            thought: "Recognized greeting and verified live store readiness.",
-            modelUsed: PRIMARY_AI_MODEL,
-          })}\n\n`
-        );
-        res.end();
-        return;
-      }
-    }
-
-    // 2. Stream Response with Two-Tier Adaptive Speed (<2s short sentence, <8-10s media/paragraph)
+    // 2. Stream Response with Two-Tier Adaptive Speed (100% Live AI — No Canned/Dummy Replies)
     const promptReferencesHistoryMedia =
       !hasAttachments &&
-      /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|use\s+this|use\s+it)\b/i.test(
+      /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|clip|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|use\s+this|use\s+it)\b/i.test(
         cleanPrompt
       );
     const hasHistoryMedia =
@@ -3751,7 +3771,7 @@ app.post("/api/gemini/chat-stream", async (req, res) => {
       for (let i = 0; i < candidates.length; i++) {
         const model = candidates[i];
         if (clientAborted) break;
-        const firstChunkTimeoutMs = hasAnyStreamMedia ? 14000 : 4500;
+        const firstChunkTimeoutMs = hasAnyStreamMedia ? 24000 : 4500;
         let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
         try {
           await new Promise<void>((resolve, reject) => {

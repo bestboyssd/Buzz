@@ -77,6 +77,14 @@ export interface MediaAnalysisResult {
   previewUrl?: string;
 }
 
+export const MAX_MEDIA_ATTACHMENTS = 5;
+
+export interface VideoFrameSnapshot {
+  mimeType: string;
+  dataBase64: string;
+  timestampSec: number;
+}
+
 export interface ChatAttachment {
   id: string;
   name: string;
@@ -85,6 +93,8 @@ export interface ChatAttachment {
   dataBase64: string;
   previewUrl: string;
   size?: number;
+  videoFrames?: VideoFrameSnapshot[];
+  durationSec?: number;
 }
 
 export interface ChatMessage {
@@ -152,7 +162,11 @@ function syncBridgeServerUrl(): void {
     .catch(() => {});
 }
 
-function shouldPreferFirestoreBridge(): boolean {
+function shouldPreferFirestoreBridge(hasVideoAttachment: boolean = false): boolean {
+  if (hasVideoAttachment) {
+    // Prefer direct HTTP first for video attachments so full video streams can be uploaded without hitting Firestore's 1MB limit
+    return false;
+  }
   if (Capacitor.isNativePlatform()) {
     const customHost =
       typeof localStorage !== "undefined" ? localStorage.getItem("buzz_api_server_url") : null;
@@ -923,8 +937,9 @@ export interface ConversationTurnInput {
   attachments?: Array<{
     name?: string;
     mimeType: string;
-    kind?: "image" | "video";
+    kind?: "image" | "video" | "video_frame";
     data: string;
+    videoFrames?: VideoFrameSnapshot[];
   }>;
 }
 
@@ -934,7 +949,7 @@ function compactConversationHistory(
 ): ConversationTurnInput[] {
   const sliced = (history || []).slice(-10);
   const promptNeedsHistoryMedia =
-    /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|product|use\s+this|use\s+it)\b/i.test(
+    /\b(image|images|photo|photos|picture|pictures|pic|pics|video|videos|clip|media|upload|uploaded|attach|attached|sent|send|saw|see|look|show|shown|first|second|third|1st|2nd|3rd|what\s+was|what\s+is\s+in|what\s+are\s+those|describe|analyze|product|use\s+this|use\s+it)\b/i.test(
       currentPrompt
     );
   let mediaTurnsKept = 0;
@@ -942,7 +957,12 @@ function compactConversationHistory(
   if (promptNeedsHistoryMedia) {
     for (let i = sliced.length - 1; i >= 0; i--) {
       const turn = sliced[i];
-      if (Array.isArray(turn?.attachments) && turn.attachments.some((a) => a?.data)) {
+      if (
+        Array.isArray(turn?.attachments) &&
+        turn.attachments.some(
+          (a) => a?.data || (Array.isArray(a?.videoFrames) && a.videoFrames.length > 0)
+        )
+      ) {
         if (mediaTurnsKept < 2) {
           keepMediaIndices.add(i);
           mediaTurnsKept++;
@@ -957,18 +977,50 @@ function compactConversationHistory(
       .replace(/```action[\s\S]*?```/g, "")
       .trim()
       .slice(0, 800);
-    const validAtts =
-      keepMediaIndices.has(idx) && Array.isArray(turn.attachments)
-        ? turn.attachments
-            .filter((a) => a && typeof a.mimeType === "string" && typeof a.data === "string" && a.data.length > 0)
-            .slice(0, 4)
-            .map((a) => ({
-              name: a.name || "media",
-              mimeType: a.mimeType,
-              kind: a.kind || (a.mimeType.startsWith("video/") ? "video" : "image"),
-              data: a.data,
-            }))
-        : undefined;
+    let validAtts:
+      | Array<{
+          name: string;
+          mimeType: string;
+          kind: "image" | "video" | "video_frame";
+          data: string;
+        }>
+      | undefined;
+
+    if (keepMediaIndices.has(idx) && Array.isArray(turn.attachments)) {
+      const expanded: Array<{
+        name: string;
+        mimeType: string;
+        kind: "image" | "video" | "video_frame";
+        data: string;
+      }> = [];
+      for (const a of turn.attachments.slice(0, MAX_MEDIA_ATTACHMENTS)) {
+        if (!a) continue;
+        const isVid = a.kind === "video" || String(a.mimeType || "").startsWith("video/");
+        if (isVid && Array.isArray(a.videoFrames) && a.videoFrames.length > 0) {
+          for (const frame of a.videoFrames.slice(0, 3)) {
+            if (frame?.dataBase64) {
+              expanded.push({
+                name: `${a.name || "video"} (${frame.timestampSec.toFixed(1)}s)`,
+                mimeType: frame.mimeType || "image/jpeg",
+                kind: "video_frame",
+                data: frame.dataBase64,
+              });
+            }
+          }
+        } else if (typeof a.mimeType === "string" && typeof a.data === "string" && a.data.length > 0) {
+          expanded.push({
+            name: a.name || "media",
+            mimeType: a.mimeType,
+            kind: a.kind || (a.mimeType.startsWith("video/") ? "video" : "image"),
+            data: a.data,
+          });
+        }
+      }
+      if (expanded.length > 0) {
+        validAtts = expanded.slice(0, 6);
+      }
+    }
+
     return {
       role: turn.role,
       content: cleanText,
@@ -1031,63 +1083,87 @@ function buildFallbackStoreReply(
   };
 }
 
-function serializeChatAttachments(attachments?: ChatAttachment[]) {
-  return (attachments || [])
-    .map((a) => {
-      const rawData =
-        a.dataBase64 ||
-        (a.previewUrl && a.previewUrl.startsWith("data:")
-          ? a.previewUrl.slice(a.previewUrl.indexOf(",") + 1)
-          : "");
-      return {
-        name: a.name || "attachment",
+export function serializeChatAttachments(
+  attachments?: ChatAttachment[],
+  forFirestoreBridge: boolean = false
+): Array<{
+  name: string;
+  mimeType: string;
+  kind: "image" | "video" | "video_frame";
+  data: string;
+}> {
+  const result: Array<{
+    name: string;
+    mimeType: string;
+    kind: "image" | "video" | "video_frame";
+    data: string;
+  }> = [];
+
+  const capped = (attachments || []).slice(0, MAX_MEDIA_ATTACHMENTS);
+  for (const a of capped) {
+    if (!a) continue;
+    const rawData =
+      a.dataBase64 ||
+      (a.previewUrl && a.previewUrl.startsWith("data:")
+        ? a.previewUrl.slice(a.previewUrl.indexOf(",") + 1)
+        : "");
+    const isVideo = a.kind === "video" || String(a.mimeType || "").startsWith("video/");
+    const frames = Array.isArray(a.videoFrames)
+      ? a.videoFrames.filter((f) => f && f.dataBase64)
+      : [];
+
+    if (isVideo) {
+      // For Firestore Bridge (1MB limit) or when raw video base64 exceeds 500KB on bridge / 12MB on HTTP:
+      if (forFirestoreBridge) {
+        if (frames.length > 0) {
+          frames.slice(0, 5).forEach((f, idx) => {
+            result.push({
+              name: `${a.name || "video.mp4"} (frame ${idx + 1}/${Math.min(frames.length, 5)} at ${f.timestampSec.toFixed(1)}s)`,
+              mimeType: f.mimeType || "image/jpeg",
+              kind: "video_frame",
+              data: f.dataBase64,
+            });
+          });
+        } else if (rawData && rawData.length <= 550000) {
+          result.push({
+            name: a.name || "video.mp4",
+            mimeType: a.mimeType || "video/mp4",
+            kind: "video",
+            data: rawData,
+          });
+        }
+      } else {
+        // Direct HTTP: include full video binary if <= ~9MB raw (12M base64 chars), plus extracted keyframes for instant multi-model vision
+        if (rawData && rawData.length <= 12000000) {
+          result.push({
+            name: a.name || "video.mp4",
+            mimeType: a.mimeType || "video/mp4",
+            kind: "video",
+            data: rawData,
+          });
+        }
+        if (frames.length > 0) {
+          frames.slice(0, 5).forEach((f, idx) => {
+            result.push({
+              name: `${a.name || "video.mp4"} (frame ${idx + 1}/${Math.min(frames.length, 5)} at ${f.timestampSec.toFixed(1)}s)`,
+              mimeType: f.mimeType || "image/jpeg",
+              kind: "video_frame",
+              data: f.dataBase64,
+            });
+          });
+        }
+      }
+    } else if (rawData) {
+      result.push({
+        name: a.name || "attachment.jpg",
         mimeType: a.mimeType || "image/jpeg",
-        kind: a.kind || "image",
+        kind: "image",
         data: rawData,
-      };
-    })
-    .filter((a) => Boolean(a.data));
-}
-
-export function getClientInstantGreetingReply(
-  rawPrompt: string,
-  storeContext?: StoreContext | null
-): string | null {
-  const clean = String(rawPrompt || "")
-    .trim()
-    .replace(/[!?.~,]+$/g, "")
-    .trim()
-    .toLowerCase();
-  if (!clean || clean.length > 42) return null;
-
-  const firstName = storeContext?.currentUser?.displayName
-    ? storeContext.currentUser.displayName.split(/\s+/)[0]
-    : "";
-  const nameGreeting = firstName && firstName !== "Store" ? ` ${firstName}` : "";
-
-  if (
-    /^(?:yo+|hi+|hello+|hey+|hola|namaste|nomoshkar|sup|wassup|what'?s\s*up|howdy|gm|good\s*(?:morning|afternoon|evening))(?:\s+(?:buzz|ai|buzz\s*ai|bro|buddy|there|friend))?$/i.test(
-      clean
-    )
-  ) {
-    return `Hey${nameGreeting}! I'm **Buzz AI**, ready to help with **SmartRooti**. How can I help with your store today?`;
+      });
+    }
   }
 
-  if (
-    /^(?:how\s+are\s+you(?:\s+doing)?|how\s+r\s+u|how'?s\s+it\s+going|how\s+are\s+things)(?:\s+(?:today|buzz|buzz\s*ai))?$/i.test(
-      clean
-    )
-  ) {
-    const prodCount = storeContext?.products?.length ?? 0;
-    const rev = Number(storeContext?.totalRevenueToday ?? 0);
-    return `I'm doing great${nameGreeting}! **SmartRooti** is tracking **${prodCount} products** and **₹${rev.toLocaleString("en-IN")}** in sales today. What would you like to work on?`;
-  }
-
-  if (/^(?:thanks|thank\s+you|thx|ty|thank\s+you\s+so\s+much)(?:\s+(?:buzz|ai|buzz\s*ai|bro))?$/i.test(clean)) {
-    return `You're welcome${nameGreeting}! Let me know anytime you need help with your inventory, bills, or store operations.`;
-  }
-
-  return null;
+  return result;
 }
 
 async function askViaFirestoreBridge(
@@ -1100,7 +1176,7 @@ async function askViaFirestoreBridge(
 ): Promise<AssistantResponse> {
   const reqId = `ai_rpc_req_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   const reqRef = doc(db, "settings", reqId);
-  const serializedAttachments = serializeChatAttachments(attachments);
+  const serializedAttachments = serializeChatAttachments(attachments, true);
 
   return new Promise<AssistantResponse>((resolve, reject) => {
     let settled = false;
@@ -1369,19 +1445,11 @@ export async function askGeminiAssistant(
     compactedContext,
     compactedHistory
   ).action;
-  const serializedAttachments = serializeChatAttachments(attachments);
+  const serializedAttachments = serializeChatAttachments(attachments, false);
   const hasAttachments = serializedAttachments.length > 0;
-  if (!hasAttachments) {
-    const instantGreeting = getClientInstantGreetingReply(prompt, storeContext);
-    if (instantGreeting) {
-      return {
-        reply: instantGreeting,
-        action: null,
-        thought: "Recognized greeting and verified live store readiness.",
-        thoughtDuration: 1,
-      };
-    }
-  }
+  const hasVideoAttachment = (attachments || []).some(
+    (a) => a && (a.kind === "video" || String(a.mimeType || "").startsWith("video/"))
+  );
 
   const hasHistoryMedia = (compactedHistory || []).some(
     (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
@@ -1430,7 +1498,7 @@ export async function askGeminiAssistant(
             lastHttpError = String(data.error);
             if (
               lastHttpError.includes("PERMISSION_DENIED") ||
-              lastHttpError.includes("Settings > Secrets") ||
+              lastHttpError.includes("Settings") ||
               lastHttpError.includes("leaked")
             ) {
               throw new Error(lastHttpError);
@@ -1444,7 +1512,7 @@ export async function askGeminiAssistant(
         const msg = String(err?.message || "");
         if (
           msg.includes("PERMISSION_DENIED") ||
-          msg.includes("Settings > Secrets") ||
+          msg.includes("Settings") ||
           msg.includes("leaked")
         ) {
           throw err;
@@ -1454,7 +1522,7 @@ export async function askGeminiAssistant(
     return null;
   };
 
-  if (!shouldPreferFirestoreBridge()) {
+  if (!shouldPreferFirestoreBridge(hasVideoAttachment)) {
     const httpRes = await tryHttpChat();
     if (httpRes) return httpRes;
   }
@@ -1505,21 +1573,11 @@ export async function askGeminiAssistantStream(
     compactedContext,
     compactedHistory
   ).action;
-  const serializedAttachments = serializeChatAttachments(attachments);
+  const serializedAttachments = serializeChatAttachments(attachments, false);
   const hasAttachments = serializedAttachments.length > 0;
-  if (!hasAttachments) {
-    const instantGreeting = getClientInstantGreetingReply(prompt, storeContext);
-    if (instantGreeting) {
-      onChunk(instantGreeting);
-      onComplete({
-        reply: instantGreeting,
-        action: null,
-        thought: "Recognized greeting and verified live store readiness.",
-        thoughtDuration: 1,
-      });
-      return;
-    }
-  }
+  const hasVideoAttachment = (attachments || []).some(
+    (a) => a && (a.kind === "video" || String(a.mimeType || "").startsWith("video/"))
+  );
 
   let completed = false;
   let userAborted = false;
@@ -1602,7 +1660,7 @@ export async function askGeminiAssistantStream(
     }, ms);
   };
 
-  if (!shouldPreferFirestoreBridge()) {
+  if (!shouldPreferFirestoreBridge(hasVideoAttachment)) {
     refreshStreamTimeout(tierTimeoutMs);
     try {
       const baseUrl = getApiBaseUrl();
@@ -1782,7 +1840,7 @@ export async function askGeminiAssistantStream(
     };
   });
 
-  if (shouldPreferFirestoreBridge()) {
+  if (shouldPreferFirestoreBridge(hasVideoAttachment)) {
     try {
       const winner = await bridgePromise;
       if (!userAborted && !completed && !externalSignal?.aborted && String(winner.reply || "").trim()) {
@@ -3570,6 +3628,147 @@ export async function compressImageFileForChat(
         .catch(reject);
     };
     img.src = objectUrl;
+  });
+}
+
+/**
+ * Extracts evenly spaced keyframe JPEG snapshots from a video file on the client
+ * using an HTML5 <video> and <canvas>. This guarantees Buzz AI can visually inspect
+ * every scene of an uploaded video in <2s, even across Firestore's 1MB bridge limit
+ * or when a mobile video uses a device-specific container/codec.
+ */
+export async function extractVideoKeyframesForChat(
+  file: File,
+  maxFrames: number = 5,
+  maxDimension: number = 560,
+  quality: number = 0.68
+): Promise<{
+  frames: VideoFrameSnapshot[];
+  durationSec: number;
+  posterDataUrl: string;
+}> {
+  if (typeof document === "undefined") {
+    return { frames: [], durationSec: 0, posterDataUrl: "" };
+  }
+
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const video = document.createElement("video");
+    video.preload = "auto";
+    video.muted = true;
+    video.playsInline = true;
+    video.crossOrigin = "anonymous";
+
+    let finished = false;
+    const finish = (result: {
+      frames: VideoFrameSnapshot[];
+      durationSec: number;
+      posterDataUrl: string;
+    }) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(safetyTimer);
+      try {
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
+      } catch {}
+      try {
+        URL.revokeObjectURL(objectUrl);
+      } catch {}
+      resolve(result);
+    };
+
+    const safetyTimer = setTimeout(() => {
+      finish({ frames: [], durationSec: 0, posterDataUrl: "" });
+    }, 6500);
+
+    video.onerror = () => {
+      finish({ frames: [], durationSec: 0, posterDataUrl: "" });
+    };
+
+    video.onloadedmetadata = async () => {
+      try {
+        const rawDuration = Number(video.duration);
+        const durationSec =
+          Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 4;
+        const frameCount = Math.max(1, Math.min(maxFrames, durationSec < 1.2 ? 2 : maxFrames));
+        const timestamps: number[] = [];
+        for (let i = 0; i < frameCount; i++) {
+          const ratio = frameCount === 1 ? 0.25 : (i + 0.5) / frameCount;
+          const t = Math.max(0.05, Math.min(Math.max(0.1, durationSec - 0.05), durationSec * ratio));
+          timestamps.push(Number(t.toFixed(2)));
+        }
+
+        const frames: VideoFrameSnapshot[] = [];
+        let posterDataUrl = "";
+
+        const captureAtTime = (targetSec: number): Promise<void> =>
+          new Promise((resCapture) => {
+            let seekDone = false;
+            const onSeeked = () => {
+              if (seekDone) return;
+              seekDone = true;
+              clearTimeout(seekTimer);
+              video.removeEventListener("seeked", onSeeked);
+              try {
+                let width = video.videoWidth || 480;
+                let height = video.videoHeight || 360;
+                if (width > maxDimension || height > maxDimension) {
+                  if (width >= height) {
+                    height = Math.round((height * maxDimension) / width);
+                    width = maxDimension;
+                  } else {
+                    width = Math.round((width * maxDimension) / height);
+                    height = maxDimension;
+                  }
+                }
+                const canvas = document.createElement("canvas");
+                canvas.width = Math.max(1, width);
+                canvas.height = Math.max(1, height);
+                const ctx = canvas.getContext("2d");
+                if (ctx) {
+                  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                  const dataUrl = canvas.toDataURL("image/jpeg", quality);
+                  const commaIdx = dataUrl.indexOf(",");
+                  const dataBase64 = commaIdx >= 0 ? dataUrl.slice(commaIdx + 1) : dataUrl;
+                  if (dataBase64 && dataBase64.length > 100) {
+                    if (!posterDataUrl) posterDataUrl = dataUrl;
+                    frames.push({
+                      mimeType: "image/jpeg",
+                      dataBase64,
+                      timestampSec: targetSec,
+                    });
+                  }
+                }
+              } catch {}
+              resCapture();
+            };
+
+            const seekTimer = setTimeout(() => {
+              onSeeked();
+            }, 950);
+
+            video.addEventListener("seeked", onSeeked);
+            try {
+              video.currentTime = targetSec;
+            } catch {
+              onSeeked();
+            }
+          });
+
+        for (const ts of timestamps) {
+          if (finished) break;
+          await captureAtTime(ts);
+        }
+
+        finish({ frames, durationSec, posterDataUrl });
+      } catch {
+        finish({ frames: [], durationSec: 0, posterDataUrl: "" });
+      }
+    };
+
+    video.src = objectUrl;
   });
 }
 

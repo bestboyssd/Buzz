@@ -171,11 +171,16 @@ function AppContent() {
 
   useEffect(() => {
     const syncPerformanceMode = (e?: Event) => {
+      if (!user?.uid) {
+        setPerformanceMode(false);
+        document.documentElement.classList.remove("performance-mode");
+        return;
+      }
       const custom = e as CustomEvent<{ enabled?: boolean }> | undefined;
       const enabled =
         custom?.detail?.enabled !== undefined
           ? Boolean(custom.detail.enabled)
-          : isPerformanceModeEnabled(user?.uid);
+          : isPerformanceModeEnabled(user.uid);
       setPerformanceMode(enabled);
       document.documentElement.classList.toggle("performance-mode", enabled);
     };
@@ -1669,10 +1674,12 @@ function AppContent() {
     }
   }, [allAssetsReady, maxSplashReached]);
 
+  const effectivePerformanceMode = Boolean(user && performanceMode);
+
   return (
     <MotionConfig
-      reducedMotion={performanceMode ? "always" : "never"}
-      transition={performanceMode ? { duration: 0, type: "tween" } : undefined}
+      reducedMotion={effectivePerformanceMode ? "always" : "never"}
+      transition={effectivePerformanceMode ? { duration: 0, type: "tween" } : undefined}
     >
       {!loading && !user ? (
         <div className="flex-1 overflow-y-auto relative z-10 w-full min-h-0">
@@ -1737,7 +1744,7 @@ function AppContent() {
               paddingBottom: "calc(5.5rem + env(safe-area-inset-bottom))",
             }}
           >
-            <AnimatedRoutes performanceMode={performanceMode} />
+            <AnimatedRoutes performanceMode={effectivePerformanceMode} />
           </div>
           <BottomNav />
         </>

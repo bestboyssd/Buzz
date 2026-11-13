@@ -79,6 +79,8 @@ import {
   ROLE_MODIFICATION_REFUSAL_REPLY,
   blobToBase64Chunked,
   compressImageFileForChat,
+  extractVideoKeyframesForChat,
+  MAX_MEDIA_ATTACHMENTS,
   purgeChatMediaFromDatabase,
   wakeUpBuzzServer,
   sanitizeLatexAndMathFormatting,
@@ -485,8 +487,16 @@ export function AdminAIAssistant({
                 b64 = previewUrl.slice(previewUrl.indexOf(",") + 1);
               }
               // Reconstruct persistent data: URL if cached previewUrl was a session-only blob: URL
-              if ((!previewUrl || previewUrl.startsWith("blob:")) && b64) {
+              if ((!previewUrl || previewUrl.startsWith("blob:")) && b64 && a?.kind !== "video") {
                 previewUrl = `data:${mime};base64,${b64}`;
+              }
+              if (
+                (!previewUrl || previewUrl.startsWith("blob:")) &&
+                Array.isArray(a?.videoFrames) &&
+                a.videoFrames.length > 0 &&
+                a.videoFrames[0]?.dataBase64
+              ) {
+                previewUrl = `data:${a.videoFrames[0].mimeType || "image/jpeg"};base64,${a.videoFrames[0].dataBase64}`;
               }
               return {
                 ...a,
@@ -564,8 +574,9 @@ export function AdminAIAssistant({
               ...m,
               attachments: m.attachments.map((a) => ({
                 ...a,
-                // Avoid storing duplicate base64 when previewUrl is already a data: URL
-                dataBase64: a.previewUrl?.startsWith("data:") ? "" : a.dataBase64,
+                // Avoid storing duplicate base64 or large raw video buffers in localStorage
+                dataBase64:
+                  a.kind === "video" || a.previewUrl?.startsWith("data:") ? "" : a.dataBase64,
               })),
             };
           }
@@ -574,6 +585,7 @@ export function AdminAIAssistant({
             attachments: m.attachments.map((a) => ({
               ...a,
               dataBase64: "",
+              videoFrames: undefined,
             })),
           };
         });
@@ -1965,11 +1977,26 @@ export function AdminAIAssistant({
   const handleMediaFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
-    const files: File[] = Array.from(fileList);
+    const allSelectedFiles: File[] = Array.from(fileList);
     // Reset input so selecting the same file(s) again still triggers onChange
     e.target.value = "";
 
-    setErrorMessage("");
+    const currentCount = pendingAttachmentsRef.current.length;
+    if (currentCount >= MAX_MEDIA_ATTACHMENTS) {
+      setErrorMessage(`Maximum ${MAX_MEDIA_ATTACHMENTS} images or videos allowed per message.`);
+      triggerHaptic("error");
+      return;
+    }
+
+    const remainingSlots = MAX_MEDIA_ATTACHMENTS - currentCount;
+    const files = allSelectedFiles.slice(0, remainingSlots);
+    const exceededLimit = allSelectedFiles.length > remainingSlots;
+
+    setErrorMessage(
+      exceededLimit
+        ? `Maximum ${MAX_MEDIA_ATTACHMENTS} images or videos allowed per message. Attached the first ${MAX_MEDIA_ATTACHMENTS}.`
+        : ""
+    );
     setIsPreparingAttachments(true);
     triggerHaptic("light");
 
@@ -2019,8 +2046,15 @@ export function AdminAIAssistant({
             size: file.size,
           });
         } else {
-          const dataBase64 = await blobToBase64Chunked(file);
-          const previewUrl = URL.createObjectURL(file);
+          const extracted = await extractVideoKeyframesForChat(
+            file,
+            files.length > 1 ? 4 : 5,
+            560,
+            0.68
+          );
+          const dataBase64 =
+            file.size <= 9 * 1024 * 1024 ? await blobToBase64Chunked(file) : "";
+          const previewUrl = URL.createObjectURL(file) || extracted.posterDataUrl;
           added.push({
             id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             name: file.name,
@@ -2029,13 +2063,15 @@ export function AdminAIAssistant({
             dataBase64,
             previewUrl,
             size: file.size,
+            videoFrames: extracted.frames,
+            durationSec: extracted.durationSec,
           });
         }
       }
 
       if (added.length > 0) {
         setPendingAttachments((prev) => {
-          const next = [...prev, ...added].slice(0, 8);
+          const next = [...prev, ...added].slice(0, MAX_MEDIA_ATTACHMENTS);
           pendingAttachmentsRef.current = next;
           return next;
         });
@@ -2382,14 +2418,19 @@ export function AdminAIAssistant({
                     (a.previewUrl?.startsWith("data:")
                       ? a.previewUrl.slice(a.previewUrl.indexOf(",") + 1)
                       : "");
+                  const frames =
+                    a.kind === "video" && Array.isArray(a.videoFrames) && a.videoFrames.length > 0
+                      ? a.videoFrames.slice(0, 5)
+                      : undefined;
                   return {
                     name: a.name,
-                    mimeType: a.mimeType || "image/jpeg",
+                    mimeType: a.mimeType || (a.kind === "video" ? "video/mp4" : "image/jpeg"),
                     kind: a.kind,
                     data: b64,
+                    ...(frames ? { frames } : {}),
                   };
                 })
-                .filter((a) => Boolean(a.data))
+                .filter((a) => Boolean(a.data) || (Array.isArray(a.frames) && a.frames.length > 0))
             : undefined;
 
           return {
@@ -3307,6 +3348,9 @@ export function AdminAIAssistant({
         <div
           ref={chatContainerRef}
           onScroll={handleContainerScroll}
+          onContextMenu={(e) => {
+            e.preventDefault();
+          }}
           className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6 custom-scrollbar relative z-10 isolate overscroll-y-contain [overflow-anchor:auto] touch-pan-y [-webkit-overflow-scrolling:touch]"
         >
           <div className="max-w-4xl mx-auto w-full space-y-6">
@@ -3400,18 +3444,35 @@ export function AdminAIAssistant({
                                 {att.kind === "video" ? (
                                   <div
                                     className="relative w-full h-full flex items-center justify-center"
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <video
-                                      src={resolvedSrc}
-                                      controls
-                                      playsInline
-                                      className={
-                                        attCount === 1
-                                          ? "max-h-[250px] w-full object-cover rounded-[17px]"
-                                          : "w-full h-full object-cover"
+                                    onClick={(e) => {
+                                      if (!resolvedSrc.startsWith("data:image/")) {
+                                        e.stopPropagation();
                                       }
-                                    />
+                                    }}
+                                  >
+                                    {resolvedSrc.startsWith("data:image/") ? (
+                                      <img
+                                        src={resolvedSrc}
+                                        alt={att.name}
+                                        loading="lazy"
+                                        className={
+                                          attCount === 1
+                                            ? "max-h-[250px] w-full object-cover rounded-[17px]"
+                                            : "w-full h-full object-cover"
+                                        }
+                                      />
+                                    ) : (
+                                      <video
+                                        src={resolvedSrc}
+                                        controls
+                                        playsInline
+                                        className={
+                                          attCount === 1
+                                            ? "max-h-[250px] w-full object-cover rounded-[17px]"
+                                            : "w-full h-full object-cover"
+                                        }
+                                      />
+                                    )}
                                     <div className="pointer-events-none absolute top-2 left-2 px-1.5 py-0.5 rounded-md bg-black/65 backdrop-blur-md text-[9px] font-bold text-white flex items-center gap-1 border border-white/15">
                                       <Film size={9} />
                                       <span>VIDEO</span>
@@ -4954,7 +5015,7 @@ export function AdminAIAssistant({
                     <div className="flex items-center justify-between px-1 mb-1.5">
                       <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-400 flex items-center gap-1.5">
                         <ImageIcon size={11} />
-                        {pendingAttachments.length}{" "}
+                        {pendingAttachments.length}/{MAX_MEDIA_ATTACHMENTS}{" "}
                         {pendingAttachments.length === 1 ? "media file ready" : "media files ready"}
                       </span>
                       {pendingAttachments.length > 1 && (
@@ -5031,7 +5092,7 @@ export function AdminAIAssistant({
                           </motion.div>
                         ))}
                       </AnimatePresence>
-                      {pendingAttachments.length < 8 && (
+                      {pendingAttachments.length < MAX_MEDIA_ATTACHMENTS && (
                         <motion.button
                           layout
                           whileHover={{ scale: 1.03 }}

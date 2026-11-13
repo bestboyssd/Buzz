@@ -753,6 +753,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         setUser(null);
         setLoading(false);
         sessionStorage.removeItem("sessionStartTime");
+        // Always enable animations by default on the Login screen when not signed in
+        document.documentElement.classList.remove("performance-mode");
+        window.dispatchEvent(
+          new CustomEvent("performanceModeChanged", { detail: { enabled: false } })
+        );
         // When not signed in, follow saved theme or device default OS theme
         const savedGlobal = localStorage.getItem("theme");
         const targetTheme =

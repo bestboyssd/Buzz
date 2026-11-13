@@ -5,9 +5,13 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.view.ActionMode;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
 import android.view.WindowManager;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.WebSettings;
@@ -1020,4 +1024,100 @@ public class MainActivity extends BridgeActivity {
             });
         }
     }
+
+    private ActionMode.Callback wrapActionModeCallbackToHideNativeMenu(final ActionMode.Callback callback) {
+        if (callback == null) return null;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            return new ActionMode.Callback2() {
+                @Override
+                public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+                    boolean created = callback.onCreateActionMode(mode, menu);
+                    if (menu != null) {
+                        menu.clear();
+                    }
+                    return created;
+                }
+
+                @Override
+                public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+                    callback.onPrepareActionMode(mode, menu);
+                    if (menu != null) {
+                        menu.clear();
+                    }
+                    return false;
+                }
+
+                @Override
+                public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                    return false;
+                }
+
+                @Override
+                public void onDestroyActionMode(ActionMode mode) {
+                    callback.onDestroyActionMode(mode);
+                }
+
+                @Override
+                public void onGetContentRect(ActionMode mode, View view, Rect outRect) {
+                    if (callback instanceof ActionMode.Callback2) {
+                        ((ActionMode.Callback2) callback).onGetContentRect(mode, view, outRect);
+                    } else {
+                        super.onGetContentRect(mode, view, outRect);
+                    }
+                }
+            };
+        }
+
+        return new ActionMode.Callback() {
+            @Override
+            public boolean onCreateActionMode(ActionMode mode, Menu menu) {
+                boolean created = callback.onCreateActionMode(mode, menu);
+                if (menu != null) {
+                    menu.clear();
+                }
+                return created;
+            }
+
+            @Override
+            public boolean onPrepareActionMode(ActionMode mode, Menu menu) {
+                callback.onPrepareActionMode(mode, menu);
+                if (menu != null) {
+                    menu.clear();
+                }
+                return false;
+            }
+
+            @Override
+            public boolean onActionItemClicked(ActionMode mode, MenuItem item) {
+                return false;
+            }
+
+            @Override
+            public void onDestroyActionMode(ActionMode mode) {
+                callback.onDestroyActionMode(mode);
+            }
+        };
+    }
+
+    @Override
+    public ActionMode startActionMode(ActionMode.Callback callback) {
+        return super.startActionMode(wrapActionModeCallbackToHideNativeMenu(callback));
+    }
+
+    @Override
+    public ActionMode startActionMode(ActionMode.Callback callback, int type) {
+        return super.startActionMode(wrapActionModeCallbackToHideNativeMenu(callback), type);
+    }
+
+    @Override
+    public void onActionModeStarted(ActionMode mode) {
+        super.onActionModeStarted(mode);
+        try {
+            if (mode != null && mode.getMenu() != null) {
+                mode.getMenu().clear();
+            }
+        } catch (Exception ignored) {
+        }
+    }
 }
+

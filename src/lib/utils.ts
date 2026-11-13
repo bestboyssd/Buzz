@@ -383,26 +383,25 @@ export function isPerformanceModeEnabled(uid?: string): boolean {
     if (typeof window === 'undefined') return false;
     try {
         const activeUid = uid || auth.currentUser?.uid;
-        const resetKey = activeUid ? `performanceMode_reset_v2_${activeUid}` : 'performanceMode_reset_v2';
+        // On the Login screen (when no user is signed in), animations are ALWAYS enabled by default
+        if (!activeUid) {
+            return false;
+        }
+        const resetKey = `performanceMode_reset_v2_${activeUid}`;
         if (localStorage.getItem(resetKey) !== 'true' && localStorage.getItem('performanceMode_reset_v2') !== 'true') {
             localStorage.setItem('performanceMode_reset_v2', 'true');
-            if (activeUid) {
-                localStorage.setItem(`performanceMode_reset_v2_${activeUid}`, 'true');
-                localStorage.setItem(`performanceMode_${activeUid}`, 'false');
-            }
+            localStorage.setItem(`performanceMode_reset_v2_${activeUid}`, 'true');
+            localStorage.setItem(`performanceMode_${activeUid}`, 'false');
             localStorage.setItem('performanceMode', 'false');
             if (typeof document !== 'undefined') {
                 document.documentElement.classList.remove('performance-mode');
             }
             return false;
         }
-        if (activeUid) {
-            const userVal = localStorage.getItem(`performanceMode_${activeUid}`);
-            if (userVal === 'true') return true;
-            if (userVal === 'false') return false;
-        }
-        const globalVal = localStorage.getItem('performanceMode');
-        return globalVal === 'true';
+        const userVal = localStorage.getItem(`performanceMode_${activeUid}`);
+        if (userVal === 'true') return true;
+        if (userVal === 'false') return false;
+        return false;
     } catch {
         return false;
     }

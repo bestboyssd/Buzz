@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { computeLiveThinkingSeconds, computeFinalThoughtSeconds } from "./thinkingTimer";
+import { isPerformanceModeEnabled } from "./utils";
 
-describe("Buzz AI real-time thinking stopwatch", () => {
+describe("Buzz AI real-time thinking stopwatch & app policies", () => {
   it("starts at 0s and increments at exact 1,000ms boundaries so every second lasts 1 real second", () => {
     const start = 100000;
     // 0.00s - 0.999s -> 0s (duration: 1.000s)
@@ -31,4 +32,11 @@ describe("Buzz AI real-time thinking stopwatch", () => {
     assert.equal(computeFinalThoughtSeconds(start, start + 2400), 2);
     assert.equal(computeFinalThoughtSeconds(start, start + 2600), 3);
   });
+
+  it("always enables animations by default when no user is signed in (performanceMode = false)", () => {
+    assert.equal(isPerformanceModeEnabled(null), false);
+    assert.equal(isPerformanceModeEnabled(undefined), false);
+    assert.equal(isPerformanceModeEnabled(""), false);
+  });
 });
+
