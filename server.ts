@@ -1900,7 +1900,7 @@ ACTION RULES:
 \`\`\`action
 {"type":"UPDATE_STOCK"|"UPDATE_PRICE"|"UPDATE_PRODUCT_IMAGE"|"ADD_PRODUCT"|"DELETE_PRODUCT"|"ADD_EXPENSE"|"DELETE_EXPENSE"|"UPDATE_BILL"|"DELETE_BILL"|"PURGE_STORE_DATA", ...fields}
 \`\`\`
-CRITICAL: You CANNOT update stock, price, products, bills, or expenses without outputting the \`\`\`action\`\`\` block! Whenever the user asks to add, increase, reduce, or set stock or price for a product in CATALOG, ALWAYS output the \`\`\`action\`\`\` JSON block at the end of your reply.
+CRITICAL: You CANNOT update stock, price, products, bills, or expenses without outputting the \`\`\`action\`\`\` block! Whenever the user asks to add, increase, reduce, or set stock or price for a product in CATALOG, ALWAYS output the \`\`\`action\`\`\` JSON block at the end of your reply, and tell the user you have prepared the confirmation card below for them to confirm (NEVER claim in past tense like "I have updated" or "has been increased" before they click the confirmation button!).
 Required fields per type:
 - UPDATE_STOCK: productId, productName, currentStock, newStock, quantityChange
 - UPDATE_PRICE: productId, productName, currentPrice, newPrice
@@ -3402,9 +3402,9 @@ export async function executeAiQuery(
   // Race primary gemini-3.1-flash-lite and hedged gemini-4-hydrogen for both text and media queries so responses always finish in ~0.8s-2.5s
   try {
     let settled = false;
-    const primaryTimeout = hasMedia ? 14000 : 6500;
-    const hedgeTimeout = hasMedia ? 16000 : 7500;
-    const hedgeDelayMs = hasMedia ? 350 : 220;
+    const primaryTimeout = hasMedia ? 11000 : 4500;
+    const hedgeTimeout = hasMedia ? 13000 : 5500;
+    const hedgeDelayMs = hasMedia ? 300 : 180;
 
     const primaryPromise = callSingleModel("gemini-3.1-flash-lite", primaryTimeout).then((res) => {
       settled = true;

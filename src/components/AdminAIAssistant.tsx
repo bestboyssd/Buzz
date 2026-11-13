@@ -2742,20 +2742,6 @@ export function AdminAIAssistant({
           setLoading(false);
           triggerHaptic("light");
           scrollToBottom(false);
-
-          // If the AI's reply claims the stock or price has already been updated (or user directly commanded a stock/price update),
-          // auto-execute the Firestore update immediately so the AI never claims it updated stock without actually updating the database!
-          if (
-            effectiveAction &&
-            (effectiveAction.type === "UPDATE_STOCK" || effectiveAction.type === "UPDATE_PRICE") &&
-            /\b(has\s+been\s+(?:successfully\s+)?(?:increased|decreased|reduced|updated|changed|set|added)|inventory\s+is\s+now\s+updated|have\s+now\s+(?:manually\s+)?updated|updated\s+the\s+(?:inventory|stock|price))\b/i.test(
-              effectiveReply
-            )
-          ) {
-            window.setTimeout(() => {
-              handleExecuteAction(assistantMsgId, effectiveAction);
-            }, 60);
-          }
         },
         abortController.signal,
         attachmentsToSend

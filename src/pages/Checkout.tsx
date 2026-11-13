@@ -692,7 +692,7 @@ export function Checkout() {
                               clearDraftQty(prodId);
                               removeFromCart(item.product.id!, 1);
                             }}
-                            className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center text-slate-700 hover:text-slate-950 dark:text-slate-300 dark:hover:text-white transition-colors rounded-xl bg-white dark:bg-slate-800 shadow-xs active:bg-slate-100 select-none"
+                            className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center text-slate-700 hover:text-slate-950 dark:text-slate-300 dark:hover:text-white transition-colors rounded-xl bg-white dark:bg-slate-800 active:bg-white dark:active:bg-slate-800 shadow-xs select-none"
                           >
                             <Minus size={14} strokeWidth={2.5} />
                           </motion.button>
@@ -822,7 +822,7 @@ export function Checkout() {
                                 addToCart(item.product, 1);
                               }
                             }}
-                            className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center text-slate-700 hover:text-slate-950 dark:text-slate-300 dark:hover:text-white transition-colors rounded-xl bg-white dark:bg-slate-800 shadow-xs active:bg-slate-100 select-none"
+                            className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center text-slate-700 hover:text-slate-950 dark:text-slate-300 dark:hover:text-white transition-colors rounded-xl bg-white dark:bg-slate-800 active:bg-white dark:active:bg-slate-800 shadow-xs select-none"
                           >
                             <Plus size={14} strokeWidth={2.5} />
                           </motion.button>

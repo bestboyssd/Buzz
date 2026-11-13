@@ -1683,9 +1683,6 @@ export async function askGeminiAssistantStream(
       timeoutId = null;
     }
     try {
-      controller.abort();
-    } catch {}
-    try {
       bridgeAbortController.abort();
     } catch {}
     onComplete({
@@ -1698,7 +1695,7 @@ export async function askGeminiAssistantStream(
     (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
   );
   const hasAnyMedia = hasAttachments || hasHistoryMedia;
-  const tierTimeoutMs = hasAnyMedia ? 28000 : 20000;
+  const tierTimeoutMs = hasAnyMedia ? 16000 : 8500;
 
   const refreshStreamTimeout = (ms: number = tierTimeoutMs) => {
     if (timeoutId !== null) {
@@ -1796,7 +1793,7 @@ export async function askGeminiAssistantStream(
             if (String(finalPayload.reply || "").trim()) {
               safeComplete(finalPayload);
               try {
-                reader.cancel();
+                reader.cancel().catch(() => {});
               } catch {}
               return true;
             }
@@ -1812,7 +1809,7 @@ export async function askGeminiAssistantStream(
       while (true) {
         if (userAborted || completed || externalSignal?.aborted) {
           try {
-            reader.cancel();
+            reader.cancel().catch(() => {});
           } catch {}
           return;
         }
@@ -1913,20 +1910,7 @@ export async function askGeminiAssistantStream(
     };
   });
 
-  if (shouldPreferFirestoreBridge(hasVideoAttachment)) {
-    try {
-      const winner = await bridgePromise;
-      if (!userAborted && !completed && !externalSignal?.aborted && String(winner.reply || "").trim()) {
-        emitChunk(winner.reply);
-        safeComplete(winner);
-        return;
-      }
-    } catch (bridgeErr: any) {
-      lastFallbackError = String(bridgeErr?.message || "");
-    }
-  }
-
-  // Fallback: Race server-side Firestore RPC bridge with parallel server HTTP endpoints so whichever completes first wins
+  // Race server-side Firestore RPC bridge with parallel server HTTP endpoints so whichever completes first in ~1-3s wins immediately
   const directHttpPromise = Promise.any(
     getCandidateApiBaseUrls().map(async (baseUrl): Promise<AssistantResponse> => {
       if (userAborted || completed || externalSignal?.aborted) {
