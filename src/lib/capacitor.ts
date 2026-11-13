@@ -6,18 +6,23 @@ import { Keyboard } from '@capacitor/keyboard';
 import { triggerHaptic } from './haptics';
 
 let isInitialized = false;
+let lastAppliedDark: boolean | null = null;
 
 export const updateStatusBarTheme = async (isDark: boolean) => {
   // Update browser/WebView theme-color meta tag in both web and native Android
   const metaThemeColor = document.querySelector('meta[name="theme-color"]');
-  if (metaThemeColor) {
-    metaThemeColor.setAttribute('content', isDark ? '#020617' : '#f8fafc');
+  const targetColor = isDark ? '#020617' : '#f8fafc';
+  if (metaThemeColor && metaThemeColor.getAttribute('content') !== targetColor) {
+    metaThemeColor.setAttribute('content', targetColor);
   }
+
+  if (lastAppliedDark === isDark) return;
+  lastAppliedDark = isDark;
 
   if (Capacitor.isNativePlatform()) {
     try {
       await StatusBar.setStyle({ style: isDark ? Style.Dark : Style.Light });
-      await StatusBar.setBackgroundColor({ color: isDark ? '#020617' : '#f8fafc' });
+      await StatusBar.setBackgroundColor({ color: targetColor });
     } catch (e) {
       console.debug('Status bar colors could not be set', e);
     }

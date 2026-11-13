@@ -431,7 +431,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             let hapticsEnabled = true;
             let notifications = true;
             let keepScreenOn = false;
-            let performanceMode = true;
+            let performanceMode = false;
             let isPrinterConnected = false;
 
             if (!isCreatingFreshAccount && docSnap?.exists()) {
@@ -504,10 +504,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               } else {
                 keepScreenOn = false;
               }
-              performanceMode =
-                data.performanceMode !== undefined
-                  ? data.performanceMode !== false
-                  : isPerformanceModeEnabled(currentUser.uid);
+              if (data.performanceModeResetV2 === true) {
+                performanceMode = data.performanceMode === true;
+              } else {
+                performanceMode = false;
+              }
               isPrinterConnected = false;
             } else {
               // Brand new account OR re-creating a fresh account after Admin deletion!
@@ -556,7 +557,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               hapticsEnabled = true;
               notifications = true;
               keepScreenOn = false;
-              performanceMode = true;
+              performanceMode = false;
               isPrinterConnected = false;
 
               recreatedAtRef.current = freshAccountTs;
@@ -664,6 +665,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 keepScreenOn,
                 keepScreenOnResetV2: true,
                 performanceMode,
+                performanceModeResetV2: true,
                 isPrinterConnected,
                 ...(isCreatingFreshAccount
                   ? { createdAt: writeNow, recreatedAt: writeNow }
@@ -828,8 +830,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             }
           }
 
-          if (data.performanceMode !== undefined) {
-            const targetPerf = data.performanceMode !== false;
+          if (data.performanceModeResetV2 === true && data.performanceMode !== undefined) {
+            const targetPerf = data.performanceMode === true;
             if (isPerformanceModeEnabled(user.uid) !== targetPerf) {
               applyPerformanceMode(targetPerf, user.uid);
             }

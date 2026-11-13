@@ -44,7 +44,7 @@ public class BuzzRealtimeSyncService extends Service {
             }
 
             try {
-                if (isNetworkConnected(ctx)) {
+                if (!MainActivity.isAppInForeground && isNetworkConnected(ctx)) {
                     BuzzNotificationWorker.runAlertCheckNow(ctx);
                 }
             } catch (Exception ignored) {

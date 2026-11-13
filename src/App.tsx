@@ -130,7 +130,7 @@ function AnimatedRoutes({ performanceMode }: { performanceMode: boolean }) {
   }
 
   return (
-    <AnimatePresence mode="wait">
+    <AnimatePresence mode="wait" initial={false}>
       <Routes location={location} key={location.pathname}>
         <Route path="/" element={<Home />} />
         <Route path="/checkout" element={<Checkout />} />
@@ -329,9 +329,17 @@ function AppContent() {
         prev.filter((c) => c.id !== cid && c.billId !== bid)
       );
     };
+    let wakeSyncTimerId: number | null = null;
+    const scheduleAttemptSync = () => {
+      if (wakeSyncTimerId !== null) window.clearTimeout(wakeSyncTimerId);
+      wakeSyncTimerId = window.setTimeout(() => {
+        wakeSyncTimerId = null;
+        attemptSyncIfOnline();
+      }, 650);
+    };
     const handleVisibilityAttempt = () => {
       if (document.visibilityState === "visible") {
-        attemptSyncIfOnline();
+        scheduleAttemptSync();
       }
     };
 
@@ -346,8 +354,8 @@ function AppContent() {
 
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
-    window.addEventListener("appResumed", attemptSyncIfOnline);
-    window.addEventListener("focus", attemptSyncIfOnline);
+    window.addEventListener("appResumed", scheduleAttemptSync);
+    window.addEventListener("focus", scheduleAttemptSync);
     document.addEventListener("visibilitychange", handleVisibilityAttempt);
     window.addEventListener("offlineQueueUpdated", handleQueueUpdated);
     window.addEventListener("offlineSyncDeferred", handleSyncDeferred);
@@ -357,10 +365,11 @@ function AppContent() {
     return () => {
       if (retryIntervalId !== null) window.clearInterval(retryIntervalId);
       if (deferredRetryTimerId !== null) window.clearTimeout(deferredRetryTimerId);
+      if (wakeSyncTimerId !== null) window.clearTimeout(wakeSyncTimerId);
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
-      window.removeEventListener("appResumed", attemptSyncIfOnline);
-      window.removeEventListener("focus", attemptSyncIfOnline);
+      window.removeEventListener("appResumed", scheduleAttemptSync);
+      window.removeEventListener("focus", scheduleAttemptSync);
       document.removeEventListener("visibilitychange", handleVisibilityAttempt);
       window.removeEventListener("offlineQueueUpdated", handleQueueUpdated);
       window.removeEventListener("offlineSyncDeferred", handleSyncDeferred);
@@ -1030,9 +1039,14 @@ function AppContent() {
       }
     );
 
+    let wakeAlertTimer: ReturnType<typeof setTimeout> | null = null;
     const handleWakeOrOnline = () => {
       if (document.visibilityState === "visible" || navigator.onLine) {
-        evaluateActiveAlert(false);
+        if (wakeAlertTimer) clearTimeout(wakeAlertTimer);
+        wakeAlertTimer = setTimeout(() => {
+          wakeAlertTimer = null;
+          evaluateActiveAlert(false);
+        }, 650);
       }
     };
     document.addEventListener("visibilitychange", handleWakeOrOnline);
@@ -1041,6 +1055,7 @@ function AppContent() {
     window.addEventListener("appResumed", handleWakeOrOnline);
 
     return () => {
+      if (wakeAlertTimer) clearTimeout(wakeAlertTimer);
       unsubGlobal();
       unsubAlerts();
       document.removeEventListener("visibilitychange", handleWakeOrOnline);
@@ -1240,15 +1255,21 @@ function AppContent() {
       };
     } catch {}
 
+    let visPollTimer: ReturnType<typeof setTimeout> | null = null;
     const handleVisChange = () => {
-      syncContextToServiceWorker();
-      if (document.visibilityState === "visible") {
-        pollBackgroundAlertsNative().catch(() => {});
-      }
+      if (visPollTimer) clearTimeout(visPollTimer);
+      visPollTimer = setTimeout(() => {
+        visPollTimer = null;
+        syncContextToServiceWorker();
+        if (document.visibilityState === "visible" && !Capacitor.isNativePlatform()) {
+          pollBackgroundAlertsNative().catch(() => {});
+        }
+      }, 750);
     };
     document.addEventListener("visibilitychange", handleVisChange);
 
     return () => {
+      if (visPollTimer) clearTimeout(visPollTimer);
       document.removeEventListener("visibilitychange", handleVisChange);
       if (bgWorker) {
         bgWorker.terminate();
@@ -1452,11 +1473,20 @@ function AppContent() {
         } catch {}
       }
 
-      setOverdueUnsetBuyCostProducts(overdueList);
+      setOverdueUnsetBuyCostProducts((prev) => {
+        if (
+          prev.length === overdueList.length &&
+          prev.every((item, idx) => item.id === overdueList[idx]?.id)
+        ) {
+          return prev;
+        }
+        return overdueList;
+      });
 
       const todayKey = getAppBusinessIsoDate(now);
       const modalDismissKey = `unset_buy_cost_modal_dismissed_${user.uid}_${todayKey}`;
-      setBuyCostReminderDismissedToday(localStorage.getItem(modalDismissKey) === "true");
+      const isDismissed = localStorage.getItem(modalDismissKey) === "true";
+      setBuyCostReminderDismissedToday((prev) => (prev === isDismissed ? prev : isDismissed));
 
       if (overdueList.length === 0) return;
 
@@ -1481,12 +1511,6 @@ function AppContent() {
 
         const storageKey = `notifications_${user.uid}`;
         const notificationsEnabled = localStorage.getItem(storageKey) !== "false";
-        try {
-          const nativeExporter = (window as any).AndroidExporter;
-          if (nativeExporter && typeof nativeExporter.setNotificationsEnabled === "function") {
-            nativeExporter.setNotificationsEnabled(Boolean(notificationsEnabled));
-          }
-        } catch {}
         if (notificationsEnabled) {
           const sampleNames = overdueList
             .slice(0, 3)
@@ -1512,17 +1536,28 @@ function AppContent() {
       }
     };
 
+    let visBuyCostTimer: ReturnType<typeof setTimeout> | null = null;
+    const handleVisBuyCost = () => {
+      if (document.visibilityState !== "visible") return;
+      if (visBuyCostTimer) clearTimeout(visBuyCostTimer);
+      visBuyCostTimer = setTimeout(() => {
+        visBuyCostTimer = null;
+        evaluateUnsetBuyCostReminders();
+      }, 850);
+    };
+
     evaluateUnsetBuyCostReminders();
     const interval = setInterval(evaluateUnsetBuyCostReminders, 60 * 1000);
     window.addEventListener("adminProductBuyPricesUpdated", evaluateUnsetBuyCostReminders);
     window.addEventListener("adminAuthChanged", evaluateUnsetBuyCostReminders);
-    document.addEventListener("visibilitychange", evaluateUnsetBuyCostReminders);
+    document.addEventListener("visibilitychange", handleVisBuyCost);
 
     return () => {
+      if (visBuyCostTimer) clearTimeout(visBuyCostTimer);
       clearInterval(interval);
       window.removeEventListener("adminProductBuyPricesUpdated", evaluateUnsetBuyCostReminders);
       window.removeEventListener("adminAuthChanged", evaluateUnsetBuyCostReminders);
-      document.removeEventListener("visibilitychange", evaluateUnsetBuyCostReminders);
+      document.removeEventListener("visibilitychange", handleVisBuyCost);
     };
   }, [user, isAdmin, isRealAdmin, products, allProducts, productsLoading]);
 
@@ -1609,61 +1644,18 @@ function AppContent() {
 
   // Safety max timeout so offline startup never holds the native splash screen indefinitely
   useEffect(() => {
-    const maxTimer = setTimeout(() => setMaxSplashReached(true), 2000);
+    const maxTimer = setTimeout(() => setMaxSplashReached(true), 600);
     return () => {
       clearTimeout(maxTimer);
     };
   }, []);
 
-  // Preload and decode product images while the real native splash screen is active
+  // Mark images ready immediately so startup never stalls on synchronous bitmap decoding
   useEffect(() => {
-    if (productsLoading) return;
-    if (performanceMode || !products || products.length === 0) {
+    if (!productsLoading) {
       setImagesPreloaded(true);
-      return;
     }
-
-    let cancelled = false;
-    const urls = products
-      .slice(0, 24)
-      .map((p) => getImageUrl(p.image))
-      .filter((u): u is string => Boolean(u));
-
-    if (urls.length === 0) {
-      setImagesPreloaded(true);
-      return;
-    }
-
-    const preloadPromises = urls.map(
-      (url) =>
-        new Promise<void>((resolve) => {
-          const img = new Image();
-          img.onload = () => {
-            if (typeof img.decode === "function") {
-              img.decode().catch(() => {}).finally(() => resolve());
-            } else {
-              resolve();
-            }
-          };
-          img.onerror = () => resolve();
-          img.src = url;
-        })
-    );
-
-    const safetyTimer = setTimeout(() => {
-      if (!cancelled) setImagesPreloaded(true);
-    }, 800);
-
-    Promise.all(preloadPromises).finally(() => {
-      clearTimeout(safetyTimer);
-      if (!cancelled) setImagesPreloaded(true);
-    });
-
-    return () => {
-      cancelled = true;
-      clearTimeout(safetyTimer);
-    };
-  }, [productsLoading, products]);
+  }, [productsLoading]);
 
   const allAssetsReady =
     !loading &&
@@ -2301,7 +2293,6 @@ function AppContent() {
 }
 
 import { ErrorBoundary } from "./components/ErrorBoundary";
-import { enableNetwork, disableNetwork } from "firebase/firestore";
 
 export default function App() {
   return (

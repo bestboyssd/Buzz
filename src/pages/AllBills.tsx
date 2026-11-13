@@ -101,14 +101,14 @@ export function AllBills() {
     return <Navigate to="/admin" replace />;
   }
 
-  const pageTransition = useOptimizedTransition({ duration: 0.45, ease: [0.16, 1, 0.3, 1] });
+  const pageTransition = useOptimizedTransition({ duration: 0.22, ease: [0.22, 1, 0.36, 1] });
   const gpuClass = useHardwareAcceleration();
 
   return (
     <motion.div 
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.95 }}
+      initial={{ opacity: 0, y: 8, scale: 0.992 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -4, scale: 0.992, transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] } }}
       transition={pageTransition}
       className={`min-h-full flex flex-col pb-2 px-4 pt-12 w-full max-w-lg mx-auto ${gpuClass}`}
     >

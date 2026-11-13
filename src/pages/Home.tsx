@@ -183,8 +183,8 @@ export function Home() {
   }, [products, bills, search, selectedCategory, editingBill, cart]);
 
   const pageTransition = useOptimizedTransition({
-    duration: 0.35,
-    ease: [0.16, 1, 0.3, 1],
+    duration: 0.22,
+    ease: [0.22, 1, 0.36, 1],
   });
   const gpuClass = useHardwareAcceleration();
 
@@ -198,9 +198,18 @@ export function Home() {
 
   return (
     <motion.div
-      initial={perfMode ? false : { opacity: 0, y: 10, scale: 0.985 }}
+      initial={perfMode ? false : { opacity: 0, y: 8, scale: 0.992 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={perfMode ? undefined : { opacity: 0, scale: 0.985 }}
+      exit={
+        perfMode
+          ? undefined
+          : {
+              opacity: 0,
+              y: -4,
+              scale: 0.992,
+              transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] },
+            }
+      }
       transition={pageTransition}
       className={`min-h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg md:max-w-3xl lg:max-w-5xl mx-auto ${gpuClass}`}
     >
@@ -516,7 +525,7 @@ export function Home() {
                           src={imgUrl}
                           alt={product.name}
                           loading="eager"
-                          decoding="sync"
+                          decoding="async"
                           draggable={false}
                           referrerPolicy="no-referrer"
                           className={`w-full h-full object-cover pointer-events-none transition-transform duration-300 group-hover/card:scale-[1.03] ${

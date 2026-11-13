@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "motion/react";
+import { computeLiveThinkingSeconds, computeFinalThoughtSeconds } from "../lib/thinkingTimer";
 import {
   Send,
   X,
@@ -2248,7 +2249,7 @@ export function AdminAIAssistant({
       timestamp: Date.now(),
       isStreaming: true,
       thought: generateDynamicThought(promptText, "", storeContext),
-      thoughtDuration: 1,
+      thoughtDuration: 0,
     };
 
     const cleanedPrevMessages = messagesRef.current
@@ -2283,9 +2284,12 @@ export function AdminAIAssistant({
 
     let watchdogSettled = false;
     let firstTokenTime = 0;
+    let lastReportedSec = 0;
     const stopwatchTimer = window.setInterval(() => {
       if (watchdogSettled || firstTokenTime > 0 || abortController.signal.aborted) return;
-      const elapsedSec = Math.max(1, Math.floor((Date.now() - sendStartTime) / 1000));
+      const elapsedSec = computeLiveThinkingSeconds(sendStartTime, Date.now());
+      if (elapsedSec === lastReportedSec) return;
+      lastReportedSec = elapsedSec;
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === assistantMsgId && msg.isStreaming
@@ -2293,7 +2297,7 @@ export function AdminAIAssistant({
             : msg
         )
       );
-    }, 500);
+    }, 100);
     activeStopwatchRef.current = stopwatchTimer;
 
     const watchdogMs = 60000;
@@ -2304,9 +2308,9 @@ export function AdminAIAssistant({
       activeStopwatchRef.current = null;
       activeWatchdogRef.current = null;
       activeAssistantMsgIdRef.current = null;
-      const duration = Math.max(
-        1,
-        Math.floor(((firstTokenTime || Date.now()) - sendStartTime) / 1000)
+      const duration = computeFinalThoughtSeconds(
+        sendStartTime,
+        firstTokenTime || Date.now()
       );
       let hadPartialContent = false;
       setMessages((prev) => {
@@ -2414,10 +2418,9 @@ export function AdminAIAssistant({
             firstTokenTime = Date.now();
             window.clearInterval(stopwatchTimer);
           }
-          const elapsedSec = Math.max(
-            1,
-            Math.floor(((firstTokenTime || Date.now()) - sendStartTime) / 1000)
-          );
+          const elapsedSec = firstTokenTime
+            ? computeFinalThoughtSeconds(sendStartTime, firstTokenTime)
+            : computeLiveThinkingSeconds(sendStartTime, Date.now());
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantMsgId
@@ -2452,9 +2455,9 @@ export function AdminAIAssistant({
             rawPrompt
           );
 
-          const elapsedSec = Math.max(
-            1,
-            Math.floor(((firstTokenTime || Date.now()) - sendStartTime) / 1000)
+          const elapsedSec = computeFinalThoughtSeconds(
+            sendStartTime,
+            firstTokenTime || Date.now()
           );
           const authenticThought =
             finalPayload.thought ||
@@ -2493,7 +2496,7 @@ export function AdminAIAssistant({
         activeStopwatchRef.current = null;
         activeWatchdogRef.current = null;
         activeAssistantMsgIdRef.current = null;
-        const elapsedSec = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
+        const elapsedSec = computeFinalThoughtSeconds(sendStartTime, Date.now());
         setMessages((prev) => {
           const target = prev.find((msg) => msg.id === assistantMsgId);
           if (target?.content?.trim()) {
@@ -2521,7 +2524,7 @@ export function AdminAIAssistant({
       activeWatchdogRef.current = null;
       activeAssistantMsgIdRef.current = null;
 
-      const elapsedSec = Math.max(1, Math.round((Date.now() - sendStartTime) / 1000));
+      const elapsedSec = computeFinalThoughtSeconds(sendStartTime, Date.now());
       setMessages((prev) =>
         prev
           .map((msg) =>
@@ -3193,11 +3196,16 @@ export function AdminAIAssistant({
       {isOpen && (
         <div className="fixed inset-0 z-[120] flex flex-col bg-slate-50 dark:bg-[#070a13] text-slate-900 dark:text-slate-100 select-text overflow-hidden h-[100dvh] w-screen top-0 left-0 right-0 bottom-0">
           <motion.div
-            initial={{ opacity: 0, y: 24, scale: 0.985 }}
+            initial={{ opacity: 0, y: 16, scale: 0.99 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 20, scale: 0.985 }}
-            transition={{ type: "spring", stiffness: 460, damping: 34, mass: 0.72 }}
-            className="w-full h-full flex flex-col bg-slate-50 dark:bg-[#070a13] text-slate-900 dark:text-slate-100 relative overflow-hidden transition-colors duration-300"
+            exit={{
+              opacity: 0,
+              y: 12,
+              scale: 0.99,
+              transition: { duration: 0.15, ease: [0.32, 0, 0.67, 0] },
+            }}
+            transition={{ type: "spring", stiffness: 520, damping: 36, mass: 0.62 }}
+            className="w-full h-full flex flex-col bg-slate-50 dark:bg-[#070a13] text-slate-900 dark:text-slate-100 relative overflow-hidden transition-colors duration-300 transform-gpu"
           >
             {/* Ambient Lighting & Depth Texture (feather via radial gradient — no GPU blur pass) */}
             <div className="pointer-events-none absolute -top-32 left-1/2 -translate-x-1/2 w-[720px] h-[400px] bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.14)_0%,rgba(168,85,247,0.06)_45%,transparent_72%)] dark:bg-[radial-gradient(ellipse_at_center,rgba(99,102,241,0.11)_0%,rgba(168,85,247,0.05)_45%,transparent_72%)] transform-gpu" />
@@ -3607,8 +3615,19 @@ export function AdminAIAssistant({
                               />
                             ))}
                           </span>
-                          <span className="ml-1 px-2 py-0.5 rounded-md bg-indigo-500/10 dark:bg-indigo-500/20 border border-indigo-500/25 text-[11px] font-mono font-bold tabular-nums text-indigo-600 dark:text-indigo-300">
-                            {msg.thoughtDuration || 1}s
+                          <span className="ml-1 px-2 py-0.5 rounded-md bg-indigo-500/10 dark:bg-indigo-500/20 border border-indigo-500/25 text-[11px] font-mono font-bold tabular-nums text-indigo-600 dark:text-indigo-300 inline-flex items-center justify-center min-w-[30px] overflow-hidden">
+                            <AnimatePresence mode="popLayout" initial={false}>
+                              <motion.span
+                                key={msg.thoughtDuration ?? 0}
+                                initial={{ opacity: 0, y: 5 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                exit={{ opacity: 0, y: -5 }}
+                                transition={{ duration: 0.14, ease: [0.22, 1, 0.36, 1] }}
+                                className="inline-block"
+                              >
+                                {msg.thoughtDuration ?? 0}s
+                              </motion.span>
+                            </AnimatePresence>
                           </span>
                         </div>
                       </div>

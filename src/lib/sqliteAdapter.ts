@@ -109,10 +109,18 @@ export async function initSQLiteCache(): Promise<void> {
   return initPromise;
 }
 
+const savedProductSignatures = new Map<string, string>();
+
+function computeProductSignature(p: Product): string {
+  const imgLen = typeof p.image === "string" ? p.image.length : p.image ? 1 : 0;
+  return `${p.id}|${p.name || ""}|${Number(p.price) || 0}|${Number(p.stock) || 0}|${p.category || ""}|${Number(p.soldCount) || 0}|${Number(p.updatedAt || p.createdAt) || 0}|${imgLen}`;
+}
+
 /**
  * Clear all products from local SQLite / IndexedDB cache
  */
 export async function sqliteClearProducts(): Promise<void> {
+  savedProductSignatures.clear();
   try {
     localStorage.setItem("local_products_fallback", "[]");
   } catch (_) {}
@@ -130,32 +138,67 @@ export async function sqliteClearProducts(): Promise<void> {
 }
 
 /**
- * Cache all products locally in SQLite database (mirroring exact active catalog)
+ * Cache all products locally in SQLite database (mirroring exact active catalog).
+ * Uses incremental diffing so unchanged products and their base64 images are not
+ * repeatedly serialized across the Capacitor bridge on every snapshot or screen wake.
  */
 export async function sqliteSaveProducts(products: Product[]): Promise<void> {
   const safeProducts = Array.isArray(products) ? products.filter((p) => Boolean(p && p.id)) : [];
 
-  // Always update localStorage first so synchronous reads see the exact catalog
-  try {
-    localStorage.setItem("local_products_fallback", JSON.stringify(safeProducts));
-  } catch (_) {}
-
   await initSQLiteCache();
 
   try {
-    if (Capacitor.isNativePlatform() && dbInstance) {
-      await dbInstance.execute(`DELETE FROM products;`);
-      if (safeProducts.length > 0) {
-        const statements: string[] = [];
-        const values: any[] = [];
+    if (safeProducts.length === 0) {
+      savedProductSignatures.clear();
+      if (Capacitor.isNativePlatform() && dbInstance) {
+        await dbInstance.execute(`DELETE FROM products;`);
+      } else {
+        await webDb.products.clear();
+      }
+      return;
+    }
 
-        for (const p of safeProducts) {
-          if (!p.id) continue;
-          const img = typeof p.image === "string" ? p.image : "";
-          statements.push(
-            `INSERT OR REPLACE INTO products (id, name, price, stock, category, image, createdAt, soldCount, syncedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`
-          );
-          values.push([
+    const activeIds = new Set<string>();
+    const changedProducts: Product[] = [];
+
+    for (const p of safeProducts) {
+      if (!p.id) continue;
+      activeIds.add(p.id);
+      const sig = computeProductSignature(p);
+      if (savedProductSignatures.get(p.id) !== sig) {
+        changedProducts.push(p);
+        savedProductSignatures.set(p.id, sig);
+      }
+    }
+
+    const removedIds: string[] = [];
+    for (const oldId of Array.from(savedProductSignatures.keys())) {
+      if (!activeIds.has(oldId)) {
+        removedIds.push(oldId);
+        savedProductSignatures.delete(oldId);
+      }
+    }
+
+    if (changedProducts.length === 0 && removedIds.length === 0) {
+      return;
+    }
+
+    if (Capacitor.isNativePlatform() && dbInstance) {
+      const set: Array<{ statement: string; values: any[] }> = [];
+
+      for (const delId of removedIds) {
+        set.push({
+          statement: `DELETE FROM products WHERE id = ?;`,
+          values: [delId],
+        });
+      }
+
+      for (const p of changedProducts) {
+        if (!p.id) continue;
+        const img = typeof p.image === "string" ? p.image : "";
+        set.push({
+          statement: `INSERT OR REPLACE INTO products (id, name, price, stock, category, image, createdAt, soldCount, syncedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+          values: [
             p.id,
             p.name || "",
             Number(p.price) || 0,
@@ -165,20 +208,19 @@ export async function sqliteSaveProducts(products: Product[]): Promise<void> {
             Number(p.createdAt) || Date.now(),
             Number(p.soldCount) || 0,
             Date.now(),
-          ]);
-        }
+          ],
+        });
+      }
 
-        await dbInstance.executeSet(
-          statements.map((stmt, idx) => ({
-            statement: stmt,
-            values: values[idx],
-          }))
-        );
+      if (set.length > 0) {
+        await dbInstance.executeSet(set);
       }
     } else {
-      await webDb.products.clear();
-      if (safeProducts.length > 0) {
-        await webDb.products.bulkPut(safeProducts);
+      if (removedIds.length > 0) {
+        await webDb.products.bulkDelete(removedIds);
+      }
+      if (changedProducts.length > 0) {
+        await webDb.products.bulkPut(changedProducts);
       }
     }
   } catch (err) {

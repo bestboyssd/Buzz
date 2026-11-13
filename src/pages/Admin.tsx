@@ -4172,15 +4172,16 @@ export function Admin() {
       return (
         <motion.div
           key="admin-change-pin-view"
-          initial={{ opacity: 0, scale: 0.98 }}
-          animate={{ opacity: 1, scale: 1 }}
+          initial={{ opacity: 0, y: 8, scale: 0.992 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
           exit={{
             opacity: 0,
-            scale: 0.98,
-            transition: { duration: 0.3, ease: [0.16, 1, 0.3, 1] },
+            y: -4,
+            scale: 0.992,
+            transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] },
           }}
-          transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-          className="pb-6 px-4 pt-4 max-w-sm mx-auto min-h-[85vh] flex flex-col justify-between relative"
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          className="pb-6 px-4 pt-4 max-w-sm mx-auto min-h-[85vh] flex flex-col justify-between relative transform-gpu"
         >
           <header className="w-full flex items-center justify-between pt-2">
             <button
@@ -4451,11 +4452,11 @@ export function Admin() {
       return (
         <motion.div
           key="admin-sync-conflicts-view"
-          initial={{ opacity: 0, y: 15 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 15 }}
-          transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-          className="min-h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg mx-auto"
+          initial={{ opacity: 0, y: 8, scale: 0.992 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -4, scale: 0.992, transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] } }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          className="min-h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg mx-auto transform-gpu"
         >
           {/* Header */}
           <header className="mb-5 flex flex-col gap-4">
@@ -5111,11 +5112,11 @@ export function Admin() {
       return (
         <motion.div
           key="admin-activity-logs-view"
-          initial={{ opacity: 0, y: 15 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 15 }}
-          transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-          className="min-h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg mx-auto"
+          initial={{ opacity: 0, y: 8, scale: 0.992 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: -4, scale: 0.992, transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] } }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          className="min-h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg mx-auto transform-gpu"
         >
           {/* Header */}
           <header className="mb-6 flex flex-col gap-4">
@@ -5493,11 +5494,11 @@ export function Admin() {
       return (
         <motion.div
           key="admin-accounts-view"
-          initial={{ opacity: 0, y: 14, scale: 0.985 }}
+          initial={{ opacity: 0, y: 8, scale: 0.992 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: 12, scale: 0.985 }}
-          transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.7 }}
-          className="min-h-full flex flex-col pb-4 px-4 pt-12 w-full max-w-lg mx-auto [overflow-anchor:none]"
+          exit={{ opacity: 0, y: -4, scale: 0.992, transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] } }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          className="min-h-full flex flex-col pb-4 px-4 pt-12 w-full max-w-lg mx-auto [overflow-anchor:none] transform-gpu"
         >
           {/* Header */}
           <motion.header
@@ -6324,11 +6325,11 @@ export function Admin() {
       return (
         <motion.div
           key="admin-product-costs-view"
-          initial={{ opacity: 0, y: 14, scale: 0.985 }}
+          initial={{ opacity: 0, y: 8, scale: 0.992 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}
-          exit={{ opacity: 0, y: 12, scale: 0.985 }}
-          transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.7 }}
-          className="min-h-full flex flex-col pb-6 px-4 pt-10 w-full max-w-lg mx-auto [overflow-anchor:none]"
+          exit={{ opacity: 0, y: -4, scale: 0.992, transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] } }}
+          transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+          className="min-h-full flex flex-col pb-6 px-4 pt-10 w-full max-w-lg mx-auto [overflow-anchor:none] transform-gpu"
         >
           {/* Clean Single-Line Header */}
           <motion.header
@@ -6770,15 +6771,16 @@ export function Admin() {
     return (
       <motion.div
         key="admin-dashboard-view"
-        initial={{ opacity: 0, scale: 0.98 }}
-        animate={{ opacity: 1, scale: 1 }}
+        initial={{ opacity: 0, y: 8, scale: 0.992 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{
           opacity: 0,
-          scale: 0.98,
-          transition: { duration: 0.25, ease: [0.16, 1, 0.3, 1] },
+          y: -4,
+          scale: 0.992,
+          transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] },
         }}
-        transition={{ type: "spring", stiffness: 420, damping: 32, mass: 0.7 }}
-        className="pb-2 px-4 pt-12 max-w-lg mx-auto"
+        transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+        className="pb-2 px-4 pt-12 max-w-lg mx-auto transform-gpu"
       >
         <motion.header
           initial={{ opacity: 0, y: -14, scale: 0.97 }}
@@ -7886,15 +7888,16 @@ export function Admin() {
   return (
     <motion.div
       key="admin-pin-login-view"
-      initial={{ opacity: 0, scale: 0.98 }}
-      animate={{ opacity: 1, scale: 1 }}
+      initial={{ opacity: 0, y: 8, scale: 0.992 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={{
         opacity: 0,
-        scale: 0.98,
-        transition: { duration: 0.3, ease: [0.16, 1, 0.3, 1] },
+        y: -4,
+        scale: 0.992,
+        transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] },
       }}
-      transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
-      className="pb-6 px-4 pt-4 max-w-sm mx-auto min-h-[90vh] flex flex-col justify-between relative"
+      transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+      className="pb-6 px-4 pt-4 max-w-sm mx-auto min-h-[90vh] flex flex-col justify-between relative transform-gpu"
     >
       <header className="w-full flex items-center justify-between pt-2">
         <button

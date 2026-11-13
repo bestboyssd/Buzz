@@ -49,6 +49,30 @@ export function getDeterministicNotificationId(key: string): number {
     return (pos % 800000000) + 10000;
 }
 
+const nativeHandledMemoryCache = new Map<string, number>();
+const NATIVE_CANONICAL_STOCK_TTL_MS = 180000;
+let lastSyncedContextSignature = '';
+let pendingNativeBridgeTasks: Array<() => void> = [];
+let nativeBridgeFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleNativeBridgeTask(task: () => void): void {
+    if (typeof window === 'undefined' || !Capacitor.isNativePlatform()) return;
+    pendingNativeBridgeTasks.push(task);
+    if (nativeBridgeFlushTimer !== null) return;
+    nativeBridgeFlushTimer = setTimeout(() => {
+        nativeBridgeFlushTimer = null;
+        const batch = pendingNativeBridgeTasks.splice(0, 8);
+        for (const fn of batch) {
+            try {
+                fn();
+            } catch {}
+        }
+        if (pendingNativeBridgeTasks.length > 0) {
+            scheduleNativeBridgeTask(() => {});
+        }
+    }, 120);
+}
+
 export function syncNativeNotificationContext(
     userUid: string,
     userEmail: string,
@@ -58,16 +82,27 @@ export function syncNativeNotificationContext(
 ): void {
     try {
         if (typeof window === 'undefined' || !Capacitor.isNativePlatform()) return;
-        const nativeExporter = (window as any).AndroidExporter;
-        if (nativeExporter && typeof nativeExporter.syncNotificationContext === 'function') {
-            nativeExporter.syncNotificationContext(
-                userUid || '',
-                userEmail || '',
-                Boolean(isAdmin),
-                Boolean(isRealAdmin),
-                deviceId || ''
-            );
-        }
+        const cleanUid = userUid || '';
+        const cleanEmail = userEmail || '';
+        const cleanAdmin = Boolean(isAdmin);
+        const cleanRealAdmin = Boolean(isRealAdmin);
+        const cleanDevice = deviceId || '';
+        const sig = `${cleanUid}|${cleanEmail}|${cleanAdmin}|${cleanRealAdmin}|${cleanDevice}`;
+        if (sig === lastSyncedContextSignature) return;
+        lastSyncedContextSignature = sig;
+
+        scheduleNativeBridgeTask(() => {
+            const nativeExporter = (window as any).AndroidExporter;
+            if (nativeExporter && typeof nativeExporter.syncNotificationContext === 'function') {
+                nativeExporter.syncNotificationContext(
+                    cleanUid,
+                    cleanEmail,
+                    cleanAdmin,
+                    cleanRealAdmin,
+                    cleanDevice
+                );
+            }
+        });
     } catch {}
 }
 
@@ -77,11 +112,30 @@ export function markNativeAlertHandled(
     timestamp: number = Date.now()
 ): void {
     try {
-        if (typeof window === 'undefined' || !Capacitor.isNativePlatform()) return;
-        const nativeExporter = (window as any).AndroidExporter;
-        if (nativeExporter && typeof nativeExporter.markAlertHandled === 'function') {
-            nativeExporter.markAlertHandled(kind, key || '', Number(timestamp) || Date.now());
+        const cleanKey = (key || '').trim();
+        if (!cleanKey) return;
+        const ts = Number(timestamp) || Date.now();
+        const memKey = `${kind}::${cleanKey}`;
+        const prevTs = nativeHandledMemoryCache.get(memKey) || 0;
+        if (prevTs > 0 && ts <= prevTs && !cleanKey.startsWith('stock_canonical_')) {
+            return;
         }
+        if (cleanKey.startsWith('stock_canonical_') && prevTs > 0 && ts - prevTs < 30000) {
+            return;
+        }
+        if (nativeHandledMemoryCache.size > 600) {
+            const oldest = nativeHandledMemoryCache.keys().next().value;
+            if (oldest) nativeHandledMemoryCache.delete(oldest);
+        }
+        nativeHandledMemoryCache.set(memKey, ts);
+
+        if (typeof window === 'undefined' || !Capacitor.isNativePlatform()) return;
+        scheduleNativeBridgeTask(() => {
+            const nativeExporter = (window as any).AndroidExporter;
+            if (nativeExporter && typeof nativeExporter.markAlertHandled === 'function') {
+                nativeExporter.markAlertHandled(kind, cleanKey, ts);
+            }
+        });
     } catch {}
 }
 
@@ -91,13 +145,23 @@ export function wasNativeAlertHandled(
     timestamp: number = 0
 ): boolean {
     try {
-        if (typeof window === 'undefined' || !Capacitor.isNativePlatform()) return false;
-        const nativeExporter = (window as any).AndroidExporter;
-        if (nativeExporter && typeof nativeExporter.wasAlertHandled === 'function') {
-            return Boolean(nativeExporter.wasAlertHandled(kind, key || '', Number(timestamp) || 0));
+        const cleanKey = (key || '').trim();
+        if (!cleanKey) return false;
+        const memKey = `${kind}::${cleanKey}`;
+        const cachedTs = nativeHandledMemoryCache.get(memKey) || 0;
+        if (cachedTs > 0) {
+            if (cleanKey.startsWith('stock_canonical_')) {
+                return Date.now() - cachedTs < NATIVE_CANONICAL_STOCK_TTL_MS;
+            }
+            if (kind === 'broadcast' && timestamp > 0) {
+                return timestamp <= cachedTs;
+            }
+            return true;
         }
-    } catch {}
-    return false;
+        return false;
+    } catch {
+        return false;
+    }
 }
 
 export function buildCanonicalStockKey(
@@ -311,26 +375,36 @@ export const showLocalNotification = async (
     }
 };
 
-import { useReducedMotion } from 'motion/react';
-
 /**
- * Performance & Battery Saver Mode (removes animations & heavy GPU effects).
- * Default is ON (true) for all users unless explicitly toggled off ("false").
+ * Performance & Battery Saver Mode ("Remove Animations" in Settings).
+ * Default is OFF (false) so smooth app-wide transitions are enabled unless explicitly toggled on by the user.
  */
 export function isPerformanceModeEnabled(uid?: string): boolean {
-    if (typeof window === 'undefined') return true;
+    if (typeof window === 'undefined') return false;
     try {
         const activeUid = uid || auth.currentUser?.uid;
+        const resetKey = activeUid ? `performanceMode_reset_v2_${activeUid}` : 'performanceMode_reset_v2';
+        if (localStorage.getItem(resetKey) !== 'true' && localStorage.getItem('performanceMode_reset_v2') !== 'true') {
+            localStorage.setItem('performanceMode_reset_v2', 'true');
+            if (activeUid) {
+                localStorage.setItem(`performanceMode_reset_v2_${activeUid}`, 'true');
+                localStorage.setItem(`performanceMode_${activeUid}`, 'false');
+            }
+            localStorage.setItem('performanceMode', 'false');
+            if (typeof document !== 'undefined') {
+                document.documentElement.classList.remove('performance-mode');
+            }
+            return false;
+        }
         if (activeUid) {
             const userVal = localStorage.getItem(`performanceMode_${activeUid}`);
-            if (userVal === 'false') return false;
             if (userVal === 'true') return true;
+            if (userVal === 'false') return false;
         }
         const globalVal = localStorage.getItem('performanceMode');
-        if (globalVal === 'false') return false;
-        return true;
+        return globalVal === 'true';
     } catch {
-        return true;
+        return false;
     }
 }
 
@@ -338,9 +412,11 @@ export function applyPerformanceMode(enabled: boolean, uid?: string): void {
     if (typeof document === 'undefined') return;
     try {
         document.documentElement.classList.toggle('performance-mode', enabled);
+        localStorage.setItem('performanceMode_reset_v2', 'true');
         localStorage.setItem('performanceMode', enabled ? 'true' : 'false');
         const activeUid = uid || auth.currentUser?.uid;
         if (activeUid) {
+            localStorage.setItem(`performanceMode_reset_v2_${activeUid}`, 'true');
             localStorage.setItem(`performanceMode_${activeUid}`, enabled ? 'true' : 'false');
         }
         window.dispatchEvent(
@@ -360,14 +436,13 @@ if (typeof document !== 'undefined') {
 }
 
 export function useOptimizedTransition(customTransition?: any) {
-    const shouldReduceMotion = useReducedMotion();
-    if (shouldReduceMotion || isPerformanceModeEnabled()) {
+    if (isPerformanceModeEnabled()) {
         return {
             type: 'tween' as const,
             duration: 0
         };
     }
-    return customTransition || { type: 'spring' as const, stiffness: 350, damping: 25, mass: 0.8 };
+    return customTransition || { duration: 0.22, ease: [0.22, 1, 0.36, 1] as const };
 }
 
 export function useHardwareAcceleration() {

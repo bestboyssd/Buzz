@@ -360,7 +360,7 @@ export function Checkout() {
     }
   };
 
-  const pageTransition = useOptimizedTransition({ duration: 0.35, ease: [0.16, 1, 0.3, 1] });
+  const pageTransition = useOptimizedTransition({ duration: 0.22, ease: [0.22, 1, 0.36, 1] });
   const gpuClass = useHardwareAcceleration();
 
   const [perfMode, setPerfMode] = useState(() => isPerformanceModeEnabled());
@@ -374,9 +374,18 @@ export function Checkout() {
   return (
     <>
       <motion.div
-        initial={perfMode ? false : { opacity: 0, y: 10, scale: 0.985 }}
+        initial={perfMode ? false : { opacity: 0, y: 8, scale: 0.992 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={perfMode ? undefined : { opacity: 0, scale: 0.96 }}
+        exit={
+          perfMode
+            ? undefined
+            : {
+                opacity: 0,
+                y: -4,
+                scale: 0.992,
+                transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] },
+              }
+        }
         transition={pageTransition}
         className={`min-h-full h-full flex flex-col pb-2 px-4 pt-10 w-full max-w-lg md:max-w-2xl mx-auto ${gpuClass}`}
       >

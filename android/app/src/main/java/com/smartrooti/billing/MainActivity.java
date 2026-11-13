@@ -48,6 +48,7 @@ import android.speech.tts.TextToSpeech;
 import androidx.core.content.FileProvider;
 
 public class MainActivity extends BridgeActivity {
+    public static volatile boolean isAppInForeground = false;
     private static final int AUDIO_PERMISSION_REQUEST_CODE = 1002;
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 1003;
     private boolean exporterAttached = false;
@@ -206,7 +207,14 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public int cleanupDownloadedApks() {
             pendingInstallApkFile = null;
-            return cleanupDownloadedApksStatic(MainActivity.this);
+            final Context appCtx = getApplicationContext();
+            Executors.newSingleThreadExecutor().execute(() -> {
+                try {
+                    cleanupDownloadedApksStatic(appCtx);
+                } catch (Exception ignored) {
+                }
+            });
+            return 0;
         }
 
         @JavascriptInterface
@@ -769,12 +777,16 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        isAppInForeground = true;
 
-        // Automatically delete any previously downloaded update APK files once the app launches
-        try {
-            cleanupDownloadedApksStatic(getApplicationContext());
-        } catch (Exception ignored) {
-        }
+        // Automatically delete any previously downloaded update APK files asynchronously off the UI thread
+        final Context appCtx = getApplicationContext();
+        Executors.newSingleThreadExecutor().execute(() -> {
+            try {
+                cleanupDownloadedApksStatic(appCtx);
+            } catch (Exception ignored) {
+            }
+        });
 
         // Initialize native Android Text-to-Speech engine for Buzz AI "Listen" button
         try {
@@ -862,6 +874,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        isAppInForeground = true;
         if (bgPollExecutor != null) {
             try {
                 bgPollExecutor.shutdownNow();
@@ -886,6 +899,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onPause() {
+        isAppInForeground = false;
         super.onPause();
         // Start fast 3-second native background polling while minimized so stock/broadcast/security alerts arrive instantly
         try {

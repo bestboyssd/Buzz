@@ -34,6 +34,8 @@ public class BuzzNotificationWorker extends Worker {
     private static final String DEFAULT_DATABASE_ID = "ai-studio-remixbuzzv111-8ceddc6a-4499-4e60-a805-dedb47b5266b";
     private static final String DEFAULT_API_KEY = "AIzaSyBhbO3om_V-n5RJ471DtuPNAvoUkElIjz4";
     private static final long CANONICAL_STOCK_TTL_MS = 180000L; // 3 minutes
+    private static final Object PREFS_LOCK = new Object();
+    private static final java.util.concurrent.atomic.AtomicBoolean IS_RUNNING_CHECK = new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public BuzzNotificationWorker(@NonNull Context context, @NonNull WorkerParameters params) {
         super(context, params);
@@ -49,7 +51,7 @@ public class BuzzNotificationWorker extends Worker {
         return (pos % 800000000) + 10000;
     }
 
-    public static synchronized void syncContext(
+    public static void syncContext(
             Context context,
             String userUid,
             String userEmail,
@@ -58,99 +60,105 @@ public class BuzzNotificationWorker extends Worker {
             String deviceId
     ) {
         if (context == null) return;
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String cleanUid = userUid != null ? userUid.trim() : "";
-        String cleanEmail = userEmail != null ? userEmail.trim().toLowerCase(Locale.US) : "";
-        String cleanDeviceId = deviceId != null ? deviceId.trim() : "";
-        String prevUid = prefs.getString("current_uid", "");
-        long now = System.currentTimeMillis();
-        SharedPreferences.Editor editor = prefs.edit()
-                .putBoolean("auth_context_known", true)
-                .putString("current_uid", cleanUid)
-                .putString("current_email", cleanEmail)
-                .putBoolean("is_admin", isAdmin)
-                .putBoolean("is_real_admin", isRealAdmin)
-                .putString("device_id", cleanDeviceId);
-        if (!cleanUid.isEmpty() && !cleanUid.equals(prevUid)) {
-            editor.putLong("last_broadcast_ts", Math.max(prefs.getLong("last_broadcast_ts", 0L), now))
-                    .putLong("last_security_ts", Math.max(prefs.getLong("last_security_ts", 0L), now))
-                    .putLong("last_stock_ts", Math.max(prefs.getLong("last_stock_ts", 0L), now))
-                    .putLong("last_conflict_ts", Math.max(prefs.getLong("last_conflict_ts", 0L), now));
+        synchronized (PREFS_LOCK) {
+            SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String cleanUid = userUid != null ? userUid.trim() : "";
+            String cleanEmail = userEmail != null ? userEmail.trim().toLowerCase(Locale.US) : "";
+            String cleanDeviceId = deviceId != null ? deviceId.trim() : "";
+            String prevUid = prefs.getString("current_uid", "");
+            long now = System.currentTimeMillis();
+            SharedPreferences.Editor editor = prefs.edit()
+                    .putBoolean("auth_context_known", true)
+                    .putString("current_uid", cleanUid)
+                    .putString("current_email", cleanEmail)
+                    .putBoolean("is_admin", isAdmin)
+                    .putBoolean("is_real_admin", isRealAdmin)
+                    .putString("device_id", cleanDeviceId);
+            if (!cleanUid.isEmpty() && !cleanUid.equals(prevUid)) {
+                editor.putLong("last_broadcast_ts", Math.max(prefs.getLong("last_broadcast_ts", 0L), now))
+                        .putLong("last_security_ts", Math.max(prefs.getLong("last_security_ts", 0L), now))
+                        .putLong("last_stock_ts", Math.max(prefs.getLong("last_stock_ts", 0L), now))
+                        .putLong("last_conflict_ts", Math.max(prefs.getLong("last_conflict_ts", 0L), now));
+            }
+            editor.apply();
         }
-        editor.apply();
     }
 
-    public static synchronized void markAlertHandled(Context context, String kind, String key, long timestamp) {
+    public static void markAlertHandled(Context context, String kind, String key, long timestamp) {
         if (context == null) return;
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        SharedPreferences.Editor editor = prefs.edit();
-        String safeKind = kind != null ? kind.trim().toLowerCase(Locale.US) : "";
-        String safeKey = key != null ? key.trim() : "";
-        long ts = timestamp > 0L ? timestamp : System.currentTimeMillis();
+        synchronized (PREFS_LOCK) {
+            SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            SharedPreferences.Editor editor = prefs.edit();
+            String safeKind = kind != null ? kind.trim().toLowerCase(Locale.US) : "";
+            String safeKey = key != null ? key.trim() : "";
+            long ts = timestamp > 0L ? timestamp : System.currentTimeMillis();
 
-        if ("broadcast".equals(safeKind)) {
-            long prevTs = prefs.getLong("last_broadcast_ts", 0L);
-            if (ts > prevTs) {
-                editor.putLong("last_broadcast_ts", ts);
-            }
-            if (!safeKey.isEmpty()) {
-                Set<String> set = new HashSet<>(prefs.getStringSet("notified_broadcast_keys", new HashSet<>()));
-                set.add(safeKey);
-                editor.putStringSet("notified_broadcast_keys", trimStringSet(set, 200));
-            }
-        } else if ("security".equals(safeKind)) {
-            long prevTs = prefs.getLong("last_security_ts", 0L);
-            if (ts > prevTs) {
-                editor.putLong("last_security_ts", ts);
-            }
-            if (!safeKey.isEmpty()) {
-                Set<String> set = new HashSet<>(prefs.getStringSet("notified_security_keys", new HashSet<>()));
-                set.add(safeKey);
-                editor.putStringSet("notified_security_keys", trimStringSet(set, 200));
-            }
-        } else if ("conflict".equals(safeKind)) {
-            if (!safeKey.isEmpty()) {
-                Set<String> set = new HashSet<>(prefs.getStringSet("notified_conflict_keys", new HashSet<>()));
-                set.add(safeKey);
-                editor.putStringSet("notified_conflict_keys", trimStringSet(set, 200));
-            }
-        } else if ("stock".equals(safeKind)) {
-            if (!safeKey.isEmpty()) {
-                if (safeKey.startsWith("stock_canonical_")) {
-                    recordCanonicalStockHandled(prefs, editor, safeKey, ts);
-                } else {
-                    Set<String> set = new HashSet<>(prefs.getStringSet("notified_stock_keys", new HashSet<>()));
+            if ("broadcast".equals(safeKind)) {
+                long prevTs = prefs.getLong("last_broadcast_ts", 0L);
+                if (ts > prevTs) {
+                    editor.putLong("last_broadcast_ts", ts);
+                }
+                if (!safeKey.isEmpty()) {
+                    Set<String> set = new HashSet<>(prefs.getStringSet("notified_broadcast_keys", new HashSet<>()));
                     set.add(safeKey);
-                    editor.putStringSet("notified_stock_keys", trimStringSet(set, 250));
+                    editor.putStringSet("notified_broadcast_keys", trimStringSet(set, 200));
+                }
+            } else if ("security".equals(safeKind)) {
+                long prevTs = prefs.getLong("last_security_ts", 0L);
+                if (ts > prevTs) {
+                    editor.putLong("last_security_ts", ts);
+                }
+                if (!safeKey.isEmpty()) {
+                    Set<String> set = new HashSet<>(prefs.getStringSet("notified_security_keys", new HashSet<>()));
+                    set.add(safeKey);
+                    editor.putStringSet("notified_security_keys", trimStringSet(set, 200));
+                }
+            } else if ("conflict".equals(safeKind)) {
+                if (!safeKey.isEmpty()) {
+                    Set<String> set = new HashSet<>(prefs.getStringSet("notified_conflict_keys", new HashSet<>()));
+                    set.add(safeKey);
+                    editor.putStringSet("notified_conflict_keys", trimStringSet(set, 200));
+                }
+            } else if ("stock".equals(safeKind)) {
+                if (!safeKey.isEmpty()) {
+                    if (safeKey.startsWith("stock_canonical_")) {
+                        recordCanonicalStockHandled(prefs, editor, safeKey, ts);
+                    } else {
+                        Set<String> set = new HashSet<>(prefs.getStringSet("notified_stock_keys", new HashSet<>()));
+                        set.add(safeKey);
+                        editor.putStringSet("notified_stock_keys", trimStringSet(set, 250));
+                    }
                 }
             }
+            editor.apply();
         }
-        editor.apply();
     }
 
-    public static synchronized boolean wasAlertHandled(Context context, String kind, String key, long timestamp) {
+    public static boolean wasAlertHandled(Context context, String kind, String key, long timestamp) {
         if (context == null) return false;
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        String safeKind = kind != null ? kind.trim().toLowerCase(Locale.US) : "";
-        String safeKey = key != null ? key.trim() : "";
+        synchronized (PREFS_LOCK) {
+            SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            String safeKind = kind != null ? kind.trim().toLowerCase(Locale.US) : "";
+            String safeKey = key != null ? key.trim() : "";
 
-        if ("broadcast".equals(safeKind)) {
-            if (!safeKey.isEmpty() && prefs.getStringSet("notified_broadcast_keys", new HashSet<>()).contains(safeKey)) {
-                return true;
+            if ("broadcast".equals(safeKind)) {
+                if (!safeKey.isEmpty() && prefs.getStringSet("notified_broadcast_keys", new HashSet<>()).contains(safeKey)) {
+                    return true;
+                }
+                return timestamp > 0L && timestamp <= prefs.getLong("last_broadcast_ts", 0L);
+            } else if ("security".equals(safeKind)) {
+                return !safeKey.isEmpty() && prefs.getStringSet("notified_security_keys", new HashSet<>()).contains(safeKey);
+            } else if ("conflict".equals(safeKind)) {
+                return !safeKey.isEmpty() && prefs.getStringSet("notified_conflict_keys", new HashSet<>()).contains(safeKey);
+            } else if ("stock".equals(safeKind)) {
+                if (safeKey.isEmpty()) return false;
+                if (safeKey.startsWith("stock_canonical_")) {
+                    return wasCanonicalStockRecentlyHandled(prefs, safeKey, System.currentTimeMillis());
+                }
+                return prefs.getStringSet("notified_stock_keys", new HashSet<>()).contains(safeKey);
             }
-            return timestamp > 0L && timestamp <= prefs.getLong("last_broadcast_ts", 0L);
-        } else if ("security".equals(safeKind)) {
-            return !safeKey.isEmpty() && prefs.getStringSet("notified_security_keys", new HashSet<>()).contains(safeKey);
-        } else if ("conflict".equals(safeKind)) {
-            return !safeKey.isEmpty() && prefs.getStringSet("notified_conflict_keys", new HashSet<>()).contains(safeKey);
-        } else if ("stock".equals(safeKind)) {
-            if (safeKey.isEmpty()) return false;
-            if (safeKey.startsWith("stock_canonical_")) {
-                return wasCanonicalStockRecentlyHandled(prefs, safeKey, System.currentTimeMillis());
-            }
-            return prefs.getStringSet("notified_stock_keys", new HashSet<>()).contains(safeKey);
+            return false;
         }
-        return false;
     }
 
     private static Set<String> trimStringSet(Set<String> set, int maxSize) {
@@ -242,58 +250,67 @@ public class BuzzNotificationWorker extends Worker {
         return Result.success();
     }
 
-    public static synchronized void runAlertCheckNow(Context context) {
+    public static void runAlertCheckNow(Context context) {
         if (context == null) return;
-        ensureChannel(context);
-        ensureBaselineInitialized(context);
-
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        if (!prefs.getBoolean("notifications_enabled", true)) {
+        if (!IS_RUNNING_CHECK.compareAndSet(false, true)) {
             return;
         }
-        // Only run background alert checks when a user is actively signed in
-        boolean authContextKnown = prefs.getBoolean("auth_context_known", false);
-        String currentUid = prefs.getString("current_uid", "");
-        if (!authContextKnown || currentUid.isEmpty()) {
-            return;
-        }
-
-        String projectId = prefs.getString("project_id", DEFAULT_PROJECT_ID);
-        String databaseId = prefs.getString("database_id", DEFAULT_DATABASE_ID);
-        String apiKey = prefs.getString("api_key", DEFAULT_API_KEY);
-        long now = System.currentTimeMillis();
-        long cutoff = now - 86400000L; // 24 hours
-        boolean isFirstRun = !prefs.getBoolean("worker_initialized_v2", false);
-
-        String docsRoot = "https://firestore.googleapis.com/v1/projects/" + projectId
-                + "/databases/" + databaseId + "/documents/";
-        String baseUrl = docsRoot + "settings/";
-
         try {
-            checkAdminBroadcast(context, prefs, baseUrl + "admin_broadcast_notification?key=" + apiKey, cutoff, isFirstRun);
-        } catch (Exception ignored) {
-        }
+            ensureChannel(context);
+            ensureBaselineInitialized(context);
 
-        try {
-            checkGlobalSecurity(context, prefs, baseUrl + "global_security_message?key=" + apiKey, cutoff, isFirstRun);
-        } catch (Exception ignored) {
-        }
+            SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            if (!prefs.getBoolean("notifications_enabled", true)) {
+                return;
+            }
+            // Only run background alert checks when a user is actively signed in
+            boolean authContextKnown = prefs.getBoolean("auth_context_known", false);
+            String currentUid = prefs.getString("current_uid", "");
+            if (!authContextKnown || currentUid.isEmpty()) {
+                return;
+            }
 
-        try {
-            checkStockAlerts(context, prefs, baseUrl + "stock_alerts_feed?key=" + apiKey, cutoff, isFirstRun);
-        } catch (Exception ignored) {
-        }
+            String projectId = prefs.getString("project_id", DEFAULT_PROJECT_ID);
+            String databaseId = prefs.getString("database_id", DEFAULT_DATABASE_ID);
+            String apiKey = prefs.getString("api_key", DEFAULT_API_KEY);
+            long now = System.currentTimeMillis();
+            long cutoff = now - 86400000L; // 24 hours
+            boolean isFirstRun = !prefs.getBoolean("worker_initialized_v2", false);
 
-        try {
-            checkSyncConflicts(context, prefs, docsRoot + "sync_conflicts?pageSize=25&key=" + apiKey, cutoff, isFirstRun);
-        } catch (Exception ignored) {
-        }
+            String docsRoot = "https://firestore.googleapis.com/v1/projects/" + projectId
+                    + "/databases/" + databaseId + "/documents/";
+            String baseUrl = docsRoot + "settings/";
 
-        if (isFirstRun) {
-            prefs.edit()
-                    .putBoolean("worker_initialized_v1", true)
-                    .putBoolean("worker_initialized_v2", true)
-                    .apply();
+            try {
+                checkAdminBroadcast(context, prefs, baseUrl + "admin_broadcast_notification?key=" + apiKey, cutoff, isFirstRun);
+            } catch (Exception ignored) {
+            }
+
+            try {
+                checkGlobalSecurity(context, prefs, baseUrl + "global_security_message?key=" + apiKey, cutoff, isFirstRun);
+            } catch (Exception ignored) {
+            }
+
+            try {
+                checkStockAlerts(context, prefs, baseUrl + "stock_alerts_feed?key=" + apiKey, cutoff, isFirstRun);
+            } catch (Exception ignored) {
+            }
+
+            try {
+                checkSyncConflicts(context, prefs, docsRoot + "sync_conflicts?pageSize=25&key=" + apiKey, cutoff, isFirstRun);
+            } catch (Exception ignored) {
+            }
+
+            if (isFirstRun) {
+                synchronized (PREFS_LOCK) {
+                    prefs.edit()
+                            .putBoolean("worker_initialized_v1", true)
+                            .putBoolean("worker_initialized_v2", true)
+                            .apply();
+                }
+            }
+        } finally {
+            IS_RUNNING_CHECK.set(false);
         }
     }
 
@@ -621,8 +638,8 @@ public class BuzzNotificationWorker extends Worker {
             URL url = new URL(urlStr);
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
-            conn.setConnectTimeout(6000);
-            conn.setReadTimeout(6000);
+            conn.setConnectTimeout(3500);
+            conn.setReadTimeout(3500);
             int code = conn.getResponseCode();
             if (code != 200) return null;
 

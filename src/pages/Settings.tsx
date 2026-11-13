@@ -246,7 +246,7 @@ export function Settings() {
     triggerHaptic("medium");
     setPerformanceMode(checked);
     applyPerformanceMode(checked, user?.uid);
-    updateSettingInFirestore("performanceMode", checked);
+    updateSettingInFirestore("performanceMode", checked, { performanceModeResetV2: true });
   };
 
   const toggleHaptics = (checked: boolean) => {
@@ -329,23 +329,24 @@ export function Settings() {
 
   return (
     <motion.div
-      initial={performanceMode ? false : { opacity: 0, y: 10 }}
+      initial={performanceMode ? false : { opacity: 0, y: 8, scale: 0.992 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       exit={
         performanceMode
           ? undefined
           : {
               opacity: 0,
-              y: -10,
-              transition: { duration: 0.2, ease: [0.16, 1, 0.3, 1] },
+              y: -4,
+              scale: 0.992,
+              transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] },
             }
       }
       transition={
         performanceMode
           ? { duration: 0 }
-          : { duration: 0.3, ease: [0.16, 1, 0.3, 1] }
+          : { duration: 0.22, ease: [0.22, 1, 0.36, 1] }
       }
-      className="pb-2 px-4 pt-12 max-w-lg mx-auto"
+      className="pb-2 px-4 pt-12 max-w-lg mx-auto transform-gpu"
     >
       <motion.header
         initial={performanceMode ? false : { opacity: 0, y: 12 }}

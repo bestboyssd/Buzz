@@ -687,6 +687,10 @@ export function computeGraceState(
   };
 }
 
+let hasCleanedApksThisSession = false;
+let lastAutoVersionCheckMs = 0;
+const AUTO_CHECK_COOLDOWN_MS = 3 * 60 * 1000; // 3 minutes cooldown for passive focus/resume checks
+
 export function useAppVersionCheck() {
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [appVersion, setAppVersion] = useState<string>(() =>
@@ -713,6 +717,7 @@ export function useAppVersionCheck() {
   );
 
   const refreshVersionCheck = useCallback(async () => {
+    lastAutoVersionCheckMs = Date.now();
     setNowMs(Date.now());
     setCheckingVersion(true);
     try {
@@ -732,10 +737,9 @@ export function useAppVersionCheck() {
         );
 
         if (compareSemver(release.version, currentVer) <= 0) {
-          // App is up to date! Clear outdated grace stamps and delete any leftover APKs
+          // App is up to date! Clear outdated grace stamps
           clearOutdatedGraceTimestamps();
           setPassedThisSession(false);
-          cleanupInstalledApkFiles().catch(() => {});
         } else {
           const firstSeen = getOrSetOutdatedFirstSeen(release.version, currentVer);
           const { remainingGraceMs: remMs } = computeGraceState(firstSeen, Date.now());
@@ -762,9 +766,21 @@ export function useAppVersionCheck() {
   }, []);
 
   useEffect(() => {
-    // Always run APK cleanup on initial mount so any just-installed APK is deleted immediately
-    cleanupInstalledApkFiles().catch(() => {});
-    refreshVersionCheck();
+    let startupCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+    let initialCheckTimer: ReturnType<typeof setTimeout> | null = null;
+    let resumeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    if (!hasCleanedApksThisSession) {
+      hasCleanedApksThisSession = true;
+      startupCleanupTimer = setTimeout(() => {
+        cleanupInstalledApkFiles().catch(() => {});
+      }, 2500);
+    }
+
+    // Defer initial network release check slightly so cold-start UI interactive frame is never delayed
+    initialCheckTimer = setTimeout(() => {
+      refreshVersionCheck();
+    }, 800);
 
     const handleSyncEvent = (e: Event) => {
       const custom = e as CustomEvent<{
@@ -810,8 +826,15 @@ export function useAppVersionCheck() {
     };
 
     const handleResumeOrFocus = () => {
-      setNowMs(Date.now());
-      refreshVersionCheck();
+      if (resumeDebounceTimer) clearTimeout(resumeDebounceTimer);
+      resumeDebounceTimer = setTimeout(() => {
+        resumeDebounceTimer = null;
+        const now = Date.now();
+        setNowMs(now);
+        if (now - lastAutoVersionCheckMs >= AUTO_CHECK_COOLDOWN_MS) {
+          refreshVersionCheck();
+        }
+      }, 1500);
     };
 
     window.addEventListener("appReleaseCheckUpdated", handleSyncEvent);
@@ -821,13 +844,20 @@ export function useAppVersionCheck() {
     window.addEventListener("online", handleResumeOrFocus);
 
     const interval = setInterval(() => {
-      setNowMs(Date.now());
-      if (typeof navigator === "undefined" || navigator.onLine) {
+      const now = Date.now();
+      setNowMs(now);
+      if (
+        (typeof navigator === "undefined" || navigator.onLine) &&
+        now - lastAutoVersionCheckMs >= AUTO_CHECK_COOLDOWN_MS
+      ) {
         refreshVersionCheck();
       }
     }, 60000);
 
     return () => {
+      if (startupCleanupTimer) clearTimeout(startupCleanupTimer);
+      if (initialCheckTimer) clearTimeout(initialCheckTimer);
+      if (resumeDebounceTimer) clearTimeout(resumeDebounceTimer);
       window.removeEventListener("appReleaseCheckUpdated", handleSyncEvent);
       window.removeEventListener("apkDownloadProgress", handleApkProgressEvent);
       window.removeEventListener("appResumed", handleResumeOrFocus);

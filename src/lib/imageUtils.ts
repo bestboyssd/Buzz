@@ -18,25 +18,41 @@ const stringImageCache = new Map<string, string>();
 // Keep decoded HTMLImageElement instances alive in memory so Android WebView / Blink
 // never evicts decoded product bitmaps when switching modals or tabs.
 const predecodedImageElements = new Map<string, HTMLImageElement>();
+let pendingPreloadUrls: string[] = [];
+let preloadFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushPendingPreloads(): void {
+  preloadFlushTimer = null;
+  if (typeof window === "undefined" || pendingPreloadUrls.length === 0) return;
+  const batch = pendingPreloadUrls.splice(0, 4);
+  for (const url of batch) {
+    if (!url || predecodedImageElements.has(url)) continue;
+    try {
+      if (predecodedImageElements.size > 200) {
+        const oldestKey = predecodedImageElements.keys().next().value;
+        if (oldestKey) predecodedImageElements.delete(oldestKey);
+      }
+      const img = new Image();
+      img.decoding = "async";
+      img.loading = "eager";
+      img.src = url;
+      predecodedImageElements.set(url, img);
+    } catch {}
+  }
+  if (pendingPreloadUrls.length > 0) {
+    preloadFlushTimer = setTimeout(flushPendingPreloads, 40);
+  }
+}
 
 export function preloadImageUrl(url: string | undefined): void {
   if (!url || typeof window === "undefined") return;
   if (predecodedImageElements.has(url)) return;
-  try {
-    // Cap cache size to prevent unbounded memory growth while covering full catalog
-    if (predecodedImageElements.size > 300) {
-      const oldestKey = predecodedImageElements.keys().next().value;
-      if (oldestKey) predecodedImageElements.delete(oldestKey);
-    }
-    const img = new Image();
-    img.decoding = "sync";
-    img.loading = "eager";
-    img.src = url;
-    if (typeof img.decode === "function") {
-      img.decode().catch(() => {});
-    }
-    predecodedImageElements.set(url, img);
-  } catch {}
+  if (!pendingPreloadUrls.includes(url)) {
+    pendingPreloadUrls.push(url);
+  }
+  if (preloadFlushTimer === null) {
+    preloadFlushTimer = setTimeout(flushPendingPreloads, 32);
+  }
 }
 
 export function preloadProductImages(products: Array<{ image?: any }>): void {
@@ -64,7 +80,6 @@ export function getImageUrl(imageField: any): string | undefined {
         ? imageField
         : `data:image/webp;base64,${imageField}`;
     stringImageCache.set(imageField, resolved);
-    preloadImageUrl(resolved);
     return resolved;
   }
 
@@ -77,7 +92,6 @@ export function getImageUrl(imageField: any): string | undefined {
   if (imageField && typeof imageField === "object" && typeof imageField.bytes === "string") {
     const dataUrl = "data:image/webp;base64," + imageField.bytes;
     imageCache.set(imageField, dataUrl);
-    preloadImageUrl(dataUrl);
     return dataUrl;
   }
 
@@ -85,7 +99,6 @@ export function getImageUrl(imageField: any): string | undefined {
     try {
       const dataUrl = "data:image/webp;base64," + imageField.toBase64();
       if (typeof imageField === "object") imageCache.set(imageField, dataUrl);
-      preloadImageUrl(dataUrl);
       return dataUrl;
     } catch (e) {
       console.error("Failed to convert Bytes to Base64", e);
@@ -104,7 +117,6 @@ export function getImageUrl(imageField: any): string | undefined {
       }
       const dataUrl = "data:image/webp;base64," + btoa(binary);
       if (typeof imageField === "object") imageCache.set(imageField, dataUrl);
-      preloadImageUrl(dataUrl);
       return dataUrl;
     } catch (e) {
       console.error("Failed to convert Bytes array to Base64", e);

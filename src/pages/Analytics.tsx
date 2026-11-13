@@ -1900,7 +1900,7 @@ export function Analytics() {
     return <Navigate to="/admin" replace />;
   }
 
-  const pageTransition = useOptimizedTransition({ duration: 0.35, ease: [0.16, 1, 0.3, 1] });
+  const pageTransition = useOptimizedTransition({ duration: 0.22, ease: [0.22, 1, 0.36, 1] });
   const gpuClass = useHardwareAcceleration();
 
   const netStoreProfit = grossProductProfit - otherCostsAmount;
@@ -1920,9 +1920,9 @@ export function Analytics() {
 
   return (
     <motion.div
-      initial={{ opacity: 0, scale: 0.98 }}
+      initial={{ opacity: 0, y: 8, scale: 0.992 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.25, ease: [0.16, 1, 0.3, 1] } }}
+      exit={{ opacity: 0, y: -4, scale: 0.992, transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] } }}
       transition={pageTransition}
       className={`min-h-full flex flex-col pb-6 px-4 pt-12 w-full max-w-lg mx-auto ${gpuClass}`}
     >

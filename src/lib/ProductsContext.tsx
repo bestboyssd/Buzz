@@ -40,27 +40,42 @@ import {
 } from "./sqliteAdapter";
 import type { CostBatch } from "./firestoreHooks";
 
+let cachedDeletedIdsSet: Set<string> | null = null;
+let cachedDeletedNamesSet: Set<string> | null = null;
+let cachedBuyPricesMap: Record<string, number> | null = null;
+let cachedCostBatchesMap: Record<string, CostBatch[]> | null = null;
+
 export const getDeletedProductIds = (): Set<string> => {
+  if (cachedDeletedIdsSet) return new Set(cachedDeletedIdsSet);
   try {
     const raw = localStorage.getItem("deleted_product_ids");
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return new Set(parsed.map(String));
+      if (Array.isArray(parsed)) {
+        cachedDeletedIdsSet = new Set(parsed.map(String));
+        return new Set(cachedDeletedIdsSet);
+      }
     }
   } catch {}
+  cachedDeletedIdsSet = new Set<string>();
   return new Set<string>();
 };
 
 export const getDeletedProductNames = (): Set<string> => {
+  if (cachedDeletedNamesSet) return new Set(cachedDeletedNamesSet);
   try {
     const raw = localStorage.getItem("deleted_product_names");
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        return new Set(parsed.map((n) => String(n).toLowerCase().trim()).filter(Boolean));
+        cachedDeletedNamesSet = new Set(
+          parsed.map((n) => String(n).toLowerCase().trim()).filter(Boolean)
+        );
+        return new Set(cachedDeletedNamesSet);
       }
     }
   } catch {}
+  cachedDeletedNamesSet = new Set<string>();
   return new Set<string>();
 };
 
@@ -69,15 +84,16 @@ export const markProductDeletedLocal = (id: string, name?: string) => {
     if (id) {
       const set = getDeletedProductIds();
       set.add(String(id));
-      localStorage.setItem("deleted_product_ids", JSON.stringify(Array.from(set).slice(-500)));
+      const trimmed = Array.from(set).slice(-500);
+      cachedDeletedIdsSet = new Set(trimmed);
+      localStorage.setItem("deleted_product_ids", JSON.stringify(trimmed));
     }
     if (name && String(name).trim()) {
       const nameSet = getDeletedProductNames();
       nameSet.add(String(name).toLowerCase().trim());
-      localStorage.setItem(
-        "deleted_product_names",
-        JSON.stringify(Array.from(nameSet).slice(-500))
-      );
+      const trimmedNames = Array.from(nameSet).slice(-500);
+      cachedDeletedNamesSet = new Set(trimmedNames);
+      localStorage.setItem("deleted_product_names", JSON.stringify(trimmedNames));
     }
   } catch {}
 };
@@ -85,6 +101,8 @@ export const markProductDeletedLocal = (id: string, name?: string) => {
 export const unmarkProductsDeletedLocal = (ids?: string[], names?: string[]) => {
   try {
     if (!ids && !names) {
+      cachedDeletedIdsSet = new Set();
+      cachedDeletedNamesSet = new Set();
       localStorage.removeItem("deleted_product_ids");
       localStorage.removeItem("deleted_product_names");
       localStorage.removeItem("products_purged_at");
@@ -93,11 +111,13 @@ export const unmarkProductsDeletedLocal = (ids?: string[], names?: string[]) => 
     if (ids && ids.length > 0) {
       const set = getDeletedProductIds();
       ids.forEach((id) => set.delete(String(id)));
+      cachedDeletedIdsSet = new Set(set);
       localStorage.setItem("deleted_product_ids", JSON.stringify(Array.from(set)));
     }
     if (names && names.length > 0) {
       const nameSet = getDeletedProductNames();
       names.forEach((n) => nameSet.delete(String(n).toLowerCase().trim()));
+      cachedDeletedNamesSet = new Set(nameSet);
       localStorage.setItem("deleted_product_names", JSON.stringify(Array.from(nameSet)));
     }
   } catch {}
@@ -120,6 +140,8 @@ export const purgeStockAlertsForDeletedProducts = async (
   // 1. Clean local stock tracking & buy price maps so stale stock states or buy-cost reminders never fire
   try {
     if (clearAll) {
+      cachedBuyPricesMap = {};
+      cachedCostBatchesMap = {};
       localStorage.removeItem("last_seen_stocks_v1");
       localStorage.removeItem("unset_buy_cost_first_seen_v1");
       localStorage.removeItem("local_product_buy_prices");
@@ -141,24 +163,17 @@ export const purgeStockAlertsForDeletedProducts = async (
           localStorage.setItem("unset_buy_cost_first_seen_v1", JSON.stringify(parsed));
         }
       }
-      const rawBuyPrices = localStorage.getItem("local_product_buy_prices");
-      if (rawBuyPrices) {
-        const parsed = JSON.parse(rawBuyPrices);
-        if (parsed && typeof parsed === "object") {
-          idSet.forEach((id) => delete parsed[`id:${id}`]);
-          nameSet.forEach((n) => delete parsed[`name:${n}`]);
-          localStorage.setItem("local_product_buy_prices", JSON.stringify(parsed));
-        }
-      }
-      const rawBatches = localStorage.getItem("local_product_cost_batches");
-      if (rawBatches) {
-        const parsed = JSON.parse(rawBatches);
-        if (parsed && typeof parsed === "object") {
-          idSet.forEach((id) => delete parsed[`id:${id}`]);
-          nameSet.forEach((n) => delete parsed[`name:${n}`]);
-          localStorage.setItem("local_product_cost_batches", JSON.stringify(parsed));
-        }
-      }
+      const buyPrices = { ...getLocalSavedBuyPricesMap() };
+      idSet.forEach((id) => delete buyPrices[`id:${id}`]);
+      nameSet.forEach((n) => delete buyPrices[`name:${n}`]);
+      cachedBuyPricesMap = buyPrices;
+      localStorage.setItem("local_product_buy_prices", JSON.stringify(buyPrices));
+
+      const batchesMap = { ...getLocalSavedCostBatchesMap() };
+      idSet.forEach((id) => delete batchesMap[`id:${id}`]);
+      nameSet.forEach((n) => delete batchesMap[`name:${n}`]);
+      cachedCostBatchesMap = batchesMap;
+      localStorage.setItem("local_product_cost_batches", JSON.stringify(batchesMap));
     }
   } catch {}
 
@@ -257,14 +272,19 @@ export const isDummyProduct = (raw: any) => {
 };
 
 export const getLocalSavedBuyPricesMap = (): Record<string, number> => {
+  if (cachedBuyPricesMap) return cachedBuyPricesMap;
   try {
     const raw = localStorage.getItem("local_product_buy_prices");
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") return parsed;
+      if (parsed && typeof parsed === "object") {
+        cachedBuyPricesMap = parsed;
+        return cachedBuyPricesMap;
+      }
     }
   } catch {}
-  return {};
+  cachedBuyPricesMap = {};
+  return cachedBuyPricesMap;
 };
 
 export const saveLocalBuyPriceEntry = (id?: string, name?: string, costPrice?: number) => {
@@ -272,21 +292,41 @@ export const saveLocalBuyPriceEntry = (id?: string, name?: string, costPrice?: n
   try {
     const map = getLocalSavedBuyPricesMap();
     const numCost = Number(costPrice);
-    if (id) map[`id:${String(id).trim()}`] = numCost;
-    if (name) map[`name:${String(name).toLowerCase().trim()}`] = numCost;
-    localStorage.setItem("local_product_buy_prices", JSON.stringify(map));
+    let changed = false;
+    if (id) {
+      const k = `id:${String(id).trim()}`;
+      if (map[k] !== numCost) {
+        map[k] = numCost;
+        changed = true;
+      }
+    }
+    if (name) {
+      const k = `name:${String(name).toLowerCase().trim()}`;
+      if (map[k] !== numCost) {
+        map[k] = numCost;
+        changed = true;
+      }
+    }
+    if (changed) {
+      localStorage.setItem("local_product_buy_prices", JSON.stringify(map));
+    }
   } catch {}
 };
 
 export const getLocalSavedCostBatchesMap = (): Record<string, CostBatch[]> => {
+  if (cachedCostBatchesMap) return cachedCostBatchesMap;
   try {
     const raw = localStorage.getItem("local_product_cost_batches");
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") return parsed;
+      if (parsed && typeof parsed === "object") {
+        cachedCostBatchesMap = parsed;
+        return cachedCostBatchesMap;
+      }
     }
   } catch {}
-  return {};
+  cachedCostBatchesMap = {};
+  return cachedCostBatchesMap;
 };
 
 export const saveLocalCostBatchesEntry = (id?: string, name?: string, batches?: CostBatch[]) => {
@@ -326,6 +366,8 @@ export const normalizeAndDedupeProducts = (items: any[]): Product[] => {
   const deletedNames = getDeletedProductNames();
   const savedBuyPrices = getLocalSavedBuyPricesMap();
   const savedCostBatches = getLocalSavedCostBatchesMap();
+  let buyPricesModified = false;
+  let costBatchesModified = false;
   const map = new Map<string, Product>();
   for (const rawItem of items) {
     if (!rawItem || typeof rawItem !== "object") continue;
@@ -374,7 +416,14 @@ export const normalizeAndDedupeProducts = (items: any[]): Product[] => {
         });
       }
       normalizedBatches = cleaned;
-      saveLocalCostBatchesEntry(idStr, cleanName, cleaned);
+      if (idStr) {
+        savedCostBatches[`id:${idStr}`] = cleaned;
+        costBatchesModified = true;
+      }
+      if (cleanName) {
+        savedCostBatches[`name:${lowerName}`] = cleaned;
+        costBatchesModified = true;
+      }
     }
 
     let resolvedCostPrice: number | undefined = undefined;
@@ -406,7 +455,14 @@ export const normalizeAndDedupeProducts = (items: any[]): Product[] => {
     }
 
     if (resolvedCostPrice !== undefined) {
-      saveLocalBuyPriceEntry(idStr, cleanName, resolvedCostPrice);
+      if (idStr && savedBuyPrices[`id:${idStr}`] !== resolvedCostPrice) {
+        savedBuyPrices[`id:${idStr}`] = resolvedCostPrice;
+        buyPricesModified = true;
+      }
+      if (cleanName && savedBuyPrices[`name:${lowerName}`] !== resolvedCostPrice) {
+        savedBuyPrices[`name:${lowerName}`] = resolvedCostPrice;
+        buyPricesModified = true;
+      }
     }
 
     const normalized: Product = {
@@ -438,6 +494,16 @@ export const normalizeAndDedupeProducts = (items: any[]): Product[] => {
       });
     }
   }
+
+  try {
+    if (buyPricesModified) {
+      localStorage.setItem("local_product_buy_prices", JSON.stringify(savedBuyPrices));
+    }
+    if (costBatchesModified) {
+      localStorage.setItem("local_product_cost_batches", JSON.stringify(savedCostBatches));
+    }
+  } catch {}
+
   return Array.from(map.values());
 };
 
@@ -477,16 +543,14 @@ const ProductsContext = createContext<ProductsContextType>({
 
 const persistLocalProductsFallback = (items: Product[]) => {
   try {
-    localStorage.setItem("local_products_fallback", JSON.stringify(items));
-  } catch {
-    try {
-      const light = items.map(({ image, ...rest }) => ({
-        ...rest,
-        image: typeof image === "string" && image.length < 2048 ? image : undefined,
-      }));
-      localStorage.setItem("local_products_fallback", JSON.stringify(light));
-    } catch {}
-  }
+    // Strip heavy base64/Bytes payloads before JSON.stringify so localStorage stays <20KB and never blocks the main thread;
+    // full product images are persisted asynchronously in SQLite / IndexedDB.
+    const light = items.map(({ image, ...rest }) => ({
+      ...rest,
+      image: typeof image === "string" && image.length < 2048 ? image : undefined,
+    }));
+    localStorage.setItem("local_products_fallback", JSON.stringify(light));
+  } catch {}
 };
 
 export function ProductsProvider({ children }: { children: React.ReactNode }) {
@@ -695,17 +759,7 @@ export function ProductsProvider({ children }: { children: React.ReactNode }) {
         if (countB !== countA) return countB - countA;
         return (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0);
       });
-      try {
-        localStorage.setItem("local_products_fallback", JSON.stringify(merged));
-      } catch {
-        try {
-          const light = merged.map(({ image, ...rest }) => ({
-            ...rest,
-            image: typeof image === "string" && image.length < 2048 ? image : undefined,
-          }));
-          localStorage.setItem("local_products_fallback", JSON.stringify(light));
-        } catch {}
-      }
+      persistLocalProductsFallback(merged);
       sqliteSaveProducts(merged).catch(() => {});
       return merged;
     });
@@ -783,9 +837,7 @@ export function ProductsProvider({ children }: { children: React.ReactNode }) {
           sqliteSaveProduct(merged).catch(() => {});
           return merged;
         });
-        try {
-          localStorage.setItem("local_products_fallback", JSON.stringify(updated));
-        } catch {}
+        persistLocalProductsFallback(updated);
         return updated;
       });
     };
@@ -1150,13 +1202,24 @@ export function ProductsProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
+    let visTimer: ReturnType<typeof setTimeout> | null = null;
+    const handleVisibilityReminder = () => {
+      if (document.visibilityState !== "visible") return;
+      if (visTimer) clearTimeout(visTimer);
+      visTimer = setTimeout(() => {
+        visTimer = null;
+        evaluateDailyMorningStockReminder();
+      }, 900);
+    };
+
     evaluateDailyMorningStockReminder();
     const interval = setInterval(evaluateDailyMorningStockReminder, 60 * 1000);
-    document.addEventListener("visibilitychange", evaluateDailyMorningStockReminder);
+    document.addEventListener("visibilitychange", handleVisibilityReminder);
 
     return () => {
+      if (visTimer) clearTimeout(visTimer);
       clearInterval(interval);
-      document.removeEventListener("visibilitychange", evaluateDailyMorningStockReminder);
+      document.removeEventListener("visibilitychange", handleVisibilityReminder);
     };
   }, [user?.uid, loading, isCloudSynced, products]);
 
