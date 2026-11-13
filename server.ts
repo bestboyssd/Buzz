@@ -4881,7 +4881,8 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
         backupModel: BACKUP_AI_MODEL,
         tertiaryModel: TERTIARY_AI_MODEL,
         updatedAt: Date.now(),
-      }
+      },
+      { merge: true }
     ).catch(() => {});
 
     const processedRpcIds = new Set<string>();

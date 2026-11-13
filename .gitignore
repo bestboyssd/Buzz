@@ -13,3 +13,4 @@ coverage/
 android/app/src/main/assets/public/
 *.jks
 *.keystore
+*.apk

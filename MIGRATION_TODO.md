@@ -1,23 +1,23 @@
-# Handover & Architecture Guide — Buzz POS (`v1.2.5`)
+# Handover & Architecture Guide — Buzz POS (`v1.2.6`)
 
 > [!WARNING]
 > ### 🛑 CRITICAL AGENT RULES — READ FIRST
 > 1. **DO NOT MODIFY THE UI UNSOLICITED**: Do not make visual adjustments, layout restructures, or cosmetic styling changes unless explicitly instructed by the user.
 > 2. **NO AUTHENTICATION BYPASSES**: Never add anonymous login fallbacks (`signInAnonymously`), fake admin accounts (`Demo Admin (Bypass)`), or unauthenticated database access in `Login.tsx`, `AuthContext.tsx`, or `firestore.rules`.
 > 3. **SINGLE UNIFIED DATABASE**: Always connect to the existing shared Cloud Firestore database (`ai-studio-remixbuzzv111-8ceddc6a-4499-4e60-a805-dedb47b5266b` in project `tidy-byte-g5xj8`). Never create or switch to a blank database.
-> 4. **GEMINI AI TRANSPORT POLICY**: All Gemini API calls (streaming chat, standard chat, voice synthesis/TTS, audio transcription, and multimodal media analysis) run on the server (`server.ts`) using `process.env.GEMINI_API_KEY` managed in AI Studio Secrets. Browser and native APK clients call `/api/gemini/*` and the real-time Firestore RPC bridge (`settings/ai_rpc_req_*`) via `src/lib/geminiApi.ts`—never call `generativelanguage.googleapis.com` directly from the client or store API keys in git, `vite.config.ts`, `localStorage`, or Firestore `settings/ai_bridge_config`.
+> 4. **GEMINI AI TRANSPORT & ANDROID PERFORMANCE POLICY**: On native Android APK (`Capacitor.isNativePlatform()`), Buzz AI streams directly from Google's official Gemini API endpoint (`generativelanguage.googleapis.com`) using `directGeminiChatStream()` and a dynamically resolved key (`localStorage` -> Firestore `settings/ai_bridge_config` -> build env). This delivers sub-second (<1s) responses for queries like "yo", with live token-by-token streaming, completely eliminating 16-21s Firestore bridge delays. Server endpoints (`/api/gemini/*`) and the Firestore RPC bridge (`settings/ai_rpc_req_*`) remain active as seamless web/fallback conduits. Keys are never committed to git source code.
 > 5. **CONTEXT WINDOW MONITORING**: Always notify the user when your context window is getting close to full or if a context compaction occurs so they can migrate smoothly.
 
 ---
 
 ## 📱 1. Application Overview & Tech Stack
-* **App Name**: Buzz (`Buzz - v1.2.5`)
+* **App Name**: Buzz (`Buzz - v1.2.6`)
 * **Android Package / Namespace**: `com.smartrooti.billing`
-* **Version**: `1.2.5` (`versionCode 125`, `versionName "1.2.5"`) synchronized across:
-  * `metadata.json` (`"name": "Buzz - v1.2.5"`)
-  * `package.json` (`"version": "1.2.5"`)
-  * `index.html` (`<title>Buzz - v1.2.5</title>`)
-  * `android/app/build.gradle` (`versionCode 125`, `versionName "1.2.5"`)
+* **Version**: `1.2.6` (`versionCode 126`, `versionName "1.2.6"`) synchronized across:
+  * `metadata.json` (`"name": "Buzz - v1.2.6"`)
+  * `package.json` (`"version": "1.2.6"`)
+  * `index.html` (`<title>Buzz - v1.2.6</title>`)
+  * `android/app/build.gradle` (`versionCode 126`, `versionName "1.2.6"`)
   * `src/pages/Settings.tsx` (`getAppVersion()` resolves via `versionCheck.ts` / `package.json` / `metadata.json`)
 * **Core Tech Stack**:
   * **Frontend**: React 19 + TypeScript + Vite 6 + Tailwind CSS v4 + `motion/react` + `lucide-react` + `recharts`.
@@ -179,9 +179,10 @@
    * **Fresh Account Re-Creation**: When a deleted user explicitly clicks "Continue with Google" (`signInWithGoogle()`), `AuthContext.tsx` queries fresh server documents (`getDocFromServer`), sees `wasDeleted = deletedAt > 0 && docRecreatedAt <= deletedAt`, ignores any stale local `is_blocked_cached_${uid}` flag, wipes all local cache keys (`wipeLocalAccountCache`), restores their original Google provider `displayName` and `photoURL` via `updateProfile()` (clearing any old custom name/photo from `Account.tsx`), deletes any stale duplicate `profile_*` docs for that email, removes the user from `deleted_accounts` and `blocked_accounts`, and writes a brand-new `profile_${uid}` document with `recreatedAt: Math.max(Date.now(), deletedAt + 1000)`.
    * **Preventing Zombie Resurrection**: `Admin.tsx` (`buildUnifiedAccountsList`) and `AuthContext.tsx` compare `docRecreatedAt <= deletedAt` (rather than `updatedAt <= deletedAt`) so background presence heartbeats or cross-device clock skew can never resurrect a deleted profile document.
 6. **Gemini AI Transport & Native APK Speed (`src/lib/geminiApi.ts`, `server.ts`, `AdminAIAssistant.tsx`)**:
-   * **Server-Side Gemini Execution (`server.ts` & `src/lib/geminiApi.ts`)**: All Gemini calls execute on the server via `server.ts` using `process.env.GEMINI_API_KEY` (managed via AI Studio **Settings > Secrets**), with multi-model failover across `gemini-3.1-flash-lite`, `gemini-3.8-flash`, and `gemini-flash-latest`. No API keys are embedded in client bundles, git source, or Firestore `settings/ai_bridge_config`.
+   * **Native Android Direct Streaming (`directGeminiChatStream`)**: On native Android APK (`Capacitor.isNativePlatform()`), Buzz AI connects directly to Google's official Gemini API endpoint (`generativelanguage.googleapis.com`) using `directGeminiChatStream()` and a dynamically resolved key (`localStorage` -> Firestore `settings/ai_bridge_config` -> build env). This delivers sub-second (<1s) responses for queries like "yo", with live token-by-token streaming, completely eliminating 16-21s Firestore bridge delays.
+   * **In-App "Set AI Key" Setup**: If a key is missing or revoked, an intuitive inline modal in the Buzz AI header and error banner allows administrators to paste a Google AI Studio key (`AIzaSy...`), verifying it instantly and saving it to Firestore `settings/ai_bridge_config` so all store devices share it without requiring an APK update.
+   * **Server-Side Gemini Execution & Failover (`server.ts`)**: When `server.ts` is running, `/api/gemini/chat-stream`, `/api/gemini/chat`, `/api/gemini/transcribe`, `/api/gemini/tts`, `/api/gemini/analyze-media`, and the real-time `settings/ai_rpc_req_*` Firestore listener process web and fallback requests with `{ merge: true }` remote config preservation. No API keys are embedded in git source code.
    * **Strict Zero-Preset-Message Policy**: Never return preset or deterministic canned messages (such as `"Store Snapshot: X products in catalog..."`) when the user talks to Buzz AI. Every user message or command must be answered by the live Gemini AI.
-   * **Backend `/api/gemini/*` & Firestore RPC Bridge**: When `server.ts` is running (`npm run dev` / Cloud Run), `/api/gemini/chat-stream`, `/api/gemini/chat`, `/api/gemini/transcribe`, `/api/gemini/tts`, `/api/gemini/analyze-media`, and the real-time `settings/ai_rpc_req_*` Firestore listener process all web and native Android requests. Note: never compare client `data.createdAt` against server `Date.now()` when filtering `status === "pending"` `ai_rpc_req_*` documents due to device clock skew; attach Express SSE disconnect cleanup only to `res.on("close", ...)` (never `req.on("close", ...)`).
    * **Installed PWA Service Worker (`vite.config.ts`)**: `workbox` is configured with `navigateFallbackDenylist: [/^\/api\//, /^\/health/]` and `NetworkOnly` runtime caching for `/api/*` so installed phone PWAs never intercept or buffer `/api/gemini/chat-stream` SSE responses.
 7. **Mobile Microphone, Native TTS, SmartRooti Thermal Printing & Instant Deduplicated Notifications (`AdminAIAssistant.tsx`, `MainActivity.java`, `BillReceiptModal.tsx`, `Analytics.tsx`, `BuzzRealtimeSyncService.java`, `BuzzNotificationWorker.java`, `printerManager.ts`)**:
    * **Android Microphone Hardware Lock**: On Android phones (`isMobileDevice`), never call `navigator.mediaDevices.getUserMedia()` concurrently with `SpeechRecognition` (`webkitSpeechRecognition`), because Android's audio HAL only allows one active audio capture client per app (`getUserMedia` locks the mic and causes `SpeechRecognition` to immediately fail). Use `getUserMedia` only on desktop or when recording via `MediaRecorder` fallback.
