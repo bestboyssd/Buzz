@@ -1,4 +1,4 @@
-# Handover & Architecture Guide — Buzz POS (`v1.2.4`)
+# Handover & Architecture Guide — Buzz POS (`v1.2.5`)
 
 > [!WARNING]
 > ### 🛑 CRITICAL AGENT RULES — READ FIRST
@@ -11,13 +11,13 @@
 ---
 
 ## 📱 1. Application Overview & Tech Stack
-* **App Name**: Buzz (`Buzz - v1.2.4`)
+* **App Name**: Buzz (`Buzz - v1.2.5`)
 * **Android Package / Namespace**: `com.smartrooti.billing`
-* **Version**: `1.2.4` (`versionCode 124`, `versionName "1.2.4"`) synchronized across:
-  * `metadata.json` (`"name": "Buzz - v1.2.4"`)
-  * `package.json` (`"version": "1.2.4"`)
-  * `index.html` (`<title>Buzz - v1.2.4</title>`)
-  * `android/app/build.gradle` (`versionCode 124`, `versionName "1.2.4"`)
+* **Version**: `1.2.5` (`versionCode 125`, `versionName "1.2.5"`) synchronized across:
+  * `metadata.json` (`"name": "Buzz - v1.2.5"`)
+  * `package.json` (`"version": "1.2.5"`)
+  * `index.html` (`<title>Buzz - v1.2.5</title>`)
+  * `android/app/build.gradle` (`versionCode 125`, `versionName "1.2.5"`)
   * `src/pages/Settings.tsx` (`getAppVersion()` resolves via `versionCheck.ts` / `package.json` / `metadata.json`)
 * **Core Tech Stack**:
   * **Frontend**: React 19 + TypeScript + Vite 6 + Tailwind CSS v4 + `motion/react` + `lucide-react` + `recharts`.
