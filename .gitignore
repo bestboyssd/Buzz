@@ -11,6 +11,7 @@ coverage/
 .agents/
 .playwright-cli/
 android/app/src/main/assets/public/
+*.apk
 *.jks
 *.keystore
 .vscode/

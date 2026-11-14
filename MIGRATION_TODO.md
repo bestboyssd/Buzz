@@ -7,6 +7,16 @@
 > 3. **SINGLE UNIFIED DATABASE**: Always connect to the existing shared Cloud Firestore database (`ai-studio-remixbuzzv111-8ceddc6a-4499-4e60-a805-dedb47b5266b` in project `tidy-byte-g5xj8`). Never create or switch to a blank database.
 > 4. **GEMINI AI TRANSPORT POLICY**: All Gemini API calls (streaming chat, standard chat, voice synthesis/TTS, audio transcription, and multimodal media analysis) run on the server (`server.ts`) using `process.env.GEMINI_API_KEY` managed in AI Studio Secrets. Browser and native APK clients call `/api/gemini/*` and the real-time Firestore RPC bridge (`settings/ai_rpc_req_*`) via `src/lib/geminiApi.ts`—never call `generativelanguage.googleapis.com` directly from the client or store API keys in git, `vite.config.ts`, `localStorage`, or Firestore `settings/ai_bridge_config`.
 > 5. **CONTEXT WINDOW MONITORING**: Always notify the user when your context window is getting close to full or if a context compaction occurs so they can migrate smoothly.
+> 6. **GITHUB REPO SYNC & APK RELEASE PROTOCOL**:
+>    * When the user says **`apk`**:
+>      1. Pull latest changes from the GitHub repo (`git pull origin main`).
+>      2. Build web assets (`npm run build`) and sync Capacitor (`npx cap sync android`).
+>      3. Build the Android APK (`cd android && ./gradlew assembleDebug` or release build).
+>      4. Upload/publish the APK to GitHub Releases under tag `vX.Y.Z` (matching the version in `package.json` / `metadata.json`, e.g., `v1.2.7`) with both `Buzz.apk` and `Buzz-vX.Y.Z.apk` assets.
+>    * When the user says **`update`**:
+>      1. If any local files or app fixes were made, stage all changes (`git add .`).
+>      2. Commit with a clear message (`git commit -m "..."`).
+>      3. Push the updates to the GitHub repository (`git push origin main`).
 
 ---
 
