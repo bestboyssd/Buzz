@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <rect width="1024" height="1024" fill="#0f172a"/>
+  <!-- The stylized B -->
+  <path d="M280 200 v624 M280 200 h 240 c 155 0 280 125 280 280 c 0 126 -83 238 -200 266 M280 824 h 280 c 155 0 280 -125 280 -280 c 0 -112 -70 -210 -168 -252" fill="none" stroke="#fbbf24" stroke-width="112" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Lightning Bolt for "Buzz" -->
+  <polygon points="580,480 820,120 680,240 880,240 500,660 640,480" fill="#f59e0b"/>
+</svg>

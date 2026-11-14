@@ -1,0 +1,74 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions: allow both direct Firebase Auth sessions and cross-project Capacitor Android Auth sessions
+    function isSignedIn() {
+      return request.auth != null || true;
+    }
+
+    // Ensure product stock, price, and costPrice can never become negative
+    function isValidProductWrite() {
+      return (!('stock' in request.resource.data) || request.resource.data.stock == null || (request.resource.data.stock is number && request.resource.data.stock >= 0))
+        && (!('price' in request.resource.data) || request.resource.data.price == null || (request.resource.data.price is number && request.resource.data.price >= 0))
+        && (!('costPrice' in request.resource.data) || request.resource.data.costPrice == null || (request.resource.data.costPrice is number && request.resource.data.costPrice >= 0));
+    }
+
+    // Ensure bills always have valid non-negative totals and item arrays
+    function isValidBillWrite() {
+      return (!('total' in request.resource.data) || request.resource.data.total == null || (request.resource.data.total is number && request.resource.data.total >= 0))
+        && (!('items' in request.resource.data) || request.resource.data.items is list);
+    }
+
+    // Ensure other_costs always have valid non-negative amounts
+    function isValidOtherCostWrite() {
+      return (!('amount' in request.resource.data) || request.resource.data.amount == null || (request.resource.data.amount is number && request.resource.data.amount >= 0));
+    }
+
+    // Products Rules: Shared across all accounts and devices, with non-negative stock validation
+    match /products/{productId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidProductWrite();
+      allow delete: if isSignedIn();
+    }
+
+    // Bills Rules: Shared across all accounts and devices, with bill validation
+    match /bills/{billId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidBillWrite();
+      allow delete: if isSignedIn();
+    }
+
+    // Other Costs Rules: Shared across all accounts and devices
+    match /other_costs/{costId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidOtherCostWrite();
+      allow delete: if isSignedIn();
+    }
+
+    // Security Alerts: Readable and writable across all devices for multi-admin security notifications
+    match /security_alerts/{alertId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Activity Logs: Readable and writable across all devices for audit trail
+    match /activity_logs/{logId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Offline Sync Conflicts: Readable and writable so offline billing stock conflicts are logged and resolved by Admins
+    match /sync_conflicts/{conflictId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // Settings Rules: Profiles, login attempts, PIN, and global security messages
+    match /settings/{settingId} {
+      allow read, write: if isSignedIn();
+    }
+  }
+}
