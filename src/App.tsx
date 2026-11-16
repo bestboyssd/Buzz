@@ -763,7 +763,7 @@ function AppContent() {
         if (ts > lastNotified) {
           lastBroadcastNotifiedRef.current = ts;
           localStorage.setItem(getNotifiedBroadcastKey(currentUid), ts.toString());
-          if (!alreadyNative && ts >= appMountTimeRef.current - 120000) {
+          if (!alreadyNative && ts > Date.now() - 86400000) {
             showLocalNotification(
               `🔔 ${data.title || "Admin Announcement"}`,
               data.message || "",
@@ -943,8 +943,8 @@ function AppContent() {
               lastNotifiedRef.current = ts;
               localStorage.setItem(getNotifiedKey(currentUid), ts.toString());
             }
-            // Only fire system push notification for live events that occurred while this session is active and not yet posted natively
-            if (!alreadyNative && ts >= appMountTimeRef.current - 15000) {
+            // Fire system push notification for any unread event after cold-start pass if not yet posted natively
+            if (!alreadyNative && ts > cutoff) {
               const breachNum = ev.breachCount || idx + 1;
               const msg =
                 ev.type === "pin_login_bypass"
@@ -1205,7 +1205,7 @@ function AppContent() {
             localStorage.setItem(getNotifiedBroadcastKey(uid), ts.toString());
             markNativeAlertHandled("broadcast", broadcastKey, ts);
             setBroadcastNotification(data);
-            if (!alreadyNative && ts >= appMountTimeRef.current - 60000) {
+            if (!alreadyNative) {
               showLocalNotification(
                 `🔔 ${data.title || "Admin Announcement"}`,
                 data.message || "",
@@ -1213,6 +1213,88 @@ function AppContent() {
                 broadcastKey
               );
             }
+          }
+        }
+      } catch {}
+
+      // 2. Poll Stock Alerts Feed
+      try {
+        const sSnap = await getDoc(doc(db, "settings", "stock_alerts_feed"));
+        if (sSnap.exists()) {
+          const sData = sSnap.data();
+          const events = Array.isArray(sData?.latestAlerts)
+            ? sData.latestAlerts
+            : Array.isArray(sData?.events)
+            ? sData.events
+            : [];
+          const recentCutoff = Date.now() - 3600000;
+          const notifiedKey = `notified_stock_events_v2_${uid}`;
+          let knownSet: Set<string>;
+          try {
+            knownSet = new Set(JSON.parse(localStorage.getItem(notifiedKey) || "[]"));
+          } catch {
+            knownSet = new Set();
+          }
+          let changed = false;
+          const myDeviceId = getDeviceId();
+
+          for (const ev of events) {
+            if (!ev) continue;
+            const ts = Number(ev.timestamp) || 0;
+            const evId = String(ev.id || `stock_${ts}`);
+            const prodId = String(ev.productId || ev.productName || "unknown").trim();
+            const stock = Math.max(0, Number(ev.stock ?? 0));
+            const type: "out_of_stock" | "critical_low" | "low_stock" =
+              ev.type === "out_of_stock" || ev.type === "critical_low" || ev.type === "low_stock"
+                ? ev.type
+                : stock <= 0
+                ? "out_of_stock"
+                : "low_stock";
+            const canonicalKey = prodId ? buildCanonicalStockKey(type, prodId, stock) : evId;
+            const evDevice = ev.sourceDeviceId || ev.deviceId || "";
+            const fromSelf =
+              ev.triggeredByUid === uid ||
+              (Boolean(myDeviceId && evDevice) && String(myDeviceId) === String(evDevice));
+            const alreadyNative =
+              wasNativeAlertHandled("stock", canonicalKey, ts) ||
+              wasNativeAlertHandled("stock", evId, ts);
+            const recentlyLocal = prodId
+              ? wasStockTransitionRecentlyHandled(prodId, type, stock)
+              : false;
+
+            if (
+              ts > recentCutoff &&
+              !fromSelf &&
+              !alreadyNative &&
+              !recentlyLocal &&
+              !knownSet.has(evId) &&
+              !knownSet.has(canonicalKey)
+            ) {
+              knownSet.add(evId);
+              knownSet.add(canonicalKey);
+              changed = true;
+              markNativeAlertHandled("stock", canonicalKey, ts);
+              if (prodId) {
+                markStockTransitionHandled(prodId, type, stock);
+              }
+              const name = ev.productName || "Product";
+              const title =
+                type === "out_of_stock"
+                  ? "🚫 Out of Stock Alert"
+                  : type === "critical_low"
+                  ? "⚠️ Critical Low Stock"
+                  : "📉 Low Stock Alert";
+              const body =
+                type === "out_of_stock"
+                  ? `"${name}" just ran out of stock (0 left)!`
+                  : `"${name}" has only ${stock} unit${stock === 1 ? "" : "s"} left!`;
+              showLocalNotification(title, body, "/pwa-192x192.png", canonicalKey).catch(() => {});
+            }
+          }
+          if (changed) {
+            try {
+              localStorage.setItem(notifiedKey, JSON.stringify(Array.from(knownSet).slice(-250)));
+            } catch {}
           }
         }
       } catch {}
@@ -1236,7 +1318,7 @@ function AppContent() {
 
     // Create an unthrottled Web Worker timer that triggers native & Service Worker background checks while app is minimized/hidden
     try {
-      const intervalMs = performanceMode ? 30000 : 8000;
+      const intervalMs = performanceMode ? 12000 : 4000;
       const workerCode = `
         setInterval(() => {
           self.postMessage('TICK');
@@ -1246,16 +1328,21 @@ function AppContent() {
       workerUrl = URL.createObjectURL(blob);
       bgWorker = new Worker(workerUrl);
       bgWorker.onmessage = () => {
-        if (document.visibilityState === "hidden" && !Capacitor.isNativePlatform()) {
+        if (document.visibilityState === "hidden") {
           pollBackgroundAlertsNative().catch(() => {});
-          syncContextToServiceWorker().then(() => {
-            if ("serviceWorker" in navigator) {
-              navigator.serviceWorker.getRegistration().then((reg) => {
-                const targetSW = reg?.active || navigator.serviceWorker.controller;
-                targetSW?.postMessage({ type: "CHECK_NOTIFICATIONS_NOW" });
-              }).catch(() => {});
-            }
-          });
+          if (!Capacitor.isNativePlatform()) {
+            syncContextToServiceWorker().then(() => {
+              if ("serviceWorker" in navigator) {
+                navigator.serviceWorker
+                  .getRegistration()
+                  .then((reg) => {
+                    const targetSW = reg?.active || navigator.serviceWorker.controller;
+                    targetSW?.postMessage({ type: "CHECK_NOTIFICATIONS_NOW" });
+                  })
+                  .catch(() => {});
+              }
+            });
+          }
         }
       };
     } catch {}
@@ -1266,10 +1353,10 @@ function AppContent() {
       visPollTimer = setTimeout(() => {
         visPollTimer = null;
         syncContextToServiceWorker();
-        if (document.visibilityState === "visible" && !Capacitor.isNativePlatform()) {
+        if (document.visibilityState === "visible") {
           pollBackgroundAlertsNative().catch(() => {});
         }
-      }, 750);
+      }, 500);
     };
     document.addEventListener("visibilitychange", handleVisChange);
 

@@ -78,13 +78,34 @@ export function ProfileMenu() {
     return () => window.removeEventListener('performanceModeChanged', syncPerf);
   }, []);
 
+  const [photoRevision, setPhotoRevision] = useState(0);
+
+  const currentPhotoURL = (() => {
+    if (!user) return "";
+    try {
+      const localCustom = localStorage.getItem(`custom_user_photo_${user.uid}`);
+      if (localCustom) return localCustom;
+    } catch {}
+    return user.photoURL || "";
+  })();
+
+  const currentDisplayName = (() => {
+    if (!user) return "";
+    try {
+      const localName = localStorage.getItem(`custom_user_name_${user.uid}`);
+      if (localName) return localName;
+    } catch {}
+    return user.displayName || "";
+  })();
+
   useEffect(() => {
     setImageError(false);
-  }, [user?.photoURL]);
+  }, [currentPhotoURL, photoRevision]);
 
   useEffect(() => {
     const handlePhotoUpdated = () => {
       setImageError(false);
+      setPhotoRevision((r) => r + 1);
     };
     window.addEventListener("profilePhotoUpdated", handlePhotoUpdated);
     return () => window.removeEventListener("profilePhotoUpdated", handlePhotoUpdated);
@@ -122,9 +143,10 @@ export function ProfileMenu() {
           }}
           className="w-10 h-10 rounded-full bg-slate-200 dark:bg-slate-700 flex items-center justify-center text-sm font-bold text-indigo-600 dark:text-indigo-400 shadow-sm transition-colors duration-150 outline-none hover:bg-slate-300 dark:hover:bg-slate-600 overflow-hidden shrink-0 transform-gpu cursor-pointer"
         >
-          {user?.photoURL && !imageError ? (
+          {currentPhotoURL && !imageError ? (
             <img
-              src={user.photoURL}
+              key={`${currentPhotoURL.length}_${currentPhotoURL.slice(-40)}`}
+              src={currentPhotoURL}
               alt="Profile"
               draggable={false}
               className="w-full h-full rounded-full object-cover border-[3px] border-slate-300 dark:border-slate-500 pointer-events-none"
@@ -133,7 +155,7 @@ export function ProfileMenu() {
             />
           ) : (
             <div className="w-full h-full rounded-full flex items-center justify-center text-xs font-black uppercase tracking-tight text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 pointer-events-none">
-              {user?.displayName ? user.displayName.slice(0, 2) : "SR"}
+              {currentDisplayName ? currentDisplayName.slice(0, 2) : "SR"}
             </div>
           )}
         </motion.button>

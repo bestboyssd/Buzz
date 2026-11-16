@@ -10,6 +10,7 @@ import android.media.AudioAttributes;
 import android.media.RingtoneManager;
 import android.net.Uri;
 import android.os.Build;
+import android.os.PowerManager;
 import androidx.annotation.NonNull;
 import androidx.core.app.NotificationCompat;
 import androidx.work.Worker;
@@ -255,7 +256,18 @@ public class BuzzNotificationWorker extends Worker {
         if (!IS_RUNNING_CHECK.compareAndSet(false, true)) {
             return;
         }
+        PowerManager.WakeLock wakeLock = null;
         try {
+            try {
+                PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BuzzPOS:AlertCheckWakeLock");
+                    wakeLock.setReferenceCounted(false);
+                    wakeLock.acquire(4500L);
+                }
+            } catch (Exception ignored) {
+            }
+
             ensureChannel(context);
             ensureBaselineInitialized(context);
 
@@ -310,6 +322,14 @@ public class BuzzNotificationWorker extends Worker {
                 }
             }
         } finally {
+            if (wakeLock != null) {
+                try {
+                    if (wakeLock.isHeld()) {
+                        wakeLock.release();
+                    }
+                } catch (Exception ignored) {
+                }
+            }
             IS_RUNNING_CHECK.set(false);
         }
     }

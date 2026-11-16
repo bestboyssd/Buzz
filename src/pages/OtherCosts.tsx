@@ -180,7 +180,10 @@ export function OtherCosts() {
 
     // Handle delete cost item
     const handleDeleteCost = (id: string) => {
-        if (!id) return;
+        if (!id || !isRealAdmin) {
+            if (!isRealAdmin) triggerHaptic('error');
+            return;
+        }
         triggerHaptic('success');
         try {
             const costItem = costs.find(c => c.id === id);
@@ -682,14 +685,16 @@ export function OtherCosts() {
                                         {!item.linkedBillId && (
                                             <motion.button 
                                                 type="button"
-                                                whileHover={{ scale: 1.08 }}
-                                                whileTap={{ scale: 0.9 }}
+                                                disabled={!isRealAdmin}
+                                                whileHover={isRealAdmin ? { scale: 1.08 } : undefined}
+                                                whileTap={isRealAdmin ? { scale: 0.9 } : undefined}
                                                 transition={{ type: 'spring', stiffness: 500, damping: 24 }}
                                                 onClick={() => {
+                                                    if (!isRealAdmin) return;
                                                     if (item.id) handleDeleteCost(item.id);
                                                 }}
-                                                className="w-8 h-8 flex items-center justify-center bg-slate-100/80 dark:bg-slate-800/80 hover:bg-rose-50 dark:hover:bg-rose-500/15 hover:text-rose-600 text-slate-400 rounded-xl transition-colors cursor-pointer"
-                                                title="Delete entry"
+                                                className="w-8 h-8 flex items-center justify-center bg-slate-100/80 dark:bg-slate-800/80 hover:bg-rose-50 dark:hover:bg-rose-500/15 hover:text-rose-600 text-slate-400 rounded-xl transition-colors cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
+                                                title={!isRealAdmin ? "Only Administrators can delete entries" : "Delete entry"}
                                             >
                                                 <Trash2 size={15} />
                                             </motion.button>

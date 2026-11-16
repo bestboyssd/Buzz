@@ -39,7 +39,8 @@ import {
 } from "../lib/ProductsContext";
 import { useAuth } from "../lib/AuthContext";
 import { triggerHaptic } from "../lib/haptics";
-import { resizeImage, base64ToBytes, getImageUrl, preloadProductImages } from "../lib/imageUtils";
+import { resizeImage, readUncroppedImageDataUrl, base64ToBytes, getImageUrl, preloadProductImages } from "../lib/imageUtils";
+import { ImageCropperModal } from "../components/ImageCropperModal";
 import { ProfileMenu } from "../components/ProfileMenu";
 import { ProductImagePlaceholder } from "../components/ProductImagePlaceholder";
 import { normalizeProductCategory } from "../lib/geminiApi";
@@ -108,7 +109,7 @@ const SHEET_ITEM_VARIANTS = {
 };
 
 export function Products() {
-  const { user } = useAuth();
+  const { user, isRealAdmin } = useAuth();
   const [isAdding, setIsAdding] = useState(false);
   const [showAddOptions, setShowAddOptions] = useState(false);
   const [isAddingStock, setIsAddingStock] = useState(false);
@@ -229,13 +230,16 @@ export function Products() {
   }, [products, stockFilter]);
 
   const handleDeleteClick = (id?: string) => {
-    if (!id) return;
+    if (!id || !isRealAdmin) return;
     triggerHaptic("medium");
     setConfirmDeleteId(id);
   };
 
   const confirmDelete = async () => {
-    if (!confirmDeleteId) return;
+    if (!confirmDeleteId || !isRealAdmin) {
+      setConfirmDeleteId(null);
+      return;
+    }
     const sourceList = Array.isArray(allProducts) ? allProducts : products;
     const targetProduct = sourceList.find((p) => p.id === confirmDeleteId);
     const targetName = targetProduct ? targetProduct.name : "";
@@ -646,12 +650,14 @@ export function Products() {
                     </motion.button>
                     <motion.button
                       type="button"
+                      disabled={!isRealAdmin}
                       aria-label={`Delete ${product.name}`}
-                      whileHover={{ scale: 1.06, y: -1 }}
-                      whileTap={{ scale: 0.9 }}
+                      title={!isRealAdmin ? "Only Administrators can delete products" : `Delete ${product.name}`}
+                      whileHover={isRealAdmin ? { scale: 1.06, y: -1 } : undefined}
+                      whileTap={isRealAdmin ? { scale: 0.9 } : undefined}
                       transition={{ type: "spring", stiffness: 450, damping: 24 }}
                       onClick={() => handleDeleteClick(product.id)}
-                      className="w-10 h-10 flex items-center justify-center bg-red-50/80 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 border border-red-200/80 dark:border-red-500/25 rounded-xl transition-colors duration-150 cursor-pointer transform-gpu"
+                      className="w-10 h-10 flex items-center justify-center bg-red-50/80 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 border border-red-200/80 dark:border-red-500/25 rounded-xl transition-colors duration-150 cursor-pointer transform-gpu disabled:opacity-35 disabled:pointer-events-none"
                     >
                       <Trash2 size={16} />
                     </motion.button>
@@ -896,6 +902,7 @@ function AddProductModal({
   const [image, setImage] = useState<string | undefined>(
     editingProduct ? getImageUrl(editingProduct.image) : undefined
   );
+  const [cropProductImageSrc, setCropProductImageSrc] = useState<string | null>(null);
   const [isImageChanged, setIsImageChanged] = useState(false);
   const [isProcessingImage, setIsProcessingImage] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -917,18 +924,23 @@ function AddProductModal({
     }
     setIsProcessingImage(true);
     try {
-      const resized = await Promise.race([
-        resizeImage(file),
+      const uncropped = await Promise.race([
+        readUncroppedImageDataUrl(file),
         new Promise<string>((_, reject) =>
           setTimeout(() => reject(new Error("Image processing timed out")), 6000)
         ),
       ]);
-      setImage(resized);
-      setIsImageChanged(true);
+      setCropProductImageSrc(uncropped);
       setFormError("");
     } catch (err) {
       console.error("Image processing failed", err);
-      setFormError("Failed to process image");
+      try {
+        const resized = await resizeImage(file);
+        setImage(resized);
+        setIsImageChanged(true);
+      } catch {
+        setFormError("Failed to process image");
+      }
     } finally {
       setIsProcessingImage(false);
     }
@@ -1323,7 +1335,7 @@ function AddProductModal({
               </div>
               <div>
                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 pl-1">
-                  Stock (Max 2,000)
+                  Stock (Max {MAX_PRODUCT_STOCK.toLocaleString("en-IN")})
                 </label>
                 <input
                   type="number"
@@ -1431,6 +1443,21 @@ function AddProductModal({
             </motion.button>
           </motion.div>
         </div>
+
+        <ImageCropperModal
+          isOpen={Boolean(cropProductImageSrc)}
+          imageSrc={cropProductImageSrc}
+          shape="square"
+          title="Adjust Product Photo"
+          targetSize={360}
+          onClose={() => setCropProductImageSrc(null)}
+          onConfirm={(croppedDataUrl) => {
+            setImage(croppedDataUrl);
+            setIsImageChanged(true);
+            setCropProductImageSrc(null);
+            setFormError("");
+          }}
+        />
       </motion.div>
     </div>
   );

@@ -34,6 +34,11 @@ export interface AssistantAction {
   currentStock?: number;
   quantityChange?: number;
   newStock?: number;
+  cappedAtMaxStock?: boolean;
+  requestedNewStock?: number;
+  requestedAdded?: number;
+  requestedStock?: number;
+  maxCanAdd?: number;
   currentPrice?: number;
   newPrice?: number;
   name?: string;
@@ -44,6 +49,12 @@ export interface AssistantAction {
   attachmentIndex?: number;
   useAttachedImage?: boolean;
   products?: BatchProductItem[];
+  productsToDelete?: Array<{
+    productId: string;
+    productName: string;
+    currentPrice: number;
+    currentStock: number;
+  }>;
   billId?: string;
   oldTotal?: number;
   newTotal?: number;
@@ -510,7 +521,7 @@ CRITICAL CONVERSATIONAL & ACTION CARD RULES:
      * For a single product: name, price (positive ₹), stock (default 0), category (\`"fresh"\` | \`"frozen"\` | \`"cold drinks"\`). If the user uploaded an image or asked to use the uploaded image for this new product, also include \`"useAttachedImage": true, "attachmentIndex": 0\`.
      * For multiple products in one command (e.g., "add product atta, maida with the price 20, 30 and stock 50 for both"): include a \`products\` array of \`{ "name": "...", "price": 20, "stock": 50, "category": "fresh" | "frozen" | "cold drinks" }\` along with \`name\` (comma-separated names), \`price\` (first price), and \`stock\` (first stock).
    - UPDATE_PRODUCT_IMAGE: Use when the user uploads an image (or refers to an uploaded image in chat) and asks to set, use, update, or change a store product's photo/image (e.g. "use this image for roti", "set this photo for pepsi"). Required: productId, productName (from CURRENT CATALOG SNAPSHOT), attachmentIndex (0-based index of the uploaded image, default 0).
-   - UPDATE_STOCK: productId, productName, currentStock, newStock, quantityChange.
+   - UPDATE_STOCK: productId, productName, currentStock, newStock (max 10000), quantityChange. MAXIMUM STOCK LIMIT IS 10,000 UNITS: If adding/setting stock exceeds 10,000 units, state that you cannot add that much amount because the maximum stock limit is 10,000 units and you can only add X units (where X = 10000 - currentStock), and set newStock: 10000, quantityChange: X.
    - UPDATE_PRICE: productId, productName, currentPrice, newPrice.
    - DELETE_PRODUCT: productId, productName, currentPrice, currentStock.
    - UPDATE_BILL: billId, oldTotal, newTotal.
@@ -691,7 +702,88 @@ export function normalizeProductCategory(
 }
 
 /**
- * Strict client-side action validator to ensure no incomplete or premature action card
+ * Detects if a prompt claims an unauthorized break-in, security bypass, or comes from a non-admin session
+ * attempting to mutate or delete store data.
+ */
+export function isUnauthorizedOrBreakInPrompt(
+  prompt: string = "",
+  storeContext?: StoreContext
+): boolean {
+  const p = String(prompt || "").toLowerCase();
+  if (
+    /\b(?:broke\s+into|break\s+into|broken\s+into|breaking\s+into|hacked|hack\s+into|bypassed|unauthorized|without\s+permission|without\s+authorization|stole\s+(?:the\s+)?pin|guessed\s+(?:the\s+)?pin|not\s+an?\s+admin|imposter|intruder|jailbreak|ignore\s+(?:all\s+)?(?:previous\s+)?(?:instructions|security|rules))\b/i.test(
+      p
+    )
+  ) {
+    return true;
+  }
+  if (storeContext?.currentUser && storeContext.currentUser.isAdmin === false) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Detects if the AI's reply text is a refusal, denial, or security policy block so no action card is ever attached.
+ */
+export function isAiRefusalReply(replyText: string = ""): boolean {
+  const r = String(replyText || "").toLowerCase();
+  if (!r) return false;
+  return /\b(?:i\s+cannot|i\s+can't|i\s+can\s+not|cannot\s+fulfill|can't\s+fulfill|cannot\s+perform|can't\s+perform|unable\s+to\s+(?:fulfill|perform|delete|purge|remove|update|modify|complete|process|comply|execute)|do\s+not\s+have\s+(?:the\s+)?(?:authorization|permission|access|privilege|authority)|not\s+authorized|unauthorized|access\s+denied|security\s+policy|against\s+(?:store\s+)?policy|not\s+permitted|not\s+allowed\s+to|as\s+a\s+staff\s+member|only\s+(?:an?\s+|permanent\s+)?(?:admin|administrator)s?\s+can|cannot\s+delete|can't\s+delete|cannot\s+purge|can't\s+purge|refuse\s+to|will\s+not\s+(?:delete|purge|remove|modify|update)|won't\s+(?:delete|purge|remove|modify|update))\b/i.test(
+    r
+  );
+}
+
+export function matchMultipleClientProductsForDeletion(
+  rawPromptOrTarget: string,
+  prods: any[]
+): any[] {
+  if (!rawPromptOrTarget || !Array.isArray(prods) || prods.length === 0) return [];
+  const p = rawPromptOrTarget
+    .toLowerCase()
+    .replace(/^(?:please\s+)?(?:delete|remove)\s+/i, "")
+    .replace(/\s+(?:from\s+(?:the\s+)?(?:catalog|store|inventory)|please)$/i, "")
+    .trim();
+
+  const segments = p
+    .split(/\s*(?:,|\band\b|&|\+)\s*/i)
+    .map((s) =>
+      s
+        .replace(
+          /^(?:just|only|also|the|product|products|item|items|called|named)\s+|\s+(?:product|products|item|items|just|only)$/gi,
+          ""
+        )
+        .trim()
+    )
+    .filter((s) => s.length > 0 && !/^(?:all|everything|every|whole|store|catalog|inventory)$/.test(s));
+
+  const matchedMap = new Map<string, any>();
+  const sortedProds = [...prods].sort((a, b) => (b?.name?.length || 0) - (a?.name?.length || 0));
+
+  for (const seg of segments) {
+    const exact = sortedProds.find(
+      (pr) => pr?.name && String(pr.name).toLowerCase().trim() === seg
+    );
+    if (exact && exact.id) {
+      matchedMap.set(exact.id, exact);
+      continue;
+    }
+    const wordMatch = sortedProds.find((pr) => {
+      if (!pr?.name) return false;
+      const pLower = String(pr.name).toLowerCase().trim();
+      const words = pLower.split(/\s+/);
+      return words.includes(seg) || pLower.includes(seg) || seg.includes(pLower);
+    });
+    if (wordMatch && wordMatch.id) {
+      matchedMap.set(wordMatch.id, wordMatch);
+    }
+  }
+
+  return Array.from(matchedMap.values());
+}
+
+/**
+ * Strict client-side action validator to ensure no incomplete, premature, or refused action card
  * is ever rendered or executed.
  */
 export function validateClientAction(
@@ -704,6 +796,21 @@ export function validateClientAction(
   const rLower = String(replyText || "").toLowerCase();
   const products = storeContext?.products || [];
   const recentBills = storeContext?.recentBills || [];
+
+  // Security Block: Never attach or validate an action card on break-in/unauthorized prompts or AI refusal replies
+  if (isUnauthorizedOrBreakInPrompt(prompt, storeContext)) {
+    return null;
+  }
+
+  const isAuthorizedMultiDeleteFalseRefusal =
+    rawAction?.type === "DELETE_PRODUCT" &&
+    (!storeContext?.currentUser || storeContext.currentUser.isAdmin === true) &&
+    /\b(?:delete|remove)\b/i.test(pLower) &&
+    matchMultipleClientProductsForDeletion(prompt, products).length >= 2;
+
+  if (isAiRefusalReply(replyText) && !isAuthorizedMultiDeleteFalseRefusal) {
+    return null;
+  }
 
   if (
     pLower &&
@@ -846,10 +953,17 @@ export function validateClientAction(
     case "ADD_PRODUCT": {
       if (Array.isArray(action.products) && action.products.length > 0) {
         const validItems: BatchProductItem[] = [];
+        let anyCapped = false;
+        let maxReqStock = 0;
         for (const item of action.products) {
           const itemName = String(item?.name || item?.productName || "").trim();
           const itemPrice = Math.min(MAX_BILL_AMOUNT, Number(item?.price ?? item?.newPrice));
-          const itemStock = Math.min(MAX_PRODUCT_STOCK, Math.max(0, Number(item?.stock) || 0));
+          const rawItemStock = Number(item?.stock) || 0;
+          if (rawItemStock > MAX_PRODUCT_STOCK) {
+            anyCapped = true;
+            maxReqStock = Math.max(maxReqStock, rawItemStock);
+          }
+          const itemStock = Math.min(MAX_PRODUCT_STOCK, Math.max(0, rawItemStock));
           const itemCat = normalizeProductCategory(
             item?.category || action.category,
             itemName
@@ -876,6 +990,10 @@ export function validateClientAction(
           action.price = validItems[0].price;
           action.stock = validItems[0].stock;
           action.category = validItems[0].category || "fresh";
+          if (anyCapped) {
+            action.cappedAtMaxStock = true;
+            action.requestedStock = maxReqStock;
+          }
           return action;
         }
       }
@@ -888,9 +1006,14 @@ export function validateClientAction(
       if (isNaN(price) || price <= 0) {
         return null;
       }
+      const rawStock = Number(action.stock) || 0;
+      if (rawStock > MAX_PRODUCT_STOCK) {
+        action.cappedAtMaxStock = true;
+        action.requestedStock = rawStock;
+      }
       action.name = name;
       action.price = price;
-      action.stock = Math.min(MAX_PRODUCT_STOCK, Math.max(0, Number(action.stock) || 0));
+      action.stock = Math.min(MAX_PRODUCT_STOCK, Math.max(0, rawStock));
       action.category = normalizeProductCategory(action.category, name);
       action.products = [
         {
@@ -905,23 +1028,62 @@ export function validateClientAction(
       return action;
     }
     case "UPDATE_STOCK": {
-      if (!action.productId && action.productName && products.length > 0) {
+      let matched = products.find((p: any) => p.id && p.id === action.productId);
+      if (!matched && action.productName && products.length > 0) {
         const s = String(action.productName).toLowerCase().trim();
-        const m =
+        matched =
           products.find((p: any) => p.name?.toLowerCase().trim() === s) ||
           products.find((p: any) => p.name?.toLowerCase().includes(s));
-        if (m) {
-          action.productId = m.id;
-          action.productName = m.name;
-          action.currentStock = Number(m.stock) || 0;
-        }
+      }
+      if (matched) {
+        action.productId = matched.id;
+        action.productName = matched.name;
+        action.currentStock = Number(matched.stock) || 0;
       }
       if (!action.productId && !action.productName) return null;
-      const newStock = Number(action.newStock);
+      const currentStock = Number(action.currentStock) || 0;
+      let newStock = Number(action.newStock);
+      if (isNaN(newStock) && action.quantityChange !== undefined) {
+        newStock = Math.max(0, currentStock + Number(action.quantityChange));
+      }
       if (isNaN(newStock) || newStock < 0) return null;
-      action.newStock = Math.min(MAX_PRODUCT_STOCK, newStock);
-      if (action.currentStock !== undefined) {
-        action.quantityChange = action.newStock - Number(action.currentStock);
+
+      let requestedNewStock = Number(action.requestedNewStock || newStock);
+      if (action.productName) {
+        let promptWithoutProd = pLower.replace(String(action.productName).toLowerCase(), " ");
+        for (const tok of String(action.productName).toLowerCase().split(/\s+/)) {
+          if (tok.length >= 2) {
+            promptWithoutProd = promptWithoutProd.replace(tok, " ");
+          }
+        }
+        const promptQtyMatch = promptWithoutProd.match(/(\d+)/);
+        const isReducePrompt = /\b(reduce|decrease|deduct|remove|minus|subtract|komao|komiye|কমাও)\b/i.test(pLower);
+        const isSetPrompt = /\b(set|make)\b/i.test(pLower) || /\b(?:change|update)\s+(?:the\s+)?stock\b[\s\S]*?\bto\s+\d+/i.test(pLower);
+        if (promptQtyMatch && !isReducePrompt) {
+          const parsedQty = parseInt(promptQtyMatch[1], 10);
+          if (!isNaN(parsedQty) && parsedQty > 0) {
+            const candidateTarget = isSetPrompt ? parsedQty : currentStock + parsedQty;
+            if (candidateTarget > requestedNewStock) {
+              requestedNewStock = candidateTarget;
+            }
+          }
+        }
+      }
+
+      if (requestedNewStock > MAX_PRODUCT_STOCK || action.cappedAtMaxStock) {
+        const maxCanAdd = Math.max(0, MAX_PRODUCT_STOCK - currentStock);
+        const requestedAdded = Math.max(1, Number(action.requestedAdded || requestedNewStock - currentStock));
+        action.cappedAtMaxStock = true;
+        action.requestedNewStock = requestedNewStock;
+        action.requestedAdded = requestedAdded;
+        action.maxCanAdd = maxCanAdd;
+        action.newStock = MAX_PRODUCT_STOCK;
+        action.quantityChange = maxCanAdd;
+      } else {
+        action.newStock = Math.min(MAX_PRODUCT_STOCK, newStock);
+        if (action.currentStock !== undefined) {
+          action.quantityChange = action.newStock - currentStock;
+        }
       }
       return action;
     }
@@ -966,12 +1128,57 @@ export function validateClientAction(
       return action;
     }
     case "DELETE_PRODUCT": {
+      const multiMatchedFromPrompt = matchMultipleClientProductsForDeletion(prompt, products);
+      const multiFromAction: any[] = [];
+      const rawArray = Array.isArray(action.productsToDelete)
+        ? action.productsToDelete
+        : Array.isArray(action.products)
+        ? action.products
+        : [];
+      for (const item of rawArray) {
+        const itemId = item?.productId || item?.id;
+        const itemName = String(item?.productName || item?.name || "").toLowerCase().trim();
+        const found =
+          products.find((p: any) => itemId && p.id === itemId) ||
+          (itemName
+            ? products.find((p: any) => p.name?.toLowerCase().trim() === itemName) ||
+              products.find((p: any) => p.name?.toLowerCase().includes(itemName))
+            : undefined);
+        if (found && !multiFromAction.some((m) => m.id === found.id)) {
+          multiFromAction.push(found);
+        }
+      }
+
+      const combinedMulti =
+        multiMatchedFromPrompt.length >= 2
+          ? multiMatchedFromPrompt
+          : multiFromAction.length >= 2
+          ? multiFromAction
+          : [];
+
+      if (combinedMulti.length >= 2) {
+        action.productId = combinedMulti[0].id;
+        action.productName = combinedMulti.map((p: any) => p.name).join(", ");
+        action.currentPrice = Number(combinedMulti[0].price) || 0;
+        action.currentStock = Number(combinedMulti[0].stock) || 0;
+        action.productsToDelete = combinedMulti.map((p: any) => ({
+          productId: p.id,
+          productName: p.name,
+          currentPrice: Number(p.price) || 0,
+          currentStock: Number(p.stock) || 0,
+        }));
+        return action;
+      }
+
       let matched = products.find((p: any) => p.id && p.id === action.productId);
       if (!matched && action.productName && products.length > 0) {
         const s = String(action.productName).toLowerCase().trim();
         matched =
           products.find((p: any) => p.name?.toLowerCase().trim() === s) ||
           products.find((p: any) => p.name?.toLowerCase().includes(s));
+      }
+      if (!matched && multiMatchedFromPrompt.length === 1) {
+        matched = multiMatchedFromPrompt[0];
       }
       if (matched) {
         action.productId = matched.id;
@@ -1008,6 +1215,14 @@ export function validateClientAction(
             };
           }
         }
+        action.productsToDelete = [
+          {
+            productId: matched.id,
+            productName: matched.name,
+            currentPrice: Number(matched.price) || 0,
+            currentStock: Number(matched.stock) || 0,
+          },
+        ];
       }
       if (!action.productId && !action.productName) return null;
       return action;
@@ -1701,10 +1916,12 @@ export async function askGeminiAssistant(
             const replyStr = String(data?.reply || "").trim();
             if (replyStr) {
               data.reply = replyStr;
-              data.action =
-                validateClientAction(data.action, prompt, data.reply, compactedContext) ||
-                localActionCandidate ||
-                null;
+              data.action = validateClientAction(
+                data.action || localActionCandidate,
+                prompt,
+                data.reply,
+                compactedContext
+              );
               return data;
             }
           } else if (data?.error) {
@@ -1838,8 +2055,21 @@ export async function askGeminiAssistantStream(
       String(payload.reply || lastStreamedChunk || "").trim()
     );
     if (!cleanReply) return;
-    const act = payload.action;
-    if (act && (act.type === "UPDATE_STOCK" || act.type === "UPDATE_PRICE")) {
+    let act = payload.action;
+    if (act && act.type === "UPDATE_STOCK" && act.cappedAtMaxStock) {
+      const maxCanAdd = Number(act.maxCanAdd ?? act.quantityChange ?? 0);
+      const requestedAdded = Number(act.requestedAdded ?? 0);
+      const curStock = Number(act.currentStock ?? 0);
+      if (maxCanAdd <= 0) {
+        cleanReply = `I cannot add ${requestedAdded > 0 ? `${requestedAdded} units` : "more stock"} to **${act.productName}** because its stock is already at the maximum limit of **10,000 units** (only **0 units** can be added).`;
+        act = null;
+      } else {
+        cleanReply = `I cannot add ${requestedAdded} units to **${act.productName}** because the maximum stock limit is **10,000 units** (current stock: **${curStock}**). I can only add **${maxCanAdd} units** to reach the **10,000-unit** limit. Please confirm below to add **${maxCanAdd} units**:`;
+      }
+    } else if (act && act.type === "ADD_PRODUCT" && act.cappedAtMaxStock) {
+      const reqStock = Number(act.requestedStock ?? 0);
+      cleanReply = `I cannot add ${reqStock} units for **${act.name}** because the maximum stock limit is **10,000 units**. I can only add **10,000 units**. Please confirm below to add **${act.name}** with **10,000 units**:`;
+    } else if (act && (act.type === "UPDATE_STOCK" || act.type === "UPDATE_PRICE")) {
       const claimsAlreadyUpdatedOrWrongDelete =
         /\b(?:i\s+have\s+(?:now\s+)?(?:manually\s+)?(?:updated|added|increased|decreased|reduced|changed|set)|i've\s+(?:updated|added|increased|decreased|reduced|changed|set)|has\s+been\s+(?:successfully\s+)?(?:updated|increased|decreased|reduced|added|changed|set)|remove\s+the\b[\s\S]{0,60}?\bfrom\s+the\s+catalog|permanently\s+delete\s+the\s+item|delete\s+this\s+product)\b/i.test(
           cleanReply
@@ -1864,6 +2094,7 @@ export async function askGeminiAssistantStream(
     } catch {}
     onComplete({
       ...payload,
+      action: act,
       reply: cleanReply,
     });
   };
@@ -1932,10 +2163,12 @@ export async function askGeminiAssistantStream(
                 if (replyStr) {
                   const payload: AssistantResponse = {
                     reply: replyStr,
-                    action:
-                      validateClientAction(data.action, prompt, replyStr, compactedContext) ||
-                      localActionCandidate ||
-                      null,
+                    action: validateClientAction(
+                      data.action || localActionCandidate,
+                      prompt,
+                      replyStr,
+                      compactedContext
+                    ),
                     thought: data.thought || generateDynamicThought(prompt, replyStr, storeContext),
                   };
                   emitChunk(replyStr);
@@ -2041,13 +2274,12 @@ export async function askGeminiAssistantStream(
               finalThought = generateDynamicThought(prompt, parsed.fullText, storeContext);
             }
 
-            const validatedAction =
-              validateClientAction(
-                parsed.action,
-                prompt,
-                parsed.fullText,
-                compactedContext
-              ) || localActionCandidate || null;
+            const validatedAction = validateClientAction(
+              parsed.action || localActionCandidate,
+              prompt,
+              parsed.fullText,
+              compactedContext
+            );
 
             finalPayload = {
               reply: parsed.fullText || lastStreamedChunk,
@@ -2121,10 +2353,12 @@ export async function askGeminiAssistantStream(
         }
         const built: AssistantResponse = {
           reply: clean,
-          action:
-            validateClientAction(actionData, prompt, clean, compactedContext) ||
-            localActionCandidate ||
-            null,
+          action: validateClientAction(
+            actionData || localActionCandidate,
+            prompt,
+            clean,
+            compactedContext
+          ),
           thought: generateDynamicThought(prompt, clean, storeContext),
           rawText: accumulatedRaw,
         };
@@ -2165,10 +2399,12 @@ export async function askGeminiAssistantStream(
           const built: AssistantResponse = {
             ...bridgeRes,
             reply: replyStr,
-            action:
-              validateClientAction(bridgeRes.action, prompt, replyStr, compactedContext) ||
-              localActionCandidate ||
-              null,
+            action: validateClientAction(
+              bridgeRes.action || localActionCandidate,
+              prompt,
+              replyStr,
+              compactedContext
+            ),
           };
           emitChunk(replyStr);
           safeComplete(built);
@@ -2219,7 +2455,12 @@ export async function askGeminiAssistantStream(
     if (lastStreamedChunk) {
       safeComplete({
         reply: lastStreamedChunk,
-        action: validateClientAction(null, prompt, lastStreamedChunk, compactedContext) || localActionCandidate || null,
+        action: validateClientAction(
+          localActionCandidate,
+          prompt,
+          lastStreamedChunk,
+          compactedContext
+        ),
         thought: generateDynamicThought(prompt, lastStreamedChunk, storeContext),
       });
     } else {
@@ -2567,6 +2808,16 @@ export function generateClientStoreResponse(
     /\b(ask\s+me|what\s+details|what\s+info|ask\s+the\s+requirements|ask\s+all\s+the\s+details|details\s+u\s+need|details\s+you\s+need)\b/i.test(
       p
     );
+
+  if (isUnauthorizedOrBreakInPrompt(prompt, storeContext)) {
+    return {
+      reply:
+        "🔒 **Access Denied:** Unauthorized access or store modification commands from a non-administrator session are strictly blocked.",
+      action: null,
+      thought: "Blocked unauthorized store modification request per security policy.",
+      thoughtDuration: 1,
+    };
+  }
 
   const lastAssistantMsg =
     [...(conversationHistory || [])]
@@ -3018,8 +3269,37 @@ export function generateClientStoreResponse(
     !p.includes("bill") &&
     !p.includes("chat")
   ) {
-    const cleanTarget = delTargetName.replace(/^(?:the\s+|product\s+|item\s+)/i, "").trim().toLowerCase();
-    const matched = findBestClientProduct(products, cleanTarget);
+    const multiMatched = matchMultipleClientProductsForDeletion(prompt, products);
+    if (multiMatched.length >= 2 && !wantsToBeAsked) {
+      const namesList = multiMatched.map((m: any) => `**${m.name}**`).join(", ");
+      const bulletLines = multiMatched
+        .map((m: any) => `• **${m.name}** — ₹${m.price} (${m.stock} units)`)
+        .join("\n");
+      return {
+        reply: `⚠️ Prepared catalog deletion for ${multiMatched.length} products (${namesList}):\n\n${bulletLines}\n\nConfirm below to permanently remove these items from your catalog:`,
+        action: {
+          type: "DELETE_PRODUCT",
+          productId: multiMatched[0].id,
+          productName: multiMatched.map((m: any) => m.name).join(", "),
+          currentPrice: multiMatched[0].price,
+          currentStock: multiMatched[0].stock,
+          productsToDelete: multiMatched.map((m: any) => ({
+            productId: m.id,
+            productName: m.name,
+            currentPrice: Number(m.price) || 0,
+            currentStock: Number(m.stock) || 0,
+          })),
+        },
+        thought: `Located ${multiMatched.length} products (${multiMatched.map((m: any) => m.name).join(", ")}) for deletion confirmation.`,
+        thoughtDuration: 1,
+      };
+    }
+
+    const cleanTarget = delTargetName
+      .replace(/^(?:just\s+|only\s+|the\s+|product\s+|item\s+)/i, "")
+      .trim()
+      .toLowerCase();
+    const matched = multiMatched[0] || findBestClientProduct(products, cleanTarget);
 
     if (matched && !wantsToBeAsked) {
       return {
@@ -3030,6 +3310,14 @@ export function generateClientStoreResponse(
           productName: matched.name,
           currentPrice: matched.price,
           currentStock: matched.stock,
+          productsToDelete: [
+            {
+              productId: matched.id,
+              productName: matched.name,
+              currentPrice: Number(matched.price) || 0,
+              currentStock: Number(matched.stock) || 0,
+            },
+          ],
         },
         thought: `Located product "${matched.name}" (ID: ${matched.id}) for deletion confirmation.`,
         thoughtDuration: 1,
@@ -3238,6 +3526,36 @@ export function generateClientStoreResponse(
       } else {
         newStock = currentStock + qty;
         quantityChange = qty;
+      }
+
+      if (newStock > MAX_PRODUCT_STOCK) {
+        const maxCanAdd = Math.max(0, MAX_PRODUCT_STOCK - currentStock);
+        const requestedAdded = Math.max(1, newStock - currentStock);
+        if (maxCanAdd <= 0) {
+          return {
+            reply: `I cannot add ${requestedAdded} units to **${matched.name}** because its stock is already at the maximum limit of **10,000 units** (only **0 units** can be added).`,
+            action: null,
+            thought: `Matched product "${matched.name}" (ID: ${matched.id}). Current stock (${currentStock}) is already at the 10,000-unit limit.`,
+            thoughtDuration: 1,
+          };
+        }
+        return {
+          reply: `I cannot add ${requestedAdded} units to **${matched.name}** because the maximum stock limit is **10,000 units** (current stock: **${currentStock}**). I can only add **${maxCanAdd} units** to reach the **10,000-unit** limit. Please confirm below to add **${maxCanAdd} units**:`,
+          action: {
+            type: "UPDATE_STOCK",
+            productId: matched.id,
+            productName: matched.name,
+            currentStock,
+            quantityChange: maxCanAdd,
+            newStock: MAX_PRODUCT_STOCK,
+            cappedAtMaxStock: true,
+            requestedNewStock: newStock,
+            requestedAdded,
+            maxCanAdd,
+          },
+          thought: `Matched product "${matched.name}" (ID: ${matched.id}). Capped requested addition of ${requestedAdded} units to ${maxCanAdd} units (max 10,000).`,
+          thoughtDuration: 1,
+        };
       }
 
       return {
@@ -3712,6 +4030,7 @@ export function formatTextForSpeech(raw: string, maxChars: number = 520): string
   const hasBengali = /[\u0980-\u09FF]/.test(raw);
   const currencyWord = hasBengali ? "টাকা" : "rupees";
   return raw
+    .replace(/^(?:read\s+the\s+following\s+message\s+aloud[^:\n]*:|say\s+in\s+a\s+[^:\n]*:)\s*/i, "")
     .replace(/```[\s\S]*?```/g, "")
     .replace(/<thought>[\s\S]*?<\/thought>/g, "")
     .replace(/#([a-zA-Z0-9_-]{5,})/g, hasBengali ? "ট্রানজেকশন" : "transaction")
@@ -3817,8 +4136,9 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
   if (!cleanKey) {
     throw new Error("Empty speech text");
   }
-  if (clientTtsCache.has(cleanKey)) {
-    return clientTtsCache.get(cleanKey)!;
+  const cacheKey = `v2:${cleanKey}`;
+  if (clientTtsCache.has(cacheKey)) {
+    return clientTtsCache.get(cacheKey)!;
   }
 
   // 1. Call server endpoint /api/gemini/tts when direct HTTP is available
@@ -3850,7 +4170,7 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
               const oldestKey = clientTtsCache.keys().next().value;
               if (oldestKey) clientTtsCache.delete(oldestKey);
             }
-            clientTtsCache.set(cleanKey, dataUri);
+            clientTtsCache.set(cacheKey, dataUri);
             return dataUri;
           }
         } else {
@@ -3873,7 +4193,7 @@ export async function synthesizeGeminiVoice(text: string, timeoutMs: number = 50
         const oldestKey = clientTtsCache.keys().next().value;
         if (oldestKey) clientTtsCache.delete(oldestKey);
       }
-      clientTtsCache.set(cleanKey, dataUri);
+      clientTtsCache.set(cacheKey, dataUri);
       return dataUri;
     }
   } catch {}
@@ -3892,12 +4212,35 @@ export function inferClientActionFromTurn(
   storeContext?: StoreContext,
   conversationHistory: ConversationTurnInput[] = []
 ): AssistantAction | null {
+  if (
+    isUnauthorizedOrBreakInPrompt(rawPrompt, storeContext) ||
+    isAiRefusalReply(replyText)
+  ) {
+    return null;
+  }
+
   const products = storeContext?.products || [];
   if (products.length === 0) return null;
 
   if (storeContext) {
     const det = generateClientStoreResponse(rawPrompt, storeContext, conversationHistory);
     if (det?.action) {
+      // Never infer a destructive action unless the AI reply explicitly confirms preparing it
+      if (
+        det.action.type === "PURGE_STORE_DATA" ||
+        det.action.type === "DELETE_PRODUCT" ||
+        det.action.type === "DELETE_BILL" ||
+        det.action.type === "DELETE_EXPENSE"
+      ) {
+        if (
+          replyText &&
+          !/\b(confirm\s+below|prepared|please\s+confirm|tap\s+confirm|ready\s+to\s+delete|ready\s+to\s+purge)\b/i.test(
+            replyText
+          )
+        ) {
+          return null;
+        }
+      }
       return det.action;
     }
   }

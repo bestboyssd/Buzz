@@ -9,7 +9,7 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export const MAX_BILL_AMOUNT = 10000;
-export const MAX_PRODUCT_STOCK = 2000;
+export const MAX_PRODUCT_STOCK = 10000;
 
 export function formatPrice(price: number | string | undefined | null): string {
   if (price === undefined || price === null || price === '') {

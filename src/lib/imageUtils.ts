@@ -407,3 +407,96 @@ export async function compressProfileImage(file: File | Blob | string): Promise<
     reader.readAsDataURL(file);
   });
 }
+
+/**
+ * Loads a File, Blob, or dataURL into an uncropped, EXIF-oriented data URL
+ * (max dimension 1200px) so the user can interactively pan & zoom any part
+ * of the image (top, middle, bottom) inside ImageCropperModal.
+ */
+export async function readUncroppedImageDataUrl(
+  file: File | Blob | string,
+  maxDim: number = 1200
+): Promise<string> {
+  if (typeof file === "string") {
+    return file;
+  }
+
+  if (typeof window !== "undefined" && "createImageBitmap" in window) {
+    try {
+      let bitmap: ImageBitmap | null = null;
+      try {
+        bitmap = await (createImageBitmap as any)(file, { imageOrientation: "from-image" });
+      } catch (_) {
+        bitmap = await createImageBitmap(file);
+      }
+      if (bitmap) {
+        let width = bitmap.width || 600;
+        let height = bitmap.height || 600;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round(height * (maxDim / width));
+            width = maxDim;
+          } else {
+            width = Math.round(width * (maxDim / height));
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, width);
+        canvas.height = Math.max(1, height);
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = "high";
+          ctx.drawImage(bitmap, 0, 0, width, height);
+        }
+        bitmap.close?.();
+        return canvas.toDataURL("image/jpeg", 0.9);
+      }
+    } catch (_) {}
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target?.result as string;
+      if (!dataUrl) {
+        reject(new Error("Unable to read image file"));
+        return;
+      }
+      const img = new Image();
+      img.onload = () => {
+        try {
+          let width = img.naturalWidth || img.width || 600;
+          let height = img.naturalHeight || img.height || 600;
+          if (width > maxDim || height > maxDim) {
+            if (width > height) {
+              height = Math.round(height * (maxDim / width));
+              width = maxDim;
+            } else {
+              width = Math.round(width * (maxDim / height));
+              height = maxDim;
+            }
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = Math.max(1, width);
+          canvas.height = Math.max(1, height);
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = "high";
+            ctx.drawImage(img, 0, 0, width, height);
+          }
+          resolve(canvas.toDataURL("image/jpeg", 0.9));
+        } catch (_) {
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    };
+    reader.onerror = () => reject(new Error("Failed to read image file"));
+    reader.readAsDataURL(file);
+  });
+}
+

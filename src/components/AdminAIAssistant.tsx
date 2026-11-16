@@ -85,12 +85,21 @@ import {
   wakeUpBuzzServer,
   sanitizeLatexAndMathFormatting,
   inferClientActionFromTurn,
+  isAiRefusalReply,
+  isUnauthorizedOrBreakInPrompt,
   ConversationTurnInput,
   ChatAttachment,
   ChatMessage,
   AssistantAction,
   StoreContext,
 } from "../lib/geminiApi";
+
+interface QueuedMessageItem {
+  id: string;
+  rawPrompt: string;
+  attachments: ChatAttachment[];
+  quotedText: string;
+}
 
 interface AdminAIAssistantProps {
   isOpen: boolean;
@@ -516,7 +525,10 @@ export function AdminAIAssistant({
       filtered.push({
         ...m,
         ...(validAtts && validAtts.length > 0 ? { attachments: validAtts } : { attachments: undefined }),
-        action: m.action ? validateClientAction(m.action, "", text) : null,
+        action:
+          isRealAdmin && m.action && !isAiRefusalReply(text)
+            ? validateClientAction(m.action, "", text)
+            : null,
       });
     }
     return filtered;
@@ -635,6 +647,13 @@ export function AdminAIAssistant({
   const mediaFileInputRef = useRef<HTMLInputElement>(null);
   const messagesRef = useRef<ChatMessage[]>(messages);
   messagesRef.current = messages;
+
+  // Queued messages typed while Buzz AI is writing a response
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessageItem[]>([]);
+  const queuedMessagesRef = useRef<QueuedMessageItem[]>([]);
+  queuedMessagesRef.current = queuedMessages;
+  const isDequeuingRef = useRef(false);
+  const queueTimeoutRef = useRef<number | null>(null);
 
   const isAiBusy = useMemo(
     () =>
@@ -1312,9 +1331,9 @@ export function AdminAIAssistant({
     const isPrimaryOwner =
       user?.email?.toLowerCase().trim() === "suman.das.199972@gmail.com" ||
       Boolean(matchedSelf?.isSuperAdmin);
-    const effectiveUserIsAdmin = Boolean(
-      isPrimaryOwner || isRealAdmin || isAdmin || matchedSelf?.isAdmin || matchedSelf?.role === "admin"
-    );
+    // Strict security: only permanent Admins/SuperAdmins are marked as Admin in AI storeContext.
+    // Standard staff accounts that entered the PIN remain isAdmin: false so Buzz AI knows they are staff.
+    const effectiveUserIsAdmin = Boolean(isPrimaryOwner || isRealAdmin);
 
     const currentUser = user
       ? {
@@ -2138,7 +2157,7 @@ export function AdminAIAssistant({
   };
 
   const handlePasteMedia = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    if (isAiBusy || isRecording) return;
+    if (isRecording) return;
     const mediaFiles = extractClipboardMediaFiles(e.clipboardData);
     if (mediaFiles.length > 0) {
       e.preventDefault();
@@ -2150,7 +2169,7 @@ export function AdminAIAssistant({
   useEffect(() => {
     if (!isOpen) return;
     const onWindowPaste = (e: ClipboardEvent) => {
-      if (isAiBusy || isRecording) return;
+      if (isRecording) return;
       if (e.defaultPrevented) return;
       const mediaFiles = extractClipboardMediaFiles(e.clipboardData);
       if (mediaFiles.length > 0) {
@@ -2162,7 +2181,7 @@ export function AdminAIAssistant({
     return () => {
       window.removeEventListener("paste", onWindowPaste);
     };
-  }, [isOpen, isAiBusy, isRecording]);
+  }, [isOpen, isRecording]);
 
   const handleRemovePendingAttachment = (attId: string) => {
     triggerHaptic("light");
@@ -2253,11 +2272,56 @@ export function AdminAIAssistant({
     return action;
   };
 
-  const handleSendMessage = async (textToSend?: string) => {
-    const rawPrompt = (textToSend !== undefined ? textToSend : input).trim();
-    const attachmentsToSend = [...pendingAttachmentsRef.current];
-    const activeQuote = quotedTextRef.current.trim();
+  const handleSendMessage = async (
+    textToSend?: string,
+    fromQueuedItem?: QueuedMessageItem
+  ) => {
+    const rawPrompt = (
+      fromQueuedItem
+        ? fromQueuedItem.rawPrompt
+        : textToSend !== undefined
+        ? textToSend
+        : input
+    ).trim();
+    const attachmentsToSend = fromQueuedItem
+      ? [...fromQueuedItem.attachments]
+      : [...pendingAttachmentsRef.current];
+    const activeQuote = fromQueuedItem
+      ? fromQueuedItem.quotedText.trim()
+      : quotedTextRef.current.trim();
     if (!rawPrompt && attachmentsToSend.length === 0 && !activeQuote) return;
+
+    // If Buzz AI is currently generating/streaming a reply and the user submits a new message,
+    // queue it so it automatically dispatches as soon as the current answer finishes!
+    if ((loading || isAiBusy) && !fromQueuedItem) {
+      triggerHaptic("light");
+      if (inputRef.current) {
+        inputRef.current.style.height = "36px";
+      }
+      if (textToSend === undefined) {
+        setInput("");
+      }
+      if (activeQuote) {
+        quotedTextRef.current = "";
+        setQuotedText("");
+      }
+      if (attachmentsToSend.length > 0) {
+        pendingAttachmentsRef.current = [];
+        setPendingAttachments([]);
+      }
+      const newQueued: QueuedMessageItem = {
+        id: `queued-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        rawPrompt,
+        attachments: attachmentsToSend,
+        quotedText: activeQuote,
+      };
+      setQueuedMessages((prev) => {
+        const next = [...prev, newQueued];
+        queuedMessagesRef.current = next;
+        return next;
+      });
+      return;
+    }
 
     const baseQuestion =
       rawPrompt ||
@@ -2272,26 +2336,6 @@ export function AdminAIAssistant({
     const promptText = activeQuote
       ? `Regarding this quoted text from our chat: "${activeQuote}"\n\n${baseQuestion}`
       : baseQuestion;
-
-    // If a previous request was still winding down when the user sends a new message,
-    // cleanly abort it instead of silently dropping the user's new message!
-    if (loading) {
-      if (abortControllerRef.current) {
-        try {
-          abortControllerRef.current.abort();
-        } catch {}
-        abortControllerRef.current = null;
-      }
-      if (activeStopwatchRef.current !== null) {
-        window.clearInterval(activeStopwatchRef.current);
-        activeStopwatchRef.current = null;
-      }
-      if (activeWatchdogRef.current !== null) {
-        window.clearTimeout(activeWatchdogRef.current);
-        activeWatchdogRef.current = null;
-      }
-      activeAssistantMsgIdRef.current = null;
-    }
 
     // Ensure any previous speech playback is stopped when sending a new message
     stopAllSpeechPlayback();
@@ -2316,18 +2360,21 @@ export function AdminAIAssistant({
     }
 
     triggerHaptic("medium");
-    inputRef.current?.blur();
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-    }
-    setInput("");
-    if (activeQuote) {
-      quotedTextRef.current = "";
-      setQuotedText("");
-    }
-    if (attachmentsToSend.length > 0) {
-      pendingAttachmentsRef.current = [];
-      setPendingAttachments([]);
+    if (!fromQueuedItem) {
+      if (inputRef.current) {
+        inputRef.current.style.height = "36px";
+      }
+      if (textToSend === undefined) {
+        setInput("");
+      }
+      if (activeQuote) {
+        quotedTextRef.current = "";
+        setQuotedText("");
+      }
+      if (attachmentsToSend.length > 0) {
+        pendingAttachmentsRef.current = [];
+        setPendingAttachments([]);
+      }
     }
     setErrorMessage("");
 
@@ -2568,21 +2615,45 @@ export function AdminAIAssistant({
           activeWatchdogRef.current = null;
           activeAssistantMsgIdRef.current = null;
 
-          const effectiveReply = String(finalPayload.reply || "").trim();
-          const rawCandidateAction =
-            finalPayload.action ||
-            inferClientActionFromTurn(
-              rawPrompt,
-              effectiveReply,
-              storeContext,
-              historyPayload
-            );
-          const effectiveAction = resolveUploadedImageForAction(
-            rawCandidateAction,
-            attachmentsToSend,
-            newHistory,
-            rawPrompt
-          );
+          let effectiveReply = String(finalPayload.reply || "").trim();
+          const isBlockedOrRefused =
+            !isRealAdmin ||
+            isUnauthorizedOrBreakInPrompt(rawPrompt, storeContext) ||
+            isAiRefusalReply(effectiveReply);
+          const rawCandidateAction = isBlockedOrRefused
+            ? null
+            : finalPayload.action ||
+              inferClientActionFromTurn(
+                rawPrompt,
+                effectiveReply,
+                storeContext,
+                historyPayload
+              );
+          let effectiveAction = isBlockedOrRefused
+            ? null
+            : resolveUploadedImageForAction(
+                rawCandidateAction,
+                attachmentsToSend,
+                newHistory,
+                rawPrompt
+              );
+
+          if (effectiveAction && effectiveAction.type === "UPDATE_STOCK" && (effectiveAction as any).cappedAtMaxStock) {
+            const maxAdd = Number((effectiveAction as any).maxCanAdd ?? effectiveAction.quantityChange ?? 0);
+            const reqAdd = Number((effectiveAction as any).requestedAdded ?? 0);
+            const curS = Number(effectiveAction.currentStock ?? 0);
+            const pName = effectiveAction.productName || "this product";
+            if (maxAdd <= 0) {
+              effectiveReply = `I cannot add ${reqAdd > 0 ? `${reqAdd} units` : "more stock"} to **${pName}** because its stock is already at the maximum limit of **10,000 units** (only **0 units** can be added).`;
+              effectiveAction = null;
+            } else {
+              effectiveReply = `I cannot add ${reqAdd} units to **${pName}** because the maximum stock limit is **10,000 units** (current stock: **${curS}**). I can only add **${maxAdd} units** to reach the **10,000-unit** limit. Please confirm below to add **${maxAdd} units**:`;
+            }
+          } else if (effectiveAction && effectiveAction.type === "ADD_PRODUCT" && (effectiveAction as any).cappedAtMaxStock) {
+            const reqStock = Number((effectiveAction as any).requestedStock ?? 0);
+            const pName = effectiveAction.name || "this product";
+            effectiveReply = `I cannot add ${reqStock} units for **${pName}** because the maximum stock limit is **10,000 units**. I can only add **10,000 units**. Please confirm below to add **${pName}** with **10,000 units**:`;
+          }
 
           const elapsedSec = computeFinalThoughtSeconds(
             sendStartTime,
@@ -2676,6 +2747,42 @@ export function AdminAIAssistant({
     }
   };
 
+  // Automatically process the next queued message as soon as Buzz AI finishes its current turn
+  useEffect(() => {
+    if (isAiBusy || loading) {
+      if (queueTimeoutRef.current !== null) {
+        window.clearTimeout(queueTimeoutRef.current);
+        queueTimeoutRef.current = null;
+      }
+      isDequeuingRef.current = false;
+      return;
+    }
+
+    if (queuedMessages.length === 0 || isDequeuingRef.current) return;
+
+    isDequeuingRef.current = true;
+    const [nextItem, ...rest] = queuedMessages;
+    queuedMessagesRef.current = rest;
+    setQueuedMessages(rest);
+
+    // Micro-delay gives React time to settle previous assistant message & provides smooth UI pacing
+    queueTimeoutRef.current = window.setTimeout(() => {
+      queueTimeoutRef.current = null;
+      isDequeuingRef.current = false;
+      handleSendMessage(nextItem.rawPrompt, nextItem);
+    }, 100);
+  }, [isAiBusy, loading, queuedMessages]);
+
+  // Clean up any pending queue timers when assistant unmounts
+  useEffect(() => {
+    return () => {
+      if (queueTimeoutRef.current !== null) {
+        window.clearTimeout(queueTimeoutRef.current);
+        queueTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   // Helper so mobile WebView / offline writes settle immediately after local IndexedDB commit
   const settleWriteFast = <T,>(promise: Promise<T>, ms: number = 1400): Promise<T | undefined> =>
     Promise.race([
@@ -2693,6 +2800,11 @@ export function AdminAIAssistant({
     setExecutingActionId(messageId);
 
     try {
+      if (!isRealAdmin) {
+        throw new Error(
+          "Access Denied: Only permanent Administrators can execute store modifications."
+        );
+      }
       if (action.type === "UPDATE_STOCK") {
         let targetId = action.productId;
 
@@ -2715,10 +2827,10 @@ export function AdminAIAssistant({
         if (isNaN(rawStockVal) || rawStockVal < 0) {
           throw new Error("Invalid target stock value specified.");
         }
-        if (rawStockVal > 2000) {
-          throw new Error("Cannot stock a product above the maximum limit of 2,000 units.");
+        if (rawStockVal > 10000) {
+          throw new Error("Cannot stock a product above the maximum limit of 10,000 units.");
         }
-        const newStockVal = Math.min(2000, rawStockVal);
+        const newStockVal = Math.min(10000, rawStockVal);
 
         updateProductOptimistic(targetId, { stock: newStockVal });
         await settleWriteFast(
@@ -2870,8 +2982,8 @@ export function AdminAIAssistant({
         }
 
         for (const item of itemsToCreate) {
-          if ((Number(item.stock) || 0) > 2000) {
-            throw new Error(`Cannot stock "${item.name}" above the maximum limit of 2,000 units.`);
+          if ((Number(item.stock) || 0) > 10000) {
+            throw new Error(`Cannot stock "${item.name}" above the maximum limit of 10,000 units.`);
           }
           if ((Number(item.price) || 0) > 10000) {
             throw new Error(`Price for "${item.name}" cannot exceed ₹10,000.`);
@@ -2886,7 +2998,7 @@ export function AdminAIAssistant({
           const newProdPayload: Record<string, any> = {
             name: cleanItemName,
             price: Math.min(10000, Math.max(0, Number(item.price) || 0)),
-            stock: Math.min(2000, Math.max(0, Number(item.stock) || 0)),
+            stock: Math.min(10000, Math.max(0, Number(item.stock) || 0)),
             category: normalizeProductCategory(
               item.category || action.category,
               cleanItemName
@@ -2977,6 +3089,11 @@ export function AdminAIAssistant({
 
         triggerHaptic("success");
       } else if (action.type === "DELETE_BILL") {
+        if (!isRealAdmin) {
+          throw new Error(
+            "Access Denied: Only permanent Administrators can delete transaction bills."
+          );
+        }
         const targetBillId = action.billId;
         if (!targetBillId) {
           throw new Error("Missing transaction ID for bill deletion.");
@@ -3011,35 +3128,76 @@ export function AdminAIAssistant({
         triggerHaptic("success");
         if (onProductUpdated) onProductUpdated();
       } else if (action.type === "DELETE_PRODUCT") {
-        let targetId = action.productId;
-        const matched = products.find(
-          (p) =>
-            (targetId && p.id === targetId) ||
-            (action.productName &&
-              p.name.toLowerCase().trim() === action.productName.toLowerCase().trim())
-        );
-        if (!targetId && matched) {
-          targetId = matched.id;
-        }
-
-        if (!targetId) {
+        if (!isRealAdmin) {
           throw new Error(
-            `Could not locate product "${action.productName || "Unknown"}" in catalog.`
+            "Access Denied: Only permanent Administrators can delete products from the catalog."
           );
         }
 
-        const resolvedName = matched?.name || action.productName;
-        removeProductOptimistic(targetId, resolvedName);
-        await deleteProduct(targetId, resolvedName);
+        if (Array.isArray(action.productsToDelete) && action.productsToDelete.length >= 2) {
+          const removedNames: string[] = [];
+          for (const item of action.productsToDelete) {
+            let targetId = item.productId;
+            const matched = products.find(
+              (p) =>
+                (targetId && p.id === targetId) ||
+                (item.productName &&
+                  p.name.toLowerCase().trim() === item.productName.toLowerCase().trim())
+            );
+            if (!targetId && matched) {
+              targetId = matched.id;
+            }
+            if (!targetId) continue;
+            const resolvedName = matched?.name || item.productName;
+            removeProductOptimistic(targetId, resolvedName);
+            await deleteProduct(targetId, resolvedName);
+            removedNames.push(resolvedName || targetId);
+          }
 
-        if (user) {
-          logActivity(
-            "product_deletion",
-            `AI Assistant removed product "${action.productName || targetId}" from store catalog`,
-            user.uid,
-            user.displayName || "Admin",
-            user.email || ""
-          ).catch(() => {});
+          if (removedNames.length === 0) {
+            throw new Error("Could not locate the specified products in the catalog.");
+          }
+
+          if (user) {
+            logActivity(
+              "product_deletion",
+              `AI Assistant removed ${removedNames.length} products from store catalog: ${removedNames.join(", ")}`,
+              user.uid,
+              user.displayName || "Admin",
+              user.email || ""
+            ).catch(() => {});
+          }
+        } else {
+          let targetId = action.productId;
+          const matched = products.find(
+            (p) =>
+              (targetId && p.id === targetId) ||
+              (action.productName &&
+                p.name.toLowerCase().trim() === action.productName.toLowerCase().trim())
+          );
+          if (!targetId && matched) {
+            targetId = matched.id;
+          }
+
+          if (!targetId) {
+            throw new Error(
+              `Could not locate product "${action.productName || "Unknown"}" in catalog.`
+            );
+          }
+
+          const resolvedName = matched?.name || action.productName;
+          removeProductOptimistic(targetId, resolvedName);
+          await deleteProduct(targetId, resolvedName);
+
+          if (user) {
+            logActivity(
+              "product_deletion",
+              `AI Assistant removed product "${action.productName || targetId}" from store catalog`,
+              user.uid,
+              user.displayName || "Admin",
+              user.email || ""
+            ).catch(() => {});
+          }
         }
 
         setMessages((prev) =>
@@ -3110,6 +3268,11 @@ export function AdminAIAssistant({
 
         triggerHaptic("success");
       } else if (action.type === "DELETE_EXPENSE") {
+        if (!isRealAdmin) {
+          throw new Error(
+            "Access Denied: Only permanent Administrators can delete expense records."
+          );
+        }
         if (!action.expenseId) {
           throw new Error("Missing expense ID for deletion.");
         }
@@ -3148,6 +3311,11 @@ export function AdminAIAssistant({
           "Account role changes (promoting or demoting admins) cannot be performed via Buzz AI."
         );
       } else if (action.type === "PURGE_STORE_DATA") {
+        if (!isRealAdmin) {
+          throw new Error(
+            "Access Denied: Only permanent Administrators can purge store data."
+          );
+        }
         const targetScope = action.target || "both";
         let deletedProductsCount = 0;
         let deletedBillsCount = 0;
@@ -3809,7 +3977,7 @@ export function AdminAIAssistant({
                     </div>
 
                     {/* Interactive Action Confirmation Card (animates and fills in once words complete) */}
-                    {!msg.isStreaming && msg.action && (
+                    {!msg.isStreaming && isRealAdmin && msg.action && !isAiRefusalReply(msg.content) && (
                       <motion.div
                         data-no-chat-select="true"
                         initial={{ opacity: 0, y: 10, scale: 0.98 }}
@@ -4475,91 +4643,134 @@ export function AdminAIAssistant({
                         })()}
 
                         {/* 6. DELETE_PRODUCT */}
-                        {msg.action.type === "DELETE_PRODUCT" && (
-                          <div className="rounded-2xl bg-gradient-to-b from-rose-50/90 via-white to-rose-50/40 dark:from-rose-950/65 dark:via-slate-900/95 dark:to-slate-950 border border-rose-200/90 dark:border-rose-500/35 shadow-md shadow-rose-950/5 dark:shadow-rose-950/40 overflow-hidden">
-                            {/* Header */}
-                            <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-rose-500/[0.06] dark:bg-rose-500/[0.08] border-b border-rose-200/70 dark:border-rose-500/20">
-                              <div className="flex items-center gap-2.5 min-w-0">
-                                <div className="w-7 h-7 rounded-xl bg-rose-500/15 dark:bg-rose-500/25 flex items-center justify-center text-rose-600 dark:text-rose-300 shrink-0 border border-rose-400/30 shadow-2xs">
-                                  <Trash2 size={14} />
-                                </div>
-                                <div className="min-w-0">
-                                  <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
-                                    Remove Product
-                                  </span>
-                                  <span className="text-[10px] font-medium text-rose-600/80 dark:text-rose-300/70 block leading-tight mt-0.5">
-                                    Catalog Deletion
-                                  </span>
-                                </div>
-                              </div>
-                              {msg.actionApplied ? (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/35 shrink-0">
-                                  <CheckCircle2 size={10} />
-                                  Removed
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-rose-600 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/30 shrink-0">
-                                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500 dark:bg-rose-400 animate-pulse" />
-                                  Ready
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Structured Data Rows */}
-                            <div className="p-3 space-y-2.5">
-                              <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
-                                <div className="flex items-center justify-between gap-3 px-3 py-2.5">
-                                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
-                                    Catalog Item
-                                  </span>
-                                  <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white text-right break-words min-w-0">
-                                    {msg.action.productName || "Product"}
-                                  </span>
-                                </div>
-
-                                <div className="flex items-center justify-between gap-2 px-3 py-2.5 bg-slate-50/60 dark:bg-slate-900/50">
-                                  <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
-                                    Price & Stock
-                                  </span>
-                                  <div className="flex items-center gap-1.5 font-mono tabular-nums flex-wrap justify-end text-xs">
-                                    <span className="px-2 py-0.5 rounded-md bg-rose-500/10 dark:bg-rose-500/20 border border-rose-500/25 font-black text-rose-600 dark:text-rose-300">
-                                      ₹{msg.action.currentPrice ?? "—"}
+                        {msg.action.type === "DELETE_PRODUCT" && (() => {
+                          const multiDeleteList =
+                            Array.isArray(msg.action.productsToDelete) &&
+                            msg.action.productsToDelete.length >= 2
+                              ? msg.action.productsToDelete
+                              : null;
+                          return (
+                            <div className="rounded-2xl bg-gradient-to-b from-rose-50/90 via-white to-rose-50/40 dark:from-rose-950/65 dark:via-slate-900/95 dark:to-slate-950 border border-rose-200/90 dark:border-rose-500/35 shadow-md shadow-rose-950/5 dark:shadow-rose-950/40 overflow-hidden">
+                              {/* Header */}
+                              <div className="flex items-center justify-between gap-2 px-3.5 py-2.5 bg-rose-500/[0.06] dark:bg-rose-500/[0.08] border-b border-rose-200/70 dark:border-rose-500/20">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div className="w-7 h-7 rounded-xl bg-rose-500/15 dark:bg-rose-500/25 flex items-center justify-center text-rose-600 dark:text-rose-300 shrink-0 border border-rose-400/30 shadow-2xs">
+                                    <Trash2 size={14} />
+                                  </div>
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-extrabold tracking-tight text-slate-900 dark:text-white block leading-tight">
+                                      {multiDeleteList
+                                        ? `Remove Products (${multiDeleteList.length})`
+                                        : "Remove Product"}
                                     </span>
-                                    <span className="px-2 py-0.5 rounded-md bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/25 font-bold text-amber-700 dark:text-amber-300">
-                                      {msg.action.currentStock ?? 0}{" "}
-                                      <span className="text-[10px] font-sans opacity-80">units</span>
+                                    <span className="text-[10px] font-medium text-rose-600/80 dark:text-rose-300/70 block leading-tight mt-0.5">
+                                      {multiDeleteList
+                                        ? "Multi-Item Catalog Deletion"
+                                        : "Catalog Deletion"}
                                     </span>
                                   </div>
                                 </div>
+                                {msg.actionApplied ? (
+                                  <span className="inline-flex items-center gap-1 text-[10px] font-bold text-rose-700 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/35 shrink-0">
+                                    <CheckCircle2 size={10} />
+                                    Removed
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1.5 text-[10px] font-bold text-rose-600 dark:text-rose-300 bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/30 shrink-0">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500 dark:bg-rose-400 animate-pulse" />
+                                    Ready
+                                  </span>
+                                )}
                               </div>
 
-                              {!msg.actionApplied ? (
-                                <button
-                                  disabled={executingActionId === msg.id}
-                                  onClick={() => handleExecuteAction(msg.id, msg.action!)}
-                                  className="w-full py-2.5 px-3.5 bg-gradient-to-r from-rose-600 via-rose-500 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-rose-600/25 transition-all cursor-pointer border border-rose-400/30"
-                                >
-                                  {executingActionId === msg.id ? (
-                                    <>
-                                      <RefreshCw size={13} className="animate-spin shrink-0" />
-                                      <span>Removing from Store...</span>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Trash2 size={14} className="shrink-0" />
-                                      <span>Confirm & Delete Product</span>
-                                    </>
-                                  )}
-                                </button>
-                              ) : (
-                                <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-300 text-xs font-semibold">
-                                  <CheckCircle2 size={13} className="text-rose-600 dark:text-rose-400 shrink-0" />
-                                  <span>Product removed from store catalog</span>
-                                </div>
-                              )}
+                              {/* Structured Data Rows */}
+                              <div className="p-3 space-y-2.5">
+                                {multiDeleteList ? (
+                                  <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden max-h-48 overflow-y-auto">
+                                    {multiDeleteList.map((item, idx) => (
+                                      <div
+                                        key={`${item.productId}-${idx}`}
+                                        className="flex items-center justify-between gap-2.5 px-3 py-2"
+                                      >
+                                        <span className="text-xs font-extrabold text-slate-900 dark:text-white truncate min-w-0">
+                                          {item.productName}
+                                        </span>
+                                        <div className="flex items-center gap-1.5 font-mono tabular-nums shrink-0 text-[11px]">
+                                          <span className="px-1.5 py-0.5 rounded-md bg-rose-500/10 dark:bg-rose-500/20 border border-rose-500/25 font-black text-rose-600 dark:text-rose-300">
+                                            ₹{item.currentPrice ?? "—"}
+                                          </span>
+                                          <span className="px-1.5 py-0.5 rounded-md bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/25 font-bold text-amber-700 dark:text-amber-300">
+                                            {item.currentStock ?? 0}{" "}
+                                            <span className="text-[9px] font-sans opacity-80">units</span>
+                                          </span>
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="rounded-xl bg-white/95 dark:bg-slate-950/85 border border-slate-200/80 dark:border-slate-800/90 divide-y divide-slate-200/70 dark:divide-slate-800/80 overflow-hidden">
+                                    <div className="flex items-center justify-between gap-3 px-3 py-2.5">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                        Catalog Item
+                                      </span>
+                                      <span className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white text-right break-words min-w-0">
+                                        {msg.action.productName || "Product"}
+                                      </span>
+                                    </div>
+
+                                    <div className="flex items-center justify-between gap-2 px-3 py-2.5 bg-slate-50/60 dark:bg-slate-900/50">
+                                      <span className="text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                        Price & Stock
+                                      </span>
+                                      <div className="flex items-center gap-1.5 font-mono tabular-nums flex-wrap justify-end text-xs">
+                                        <span className="px-2 py-0.5 rounded-md bg-rose-500/10 dark:bg-rose-500/20 border border-rose-500/25 font-black text-rose-600 dark:text-rose-300">
+                                          ₹{msg.action.currentPrice ?? "—"}
+                                        </span>
+                                        <span className="px-2 py-0.5 rounded-md bg-amber-500/10 dark:bg-amber-500/20 border border-amber-500/25 font-bold text-amber-700 dark:text-amber-300">
+                                          {msg.action.currentStock ?? 0}{" "}
+                                          <span className="text-[10px] font-sans opacity-80">units</span>
+                                        </span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {!msg.actionApplied ? (
+                                  <button
+                                    disabled={executingActionId === msg.id}
+                                    onClick={() => handleExecuteAction(msg.id, msg.action!)}
+                                    className="w-full py-2.5 px-3.5 bg-gradient-to-r from-rose-600 via-rose-500 to-red-600 hover:from-rose-500 hover:to-red-500 active:scale-[0.98] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-md shadow-rose-600/25 transition-all cursor-pointer border border-rose-400/30"
+                                  >
+                                    {executingActionId === msg.id ? (
+                                      <>
+                                        <RefreshCw size={13} className="animate-spin shrink-0" />
+                                        <span>Removing from Store...</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Trash2 size={14} className="shrink-0" />
+                                        <span>
+                                          {multiDeleteList
+                                            ? `Confirm & Delete ${multiDeleteList.length} Products`
+                                            : "Confirm & Delete Product"}
+                                        </span>
+                                      </>
+                                    )}
+                                  </button>
+                                ) : (
+                                  <div className="flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-700 dark:text-rose-300 text-xs font-semibold">
+                                    <CheckCircle2 size={13} className="text-rose-600 dark:text-rose-400 shrink-0" />
+                                    <span>
+                                      {multiDeleteList
+                                        ? `${multiDeleteList.length} products removed from store catalog`
+                                        : "Product removed from store catalog"}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
-                          </div>
-                        )}
+                          );
+                        })()}
 
                         {/* 7. ADD_EXPENSE */}
                         {msg.action.type === "ADD_EXPENSE" &&
@@ -5033,36 +5244,135 @@ export function AdminAIAssistant({
                 <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight leading-tight mb-3">
                   How can I assist your store today?
                 </h1>
-                <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 max-w-sm leading-relaxed mb-7">
-                  Synced with your live catalog and billing ledger for inventory updates, price changes, revenue insights, and voice commands.
+                <p className="text-xs sm:text-[13px] text-slate-500 dark:text-slate-400 max-w-[320px] sm:max-w-sm leading-relaxed mb-5 [text-wrap:balance]">
+                  Real-time inventory control, price updates, and revenue analytics powered by voice or text.
                 </p>
 
-                {/* Non-interactive Live Store Telemetry Strip */}
-                <div className="w-full max-w-md grid grid-cols-3 gap-2 p-2 rounded-2xl bg-white dark:bg-[#0f172a]/90 border border-slate-200/90 dark:border-white/[0.07] shadow-sm dark:shadow-none">
-                  <div className="py-2.5 px-2 rounded-xl bg-slate-50/80 dark:bg-white/[0.02] flex flex-col items-center justify-center">
-                    <span className="text-sm font-black font-mono text-slate-900 dark:text-white tabular-nums">
-                      {products.length}
-                    </span>
-                    <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-0.5">
+                {/* Single-Level Live Store Ledger Strip */}
+                <div className="w-full max-w-md rounded-2xl bg-slate-50/90 dark:bg-[#0d1424]/90 border border-slate-200/80 dark:border-white/[0.08] divide-x divide-slate-200/80 dark:divide-white/[0.07] grid grid-cols-3 items-center py-3 px-1 mb-3.5 shadow-sm dark:shadow-[0_8px_30px_rgb(0,0,0,0.25)]">
+                  <div className="flex flex-col items-center justify-center px-2">
+                    <div className="flex items-center gap-1.5">
+                      <Package size={13} className="text-indigo-500 dark:text-indigo-400 shrink-0" />
+                      <span className="text-sm sm:text-base font-extrabold font-mono text-slate-900 dark:text-white tabular-nums leading-none">
+                        {products.length}
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-medium text-slate-500 dark:text-slate-400 tracking-wide whitespace-nowrap mt-1">
                       Catalog Items
                     </span>
                   </div>
-                  <div className="py-2.5 px-2 rounded-xl bg-slate-50/80 dark:bg-white/[0.02] flex flex-col items-center justify-center border-x border-slate-200/70 dark:border-white/[0.05]">
-                    <span className="text-sm font-black font-mono text-indigo-600 dark:text-indigo-300 tabular-nums">
-                      {bills.length}
-                    </span>
-                    <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-0.5">
+
+                  <div className="flex flex-col items-center justify-center px-2">
+                    <div className="flex items-center gap-1.5">
+                      <Receipt size={13} className="text-purple-500 dark:text-purple-400 shrink-0" />
+                      <span className="text-sm sm:text-base font-extrabold font-mono text-slate-900 dark:text-white tabular-nums leading-none">
+                        {bills.length}
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-medium text-slate-500 dark:text-slate-400 tracking-wide whitespace-nowrap mt-1">
                       Recorded Bills
                     </span>
                   </div>
-                  <div className="py-2.5 px-2 rounded-xl bg-slate-50/80 dark:bg-white/[0.02] flex flex-col items-center justify-center">
-                    <span className="text-sm font-black text-emerald-600 dark:text-emerald-400">
-                      Voice + Text
-                    </span>
-                    <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mt-0.5">
-                      Input Mode
+
+                  <div className="flex flex-col items-center justify-center px-2">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 dark:bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.7)] shrink-0" />
+                      <span className="text-xs sm:text-[13px] font-bold text-emerald-600 dark:text-emerald-400 whitespace-nowrap leading-none">
+                        Voice &amp; Text
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-medium text-slate-500 dark:text-slate-400 tracking-wide whitespace-nowrap mt-1">
+                      EN &middot; বাংলা Ready
                     </span>
                   </div>
+                </div>
+
+                {/* Interactive Quick-Action Starters */}
+                <div className="w-full max-w-md grid grid-cols-2 gap-2.5 text-left">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic("light");
+                      handleSendMessage("Which products are low on stock or out of stock right now?");
+                    }}
+                    className="group p-3 rounded-2xl bg-white dark:bg-[#0d1424]/75 hover:bg-indigo-50/60 dark:hover:bg-indigo-500/[0.08] border border-slate-200/80 dark:border-white/[0.07] hover:border-indigo-500/35 dark:hover:border-indigo-400/30 transition-all flex items-start gap-2.5 active:scale-[0.98] cursor-pointer"
+                  >
+                    <div className="w-8 h-8 rounded-xl bg-indigo-500/10 dark:bg-indigo-500/15 border border-indigo-500/20 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0 mt-0.5">
+                      <AlertTriangle size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-indigo-600 dark:group-hover:text-indigo-300 transition-colors truncate">
+                        Low Stock Check
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                        Items needing restock
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic("light");
+                      handleSendMessage("Show me today's sales and revenue summary.");
+                    }}
+                    className="group p-3 rounded-2xl bg-white dark:bg-[#0d1424]/75 hover:bg-emerald-50/60 dark:hover:bg-emerald-500/[0.08] border border-slate-200/80 dark:border-white/[0.07] hover:border-emerald-500/35 dark:hover:border-emerald-400/30 transition-all flex items-start gap-2.5 active:scale-[0.98] cursor-pointer"
+                  >
+                    <div className="w-8 h-8 rounded-xl bg-emerald-500/10 dark:bg-emerald-500/15 border border-emerald-500/20 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0 mt-0.5">
+                      <TrendingUp size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-emerald-600 dark:group-hover:text-emerald-300 transition-colors truncate">
+                        Sales Summary
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                        Today&apos;s revenue &amp; bills
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic("light");
+                      setInput("Add 10 stock to ");
+                      setTimeout(() => inputRef.current?.focus(), 20);
+                    }}
+                    className="group p-3 rounded-2xl bg-white dark:bg-[#0d1424]/75 hover:bg-amber-50/60 dark:hover:bg-amber-500/[0.08] border border-slate-200/80 dark:border-white/[0.07] hover:border-amber-500/35 dark:hover:border-amber-400/30 transition-all flex items-start gap-2.5 active:scale-[0.98] cursor-pointer"
+                  >
+                    <div className="w-8 h-8 rounded-xl bg-amber-500/10 dark:bg-amber-500/15 border border-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0 mt-0.5">
+                      <PlusCircle size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-amber-600 dark:group-hover:text-amber-300 transition-colors truncate">
+                        Adjust Stock
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                        Add or deduct units
+                      </div>
+                    </div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      triggerHaptic("light");
+                      handleSendMessage("List all products in the catalog with their current price and stock.");
+                    }}
+                    className="group p-3 rounded-2xl bg-white dark:bg-[#0d1424]/75 hover:bg-purple-50/60 dark:hover:bg-purple-500/[0.08] border border-slate-200/80 dark:border-white/[0.07] hover:border-purple-500/35 dark:hover:border-purple-400/30 transition-all flex items-start gap-2.5 active:scale-[0.98] cursor-pointer"
+                  >
+                    <div className="w-8 h-8 rounded-xl bg-purple-500/10 dark:bg-purple-500/15 border border-purple-500/20 text-purple-600 dark:text-purple-400 flex items-center justify-center shrink-0 mt-0.5">
+                      <Tag size={15} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-bold text-slate-900 dark:text-white group-hover:text-purple-600 dark:group-hover:text-purple-300 transition-colors truncate">
+                        Catalog &amp; Prices
+                      </div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
+                        View all item rates
+                      </div>
+                    </div>
+                  </button>
                 </div>
               </div>
             )}
@@ -5235,7 +5545,6 @@ export function AdminAIAssistant({
                           whileHover={{ scale: 1.03 }}
                           whileTap={{ scale: 0.94 }}
                           type="button"
-                          disabled={isAiBusy}
                           onClick={() => mediaFileInputRef.current?.click()}
                           title="Add more images or videos"
                           className="w-16 h-16 sm:w-[70px] sm:h-[70px] rounded-[16px] border border-dashed border-indigo-400/45 dark:border-indigo-400/30 hover:border-indigo-500 bg-white/75 dark:bg-white/[0.03] text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50/60 dark:hover:bg-indigo-500/10 flex flex-col items-center justify-center gap-1 shrink-0 transition-colors cursor-pointer"
@@ -5244,6 +5553,81 @@ export function AdminAIAssistant({
                           <span className="text-[9px] font-bold">Add</span>
                         </motion.button>
                       )}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {/* Queued Messages Strip (when user sends messages while Buzz AI is writing) */}
+            <AnimatePresence initial={false}>
+              {queuedMessages.length > 0 && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0, y: 6 }}
+                  animate={{ opacity: 1, height: "auto", y: 0 }}
+                  exit={{ opacity: 0, height: 0, y: 6 }}
+                  transition={{ type: "spring", stiffness: 460, damping: 32, mass: 0.6 }}
+                  className="mb-2 overflow-hidden"
+                >
+                  <div className="px-3 py-2 rounded-2xl bg-indigo-500/[0.08] dark:bg-indigo-500/[0.12] border border-indigo-500/25 dark:border-indigo-400/25 space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-600 dark:text-indigo-300 flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 dark:bg-indigo-400 animate-pulse" />
+                        Queued ({queuedMessages.length}) &middot; Sends next automatically
+                      </span>
+                      {queuedMessages.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            triggerHaptic("light");
+                            if (queueTimeoutRef.current !== null) {
+                              window.clearTimeout(queueTimeoutRef.current);
+                              queueTimeoutRef.current = null;
+                            }
+                            isDequeuingRef.current = false;
+                            queuedMessagesRef.current = [];
+                            setQueuedMessages([]);
+                          }}
+                          className="text-[10px] font-bold text-slate-500 hover:text-rose-500 dark:text-slate-400 dark:hover:text-rose-400 transition-colors cursor-pointer"
+                        >
+                          Clear queue
+                        </button>
+                      )}
+                    </div>
+                    <div className="space-y-1 max-h-24 overflow-y-auto">
+                      {queuedMessages.map((qItem, qIdx) => (
+                        <div
+                          key={qItem.id}
+                          className="flex items-center justify-between gap-2 px-2.5 py-1 rounded-xl bg-white/80 dark:bg-slate-900/80 border border-slate-200/70 dark:border-white/[0.07] text-xs"
+                        >
+                          <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <span className="text-[10px] font-mono font-bold text-indigo-500 dark:text-indigo-400 shrink-0">
+                              #{qIdx + 1}
+                            </span>
+                            <span className="text-slate-700 dark:text-slate-200 font-medium truncate">
+                              {qItem.rawPrompt ||
+                                (qItem.attachments.length > 0
+                                  ? `${qItem.attachments.length} attachment(s)`
+                                  : qItem.quotedText)}
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              triggerHaptic("light");
+                              setQueuedMessages((prev) => {
+                                const next = prev.filter((item) => item.id !== qItem.id);
+                                queuedMessagesRef.current = next;
+                                return next;
+                              });
+                            }}
+                            title="Remove from queue"
+                            className="w-5 h-5 rounded-full hover:bg-rose-500/15 text-slate-400 hover:text-rose-500 flex items-center justify-center shrink-0 transition-colors cursor-pointer"
+                          >
+                            <X size={11} />
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 </motion.div>
@@ -5357,14 +5741,13 @@ export function AdminAIAssistant({
                     data-testid="buzz-ai-media-btn"
                     type="button"
                     onClick={() => {
-                      if (isAiBusy || isRecording) return;
+                      if (isRecording) return;
                       triggerHaptic("light");
                       mediaFileInputRef.current?.click();
                     }}
-                    disabled={isAiBusy}
                     title="Attach images or videos"
                     aria-label="Attach images or videos"
-                    className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all cursor-pointer bg-white dark:bg-white/[0.05] text-slate-600 dark:text-slate-300 hover:bg-slate-200/80 dark:hover:bg-white/[0.1] hover:text-slate-900 dark:hover:text-white border border-slate-200/80 dark:border-transparent active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-all cursor-pointer bg-white dark:bg-white/[0.05] text-slate-600 dark:text-slate-300 hover:bg-slate-200/80 dark:hover:bg-white/[0.1] hover:text-slate-900 dark:hover:text-white border border-slate-200/80 dark:border-transparent active:scale-95"
                   >
                     <Paperclip size={16} />
                   </button>
@@ -5375,7 +5758,7 @@ export function AdminAIAssistant({
                     value={input}
                     onPaste={handlePasteMedia}
                     onChange={(e) => {
-                      if (isAiBusy || isRecording) return;
+                      if (isRecording) return;
                       const val = e.target.value;
                       setInput(val);
                       if (!val) {
@@ -5389,7 +5772,6 @@ export function AdminAIAssistant({
                       if (e.key === "Enter" && !e.shiftKey) {
                         e.preventDefault();
                         if (
-                          isAiBusy ||
                           isRecording ||
                           (!input.trim() && pendingAttachments.length === 0 && !quotedText.trim())
                         )
@@ -5405,16 +5787,14 @@ export function AdminAIAssistant({
                     enterKeyHint="send"
                     placeholder={
                       isAiBusy
-                        ? "Buzz AI is replying..."
+                        ? "Type a message to queue..."
                         : quotedText
                         ? "Ask what this quote means or anything else..."
                         : pendingAttachments.length > 0
                         ? "Add a caption..."
                         : "Ask Buzz AI..."
                     }
-                    disabled={isAiBusy}
-                    readOnly={isAiBusy}
-                    className={`flex-1 min-w-0 max-h-24 px-2 py-2 text-xs sm:text-sm bg-transparent focus:outline-none text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 font-medium resize-none leading-5 disabled:opacity-50 disabled:cursor-not-allowed ${
+                    className={`flex-1 min-w-0 max-h-24 px-2 py-2 text-xs sm:text-sm bg-transparent focus:outline-none text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 font-medium resize-none leading-5 ${
                       !input
                         ? "h-9 overflow-hidden text-ellipsis whitespace-nowrap"
                         : "min-h-9 overflow-y-auto"
@@ -5422,18 +5802,33 @@ export function AdminAIAssistant({
                   />
 
                   {isAiBusy ? (
-                    <motion.button
-                      whileHover={{ scale: 1.05 }}
-                      whileTap={{ scale: 0.9 }}
-                      transition={{ type: "spring", stiffness: 520, damping: 28 }}
-                      type="button"
-                      onClick={handleStopGeneration}
-                      title="Stop generating"
-                      aria-label="Stop generating"
-                      className="w-9 h-9 rounded-xl bg-gradient-to-tr from-rose-600 to-red-500 hover:from-rose-500 hover:to-red-400 text-white flex items-center justify-center shadow-md shadow-rose-600/30 border border-rose-400/30 transition-colors shrink-0 cursor-pointer"
-                    >
-                      <Square size={13} className="fill-white text-white" />
-                    </motion.button>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {(input.trim() || pendingAttachments.length > 0 || quotedText.trim()) && (
+                        <motion.button
+                          whileHover={{ scale: 1.05 }}
+                          whileTap={{ scale: 0.92 }}
+                          transition={{ type: "spring", stiffness: 520, damping: 28 }}
+                          type="submit"
+                          title="Queue message"
+                          aria-label="Queue message"
+                          className="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white flex items-center justify-center shadow-md shadow-indigo-600/25 transition-colors shrink-0 cursor-pointer"
+                        >
+                          <Send size={15} />
+                        </motion.button>
+                      )}
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.9 }}
+                        transition={{ type: "spring", stiffness: 520, damping: 28 }}
+                        type="button"
+                        onClick={handleStopGeneration}
+                        title="Stop generating"
+                        aria-label="Stop generating"
+                        className="w-9 h-9 rounded-xl bg-gradient-to-tr from-rose-600 to-red-500 hover:from-rose-500 hover:to-red-400 text-white flex items-center justify-center shadow-md shadow-rose-600/30 border border-rose-400/30 transition-colors shrink-0 cursor-pointer"
+                      >
+                        <Square size={13} className="fill-white text-white" />
+                      </motion.button>
+                    </div>
                   ) : (
                     <motion.button
                       whileHover={

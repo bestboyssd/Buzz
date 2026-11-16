@@ -461,7 +461,7 @@ export function hydrateSnapshotFromClientContext(clientContext: any): StoreSnaps
     id: String(p.id || `prod_${idx}`),
     name: String(p.name || "Unnamed Product"),
     price: safeNum(p.price, 10000),
-    stock: safeNum(p.stock, 2000),
+    stock: safeNum(p.stock, 10000),
     category: p.category || "fresh",
     soldCount: safeNum(p.soldCount, 1000000),
   }));
@@ -544,8 +544,8 @@ export async function executeStockUpdate(
   user?: any
 ): Promise<{ success: boolean; product: StoreProduct }> {
   if (!db) throw new Error("Database not connected.");
-  if (isNaN(newStock) || newStock < 0 || newStock > 2000) {
-    throw new Error(`Invalid stock quantity: ${newStock}. Stock must be between 0 and 2,000 units.`);
+  if (isNaN(newStock) || newStock < 0 || newStock > 10000) {
+    throw new Error(`Invalid stock quantity: ${newStock}. Stock must be between 0 and 10,000 units.`);
   }
 
   const productRef = doc(db, "products", productId);
@@ -629,7 +629,7 @@ export async function executeAddProduct(
     throw new Error("Product name cannot be empty.");
   }
   const price = Math.min(10000, Number(data.price));
-  const stock = Math.min(2000, Math.max(0, Number(data.stock) || 0));
+  const stock = Math.min(10000, Math.max(0, Number(data.stock) || 0));
   if (isNaN(price) || price <= 0) {
     throw new Error(`Invalid product price: ₹${data.price}`);
   }
@@ -972,6 +972,77 @@ export function normalizeExpenseCategory(raw?: string): "expense" | "borrow" | "
  * 2. The AI's own reply is NOT asking the user clarifying questions for missing fields.
  * 3. Every required field for the action type is present, valid, and matched against live store data.
  */
+export function isServerUnauthorizedOrBreakInPrompt(
+  prompt: string = "",
+  snapshot?: StoreSnapshot
+): boolean {
+  const p = String(prompt || "").toLowerCase();
+  if (
+    /\b(?:broke\s+into|break\s+into|broken\s+into|breaking\s+into|hacked|hack\s+into|bypassed|unauthorized|without\s+permission|without\s+authorization|stole\s+(?:the\s+)?pin|guessed\s+(?:the\s+)?pin|not\s+an?\s+admin|imposter|intruder|jailbreak|ignore\s+(?:all\s+)?(?:previous\s+)?(?:instructions|security|rules))\b/i.test(
+      p
+    )
+  ) {
+    return true;
+  }
+  if (snapshot?.currentUser && snapshot.currentUser.isAdmin === false) {
+    return true;
+  }
+  return false;
+}
+
+export function isServerAiRefusalReply(replyText: string = ""): boolean {
+  const r = String(replyText || "").toLowerCase();
+  if (!r) return false;
+  return /\b(?:i\s+cannot|i\s+can't|i\s+can\s+not|cannot\s+fulfill|can't\s+fulfill|cannot\s+perform|can't\s+perform|cannot\s+process|can't\s+process|unable\s+to\s+(?:fulfill|perform|delete|purge|remove|update|modify|complete|process|comply|execute)|do\s+not\s+have\s+(?:the\s+)?(?:administrative\s+)?(?:authorization|permission|permissions|access|privilege|authority)|not\s+authorized|unauthorized|access\s+denied|security\s+policy|against\s+(?:store\s+)?policy|not\s+permitted|not\s+allowed\s+to|as\s+a\s+staff\s+member|only\s+(?:an?\s+|permanent\s+)?(?:admin|administrator)s?\s+can|cannot\s+delete|can't\s+delete|cannot\s+purge|can't\s+purge|refuse\s+to|will\s+not\s+(?:delete|purge|remove|modify|update)|won't\s+(?:delete|purge|remove|modify|update))\b/i.test(
+    r
+  );
+}
+
+export function matchMultipleServerProductsForDeletion(
+  rawPromptOrTarget: string,
+  prods: StoreProduct[]
+): StoreProduct[] {
+  if (!rawPromptOrTarget || !prods || prods.length === 0) return [];
+  const p = rawPromptOrTarget
+    .toLowerCase()
+    .replace(/^(?:please\s+)?(?:delete|remove)\s+/i, "")
+    .replace(/\s+(?:from\s+(?:the\s+)?(?:catalog|store|inventory)|please)$/i, "")
+    .trim();
+
+  const segments = p
+    .split(/\s*(?:,|\band\b|&|\+)\s*/i)
+    .map((s) =>
+      s
+        .replace(
+          /^(?:just|only|also|the|product|products|item|items|called|named)\s+|\s+(?:product|products|item|items|just|only)$/gi,
+          ""
+        )
+        .trim()
+    )
+    .filter((s) => s.length > 0 && !/^(?:all|everything|every|whole|store|catalog|inventory)$/.test(s));
+
+  const matchedMap = new Map<string, StoreProduct>();
+  const sortedProds = [...prods].sort((a, b) => (b.name?.length || 0) - (a.name?.length || 0));
+
+  for (const seg of segments) {
+    const exact = sortedProds.find((pr) => pr.name.toLowerCase().trim() === seg);
+    if (exact) {
+      matchedMap.set(exact.id, exact);
+      continue;
+    }
+    const wordMatch = sortedProds.find((pr) => {
+      const pLower = pr.name.toLowerCase().trim();
+      const words = pLower.split(/\s+/);
+      return words.includes(seg) || pLower.includes(seg) || seg.includes(pLower);
+    });
+    if (wordMatch) {
+      matchedMap.set(wordMatch.id, wordMatch);
+    }
+  }
+
+  return Array.from(matchedMap.values());
+}
+
 export function validateAndNormalizeAction(
   rawAction: any,
   prompt: string,
@@ -984,6 +1055,24 @@ export function validateAndNormalizeAction(
 
   const pLower = prompt.toLowerCase();
   const rLower = replyText.toLowerCase();
+
+  // Security Block: Never return any action card when the prompt is a break-in attempt or user is not an admin
+  if (isServerUnauthorizedOrBreakInPrompt(prompt, snapshot)) {
+    return null;
+  }
+
+  // If the AI's reply text is a refusal, block the action card UNLESS the user is a verified Admin
+  // asking to delete multiple specific products ("delete just luchi and cat and boy") where the model
+  // mistakenly thought it could only delete 1 product at a time.
+  const isAuthorizedMultiDeleteFalseRefusal =
+    rawAction.type === "DELETE_PRODUCT" &&
+    (!snapshot?.currentUser || snapshot.currentUser.isAdmin === true) &&
+    /\b(?:delete|remove)\b/i.test(pLower) &&
+    matchMultipleServerProductsForDeletion(prompt, snapshot.products).length >= 2;
+
+  if (isServerAiRefusalReply(replyText) && !isAuthorizedMultiDeleteFalseRefusal) {
+    return null;
+  }
 
   // 1. If the user explicitly told the AI to ask them for details/requirements first, NEVER show the card on this turn
   if (
@@ -1048,11 +1137,19 @@ export function validateAndNormalizeAction(
     case "ADD_PRODUCT": {
       if (Array.isArray(action.products) && action.products.length > 0) {
         const validItems: { name: string; price: number; stock: number; category: string }[] = [];
+        let anyCapped = false;
+        let maxRequestedStock = 0;
         for (const item of action.products) {
           const itemName = String(item?.name || item?.productName || "").trim();
           const itemPrice = Number(item?.price ?? item?.newPrice);
-          const itemStock =
+          const rawItemStock =
             item?.stock !== undefined && item?.stock !== null ? Number(item.stock) : 0;
+          if (!isNaN(rawItemStock) && rawItemStock > 10000) {
+            anyCapped = true;
+            maxRequestedStock = Math.max(maxRequestedStock, rawItemStock);
+          }
+          const itemStock =
+            isNaN(rawItemStock) || rawItemStock < 0 ? 0 : Math.min(10000, rawItemStock);
           const itemCat = normalizeServerProductCategory(
             item?.category || action.category,
             itemName
@@ -1066,7 +1163,7 @@ export function validateAndNormalizeAction(
             validItems.push({
               name: itemName,
               price: itemPrice,
-              stock: isNaN(itemStock) || itemStock < 0 ? 0 : itemStock,
+              stock: itemStock,
               category: itemCat,
               ...(typeof item?.attachmentIndex === "number" ? { attachmentIndex: item.attachmentIndex } : {}),
               ...(typeof item?.image === "string" && item.image ? { image: item.image } : {}),
@@ -1079,6 +1176,10 @@ export function validateAndNormalizeAction(
           action.price = validItems[0].price;
           action.stock = validItems[0].stock;
           action.category = validItems[0].category;
+          if (anyCapped) {
+            action.cappedAtMaxStock = true;
+            action.requestedStock = maxRequestedStock;
+          }
           if (action.useAttachedImage !== undefined) {
             action.useAttachedImage = Boolean(action.useAttachedImage);
           }
@@ -1097,10 +1198,15 @@ export function validateAndNormalizeAction(
       if (isNaN(price) || price <= 0) {
         return null;
       }
-      const stock = action.stock !== undefined && action.stock !== null ? Number(action.stock) : 0;
+      const rawStock = action.stock !== undefined && action.stock !== null ? Number(action.stock) : 0;
+      if (!isNaN(rawStock) && rawStock > 10000) {
+        action.cappedAtMaxStock = true;
+        action.requestedStock = rawStock;
+      }
+      const stock = isNaN(rawStock) || rawStock < 0 ? 0 : Math.min(10000, rawStock);
       action.name = rawName;
       action.price = price;
-      action.stock = isNaN(stock) || stock < 0 ? 0 : stock;
+      action.stock = stock;
       action.category = normalizeServerProductCategory(action.category, rawName);
       action.products = [
         {
@@ -1136,6 +1242,38 @@ export function validateAndNormalizeAction(
         quantityChange = newStock - currentStock;
       }
       if (isNaN(newStock) || newStock < 0) return null;
+
+      // Also check if the user's prompt requested adding/setting an amount that exceeds 10,000 even if the AI pre-clamped newStock to 10,000
+      let promptRequestedNewStock = newStock;
+      let promptWithoutProd = pLower.replace(matched.name.toLowerCase(), " ");
+      for (const tok of matched.name.toLowerCase().split(/\s+/)) {
+        if (tok.length >= 2) {
+          promptWithoutProd = promptWithoutProd.replace(tok, " ");
+        }
+      }
+      const promptQtyMatch = promptWithoutProd.match(/(\d+)/);
+      const isReducePrompt = /\b(reduce|decrease|deduct|remove|minus|subtract|komao|komiye|কমাও)\b/i.test(pLower);
+      const isSetPrompt = /\b(set|make)\b/i.test(pLower) || /\b(?:change|update)\s+(?:the\s+)?stock\b[\s\S]*?\bto\s+\d+/i.test(pLower);
+      if (promptQtyMatch && !isReducePrompt) {
+        const parsedQty = parseInt(promptQtyMatch[1], 10);
+        if (!isNaN(parsedQty) && parsedQty > 0) {
+          const candidateTarget = isSetPrompt ? parsedQty : currentStock + parsedQty;
+          if (candidateTarget > promptRequestedNewStock) {
+            promptRequestedNewStock = candidateTarget;
+          }
+        }
+      }
+
+      if (promptRequestedNewStock > 10000) {
+        const maxCanAdd = Math.max(0, 10000 - currentStock);
+        const requestedAdded = Math.max(1, promptRequestedNewStock - currentStock);
+        action.cappedAtMaxStock = true;
+        action.requestedNewStock = promptRequestedNewStock;
+        action.requestedAdded = requestedAdded;
+        action.maxCanAdd = maxCanAdd;
+        newStock = 10000;
+        quantityChange = maxCanAdd;
+      }
 
       action.productId = matched.id;
       action.productName = matched.name;
@@ -1189,12 +1327,61 @@ export function validateAndNormalizeAction(
     }
 
     case "DELETE_PRODUCT": {
+      // Support multi-product deletion (e.g., "delete just luchi and cat and boy" or action.products / action.productsToDelete)
+      const multiMatchedFromPrompt = matchMultipleServerProductsForDeletion(
+        prompt,
+        snapshot.products
+      );
+      const multiFromAction: StoreProduct[] = [];
+      const rawArray = Array.isArray(action.productsToDelete)
+        ? action.productsToDelete
+        : Array.isArray(action.products)
+        ? action.products
+        : [];
+      for (const item of rawArray) {
+        const itemId = item?.productId || item?.id;
+        const itemName = String(item?.productName || item?.name || "").toLowerCase().trim();
+        const found =
+          snapshot.products.find((p) => itemId && p.id === itemId) ||
+          (itemName
+            ? snapshot.products.find((p) => p.name.toLowerCase().trim() === itemName) ||
+              snapshot.products.find((p) => p.name.toLowerCase().includes(itemName))
+            : undefined);
+        if (found && !multiFromAction.some((m) => m.id === found.id)) {
+          multiFromAction.push(found);
+        }
+      }
+
+      const combinedMulti =
+        multiMatchedFromPrompt.length >= 2
+          ? multiMatchedFromPrompt
+          : multiFromAction.length >= 2
+          ? multiFromAction
+          : [];
+
+      if (combinedMulti.length >= 2) {
+        action.productId = combinedMulti[0].id;
+        action.productName = combinedMulti.map((p) => p.name).join(", ");
+        action.currentPrice = Number(combinedMulti[0].price) || 0;
+        action.currentStock = Number(combinedMulti[0].stock) || 0;
+        action.productsToDelete = combinedMulti.map((p) => ({
+          productId: p.id,
+          productName: p.name,
+          currentPrice: Number(p.price) || 0,
+          currentStock: Number(p.stock) || 0,
+        }));
+        return action;
+      }
+
       let matched = snapshot.products.find((p) => p.id === action.productId);
       const searchName = String(action.productName || action.name || "").toLowerCase().trim();
       if (!matched && searchName) {
         matched =
           snapshot.products.find((p) => p.name.toLowerCase().trim() === searchName) ||
           snapshot.products.find((p) => p.name.toLowerCase().includes(searchName));
+      }
+      if (!matched && multiMatchedFromPrompt.length === 1) {
+        matched = multiMatchedFromPrompt[0];
       }
       if (!matched) return null;
 
@@ -1232,6 +1419,14 @@ export function validateAndNormalizeAction(
       action.productName = matched.name;
       action.currentPrice = Number(matched.price) || 0;
       action.currentStock = Number(matched.stock) || 0;
+      action.productsToDelete = [
+        {
+          productId: matched.id,
+          productName: matched.name,
+          currentPrice: Number(matched.price) || 0,
+          currentStock: Number(matched.stock) || 0,
+        },
+      ];
       return action;
     }
 
@@ -1970,17 +2165,18 @@ ACTION RULES:
 CRITICAL: You CANNOT update stock, price, products, bills, or expenses without outputting the \`\`\`action\`\`\` block! Whenever the user asks to add, increase, reduce, remove, or set stock or price for a product in CATALOG, ALWAYS output the \`\`\`action\`\`\` JSON block at the end of your reply, and tell the user you have prepared the confirmation card below for them to confirm (NEVER claim in past tense like "I have updated" or "has been increased" before they click the confirmation button!).
 CRITICAL DISTINCTION (REMOVE QUANTITY vs DELETE PRODUCT): If the user says "remove 30", "remove <product> 30", "deduct 10", or "remove/delete" with a number/quantity, they mean SUBTRACT STOCK (UPDATE_STOCK with quantityChange: -quantity, newStock: Math.max(0, currentStock - quantity))—NEVER output DELETE_PRODUCT when a quantity number is specified! Only use DELETE_PRODUCT when the user explicitly asks to delete the entire product from the store catalog without a unit quantity.
 Required fields per type:
-- UPDATE_STOCK: productId, productName, currentStock, newStock, quantityChange
+- UPDATE_STOCK: productId, productName, currentStock, newStock (max 10000), quantityChange. MAXIMUM STOCK LIMIT IS 10,000 UNITS: If adding/setting stock would exceed 10,000 units, tell the user you cannot add that much amount because the maximum limit is 10,000 units and you can only add X units (where X = 10000 - currentStock), and set newStock: 10000, quantityChange: X!
 - UPDATE_PRICE: productId, productName, currentPrice, newPrice
 - UPDATE_PRODUCT_IMAGE: productId, productName, attachmentIndex (0-based index of uploaded image)
-- ADD_PRODUCT: name, price, stock (default 0), category ("fresh"|"frozen"|"cold drinks"), useAttachedImage (optional), attachmentIndex (optional), products (array if adding multiple)
-- DELETE_PRODUCT: productId, productName, currentPrice, currentStock
+- ADD_PRODUCT: name, price, stock (default 0, max 10000), category ("fresh"|"frozen"|"cold drinks"), useAttachedImage (optional), attachmentIndex (optional), products (array if adding multiple)
+- DELETE_PRODUCT: productId, productName, currentPrice, currentStock, productsToDelete (optional array of {productId, productName, currentPrice, currentStock} when deleting 2 or more specific products at once, e.g. "delete just luchi and cat and boy" -> include all matched items in productsToDelete!)
 - ADD_EXPENSE: title, amount, category ("expense"|"borrow"|"due"|"other")
 - DELETE_EXPENSE: expenseId, title, amount
 - UPDATE_BILL: billId, oldTotal, newTotal
 - DELETE_BILL: billId, total, itemsCount, itemSummary
 - PURGE_STORE_DATA: target ("products"|"bills"|"both"), productsCount (${snapshot.products.length}), billsCount (${snapshot.bills.length})
-5. Reply concisely in the exact language of the user's latest message. NEVER use LaTeX dollar signs ($...$) or backslash math commands like \\pi; use Unicode symbols directly (π, ×, ÷, ≈, √, ²).`;
+5. SECURITY & AUTHORIZATION RULE: Check USER's current role (Admin: YES vs Admin: NO). If Admin: NO OR if the user's current message claims they broke into / hacked / bypassed the admin panel, strictly refuse any request to add, update, or delete store data and NEVER output an \`\`\`action\`\`\` block. If Admin: YES and the current message does not claim a break-in, the user HAS full administrative permissions to delete single products, multiple specific products (via DELETE_PRODUCT with productsToDelete), or all products (via PURGE_STORE_DATA)—never tell an authorized Admin that you can only delete products individually or that they lack permissions!
+6. Reply concisely in the exact language of the user's latest message. NEVER use LaTeX dollar signs ($...$) or backslash math commands like \\pi; use Unicode symbols directly (π, ×, ÷, ≈, √, ²).`;
 }
 
 export function buildAdaptiveStoreSystemPrompt(
@@ -2090,7 +2286,8 @@ CRITICAL CONVERSATIONAL & ACTION CARD RULES (MUST FOLLOW STRICTLY):
      * Use when the user uploads an image (or refers to an image they already uploaded in chat) and asks to set, use, update, or change a store product's photo/image/picture (e.g., "use this image for roti", "set this photo for pepsi", "use the 2nd image for roti").
      * Required: \`productId\` & \`productName\` (must match an existing product in CURRENT CATALOG SNAPSHOT), \`attachmentIndex\` (0-based index of the uploaded image to use: \`0\` for the first/only image, \`1\` for the second image, \`2\` for the third image, etc.).
    - \`UPDATE_STOCK\`:
-     * Required: \`productId\` & \`productName\` (must match an existing product in CURRENT CATALOG SNAPSHOT), \`currentStock\`, \`newStock\` (non-negative number), \`quantityChange\`. If the product is not in the catalog, tell the user and do not emit \`UPDATE_STOCK\`.
+     * Required: \`productId\` & \`productName\` (must match an existing product in CURRENT CATALOG SNAPSHOT), \`currentStock\`, \`newStock\` (non-negative number, maximum 10,000), \`quantityChange\`. If the product is not in the catalog, tell the user and do not emit \`UPDATE_STOCK\`.
+     * MAXIMUM STOCK LIMIT (10,000 UNITS): If the requested stock addition or target exceeds 10,000 units, explicitly state that you cannot add that much amount and can only add X units (where X = 10000 - currentStock) to reach the 10,000-unit limit, and emit \`newStock: 10000, quantityChange: X\`.
    - \`UPDATE_PRICE\`:
      * Required: \`productId\` & \`productName\` (from CURRENT CATALOG SNAPSHOT), \`currentPrice\`, \`newPrice\` (positive number).
    - \`DELETE_PRODUCT\`:
@@ -2286,6 +2483,15 @@ export function generateLocalDeterministicResponse(
   const p = normalizeStorePrompt(prompt);
   const status = getSafeStatusMessage(p, snapshot);
   const wantsToBeAsked = /\b(ask\s+me|what\s+details|what\s+info|ask\s+the\s+requirements|ask\s+all\s+the\s+details|details\s+u\s+need|details\s+you\s+need)\b/i.test(p);
+
+  if (isServerUnauthorizedOrBreakInPrompt(prompt, snapshot)) {
+    return {
+      reply:
+        "🔒 **Access Denied:** Unauthorized access or store modification commands from a non-administrator session are strictly blocked.",
+      action: null,
+      status: "Blocked unauthorized command…",
+    };
+  }
 
   // Check if the previous assistant message was asking for missing details (Multi-turn slot filling!)
   const lastAssistantMsg = [...(conversationHistory || [])]
@@ -2680,8 +2886,37 @@ export function generateLocalDeterministicResponse(
     !p.includes("transaction") &&
     !p.includes("chat")
   ) {
-    const cleanTarget = delTargetName.replace(/^(?:the\s+|product\s+|item\s+)/i, "").trim().toLowerCase();
-    const matched = findBestServerProduct(snapshot.products, cleanTarget);
+    const multiMatched = matchMultipleServerProductsForDeletion(prompt, snapshot.products);
+    if (multiMatched.length >= 2 && !wantsToBeAsked) {
+      const namesList = multiMatched.map((m) => `**${m.name}**`).join(", ");
+      const bulletLines = multiMatched
+        .map((m) => `• **${m.name}** — ₹${m.price} (${m.stock} units)`)
+        .join("\n");
+      return {
+        reply: `⚠️ Prepared catalog deletion for ${multiMatched.length} products (${namesList}):\n\n${bulletLines}\n\nConfirm below to permanently remove these items from your catalog:`,
+        action: {
+          type: "DELETE_PRODUCT",
+          productId: multiMatched[0].id,
+          productName: multiMatched.map((m) => m.name).join(", "),
+          currentPrice: multiMatched[0].price,
+          currentStock: multiMatched[0].stock,
+          productsToDelete: multiMatched.map((m) => ({
+            productId: m.id,
+            productName: m.name,
+            currentPrice: Number(m.price) || 0,
+            currentStock: Number(m.stock) || 0,
+          })),
+        },
+        status: "Removing multiple products from catalog…",
+      };
+    }
+
+    const cleanTarget = delTargetName
+      .replace(/^(?:just\s+|only\s+|the\s+|product\s+|item\s+)/i, "")
+      .trim()
+      .toLowerCase();
+    const matched =
+      multiMatched[0] || findBestServerProduct(snapshot.products, cleanTarget);
 
     if (matched && !wantsToBeAsked) {
       return {
@@ -2692,6 +2927,14 @@ export function generateLocalDeterministicResponse(
           productName: matched.name,
           currentPrice: matched.price,
           currentStock: matched.stock,
+          productsToDelete: [
+            {
+              productId: matched.id,
+              productName: matched.name,
+              currentPrice: Number(matched.price) || 0,
+              currentStock: Number(matched.stock) || 0,
+            },
+          ],
         },
         status: "Removing product from catalog…",
       };
@@ -2968,6 +3211,33 @@ export function generateLocalDeterministicResponse(
       } else {
         newStock = currentStock + qty;
         diff = qty;
+      }
+
+      if (newStock > 10000) {
+        const maxCanAdd = Math.max(0, 10000 - currentStock);
+        const requestedAdded = Math.max(1, newStock - currentStock);
+        if (maxCanAdd <= 0) {
+          return {
+            reply: `I cannot add ${requestedAdded} units to **${matched.name}** because its stock is already at the maximum limit of **10,000 units** (only **0 units** can be added).`,
+            action: null,
+            status: "Stock limit reached",
+          };
+        }
+        return {
+          reply: `I cannot add ${requestedAdded} units to **${matched.name}** because the maximum stock limit is **10,000 units** (current stock: **${currentStock}**). I can only add **${maxCanAdd} units** to reach the **10,000-unit** limit. Please confirm below to add **${maxCanAdd} units**:`,
+          action: {
+            type: "UPDATE_STOCK",
+            productId: matched.id,
+            productName: matched.name,
+            currentStock,
+            quantityChange: maxCanAdd,
+            newStock: 10000,
+            cappedAtMaxStock: true,
+            requestedAdded,
+            maxCanAdd,
+          },
+          status: "Updating product stock…",
+        };
       }
 
       return {
@@ -3765,7 +4035,7 @@ export function extractOrInferServerAction(
     }
   }
 
-  const actionData = validateAndNormalizeAction(
+  let actionData = validateAndNormalizeAction(
     rawAction,
     cleanPrompt,
     cleanDisplayText,
@@ -3773,6 +4043,46 @@ export function extractOrInferServerAction(
   );
   if (rawAction && !actionData) {
     cleanDisplayText = cleanReplyWhenActionSuppressed(cleanDisplayText);
+  }
+
+  // If the requested stock addition or new product stock exceeded the 10,000-unit maximum limit,
+  // ensure the AI explicitly tells the user it cannot add that much amount and can only add X units.
+  if (actionData && actionData.type === "UPDATE_STOCK" && actionData.cappedAtMaxStock) {
+    const maxCanAdd = Number(actionData.maxCanAdd ?? actionData.quantityChange ?? 0);
+    const requestedAdded = Number(actionData.requestedAdded ?? 0);
+    const curStock = Number(actionData.currentStock ?? 0);
+    if (maxCanAdd <= 0) {
+      cleanDisplayText = `I cannot add ${requestedAdded > 0 ? `${requestedAdded} units` : "more stock"} to **${actionData.productName}** because its stock is already at the maximum limit of **10,000 units** (only **0 units** can be added).`;
+      actionData = null;
+    } else {
+      cleanDisplayText = `I cannot add ${requestedAdded} units to **${actionData.productName}** because the maximum stock limit is **10,000 units** (current stock: **${curStock}**). I can only add **${maxCanAdd} units** to reach the **10,000-unit** limit. Please confirm below to add **${maxCanAdd} units**:`;
+    }
+  } else if (actionData && actionData.type === "ADD_PRODUCT" && actionData.cappedAtMaxStock) {
+    const reqStock = Number(actionData.requestedStock ?? 0);
+    cleanDisplayText = `I cannot add ${reqStock} units for **${actionData.name}** because the maximum stock limit is **10,000 units**. I can only add **10,000 units**. Please confirm below to add **${actionData.name}** with **10,000 units**:`;
+  }
+
+  // If an authorized Admin requested deleting multiple specific products (e.g. "delete just luchi and cat and boy")
+  // and actionData has productsToDelete >= 2, ensure the reply text matches the prepared multi-product deletion
+  // instead of falsely claiming it can only delete products individually.
+  if (
+    actionData &&
+    actionData.type === "DELETE_PRODUCT" &&
+    Array.isArray(actionData.productsToDelete) &&
+    actionData.productsToDelete.length >= 2 &&
+    (!snapshot?.currentUser || snapshot.currentUser.isAdmin === true) &&
+    !isServerUnauthorizedOrBreakInPrompt(cleanPrompt, snapshot)
+  ) {
+    if (
+      /\b(?:cannot\s+process\s+a\s+bulk\s+deletion|only\s+able\s+to\s+delete\s+products\s+individually|do\s+not\s+have\s+the\s+administrative\s+permissions)\b/i.test(
+        cleanDisplayText
+      )
+    ) {
+      const names = actionData.productsToDelete
+        .map((p: any) => `**${p.productName}**`)
+        .join(", ");
+      cleanDisplayText = `I have prepared the catalog deletion for ${actionData.productsToDelete.length} products (${names}). Please confirm below to permanently remove them from your store catalog:`;
+    }
   }
 
   // Never let the AI claim in past tense ("I have updated the stock...") or claim it is deleting the whole product when UPDATE_STOCK is prepared!
@@ -4309,6 +4619,7 @@ function formatSpeechText(raw: string): string {
   const hasBengali = /[\u0980-\u09FF]/.test(raw);
   const currencyWord = hasBengali ? "টাকা" : "rupees";
   return raw
+    .replace(/^(?:read\s+the\s+following\s+message\s+aloud[^:\n]*:|say\s+in\s+a\s+[^:\n]*:)\s*/i, "")
     .replace(/```[\s\S]*?```/g, "")
     .replace(/<thought>[\s\S]*?<\/thought>/g, "")
     .replace(/#([a-zA-Z0-9_-]{5,})/g, hasBengali ? "ট্রানজেকশন" : "transaction")
@@ -4366,15 +4677,15 @@ app.post("/api/gemini/tts", async (req, res) => {
       return;
     }
 
-    const cleanSpeech = formatSpeechText(text);
+    const cleanSpeech = formatSpeechText(text).slice(0, 400);
 
     if (!cleanSpeech) {
       res.status(400).json({ error: "No readable speech content." });
       return;
     }
 
-    // Cache lookup for instant <5ms replay
-    const cacheKey = cleanSpeech.slice(0, 400);
+    // Cache lookup for instant <5ms replay (v2 key invalidates any legacy prompt-prefixed audio)
+    const cacheKey = `v2:${cleanSpeech}`;
     const cached = ttsMemoryCache.get(cacheKey);
     if (cached) {
       res.json(cached);
@@ -4382,6 +4693,7 @@ app.post("/api/gemini/tts", async (req, res) => {
     }
 
     // Request natural neural audio from single consistent Gemini TTS model ("Kore" voice via v1beta)
+    // Pass ONLY clean speech text in parts[0].text and voice style in speechMetadata so instructions are never spoken aloud
     let audioPart: any = null;
     try {
       const ttsResponse = await Promise.race([
@@ -4392,8 +4704,11 @@ app.post("/api/gemini/tts", async (req, res) => {
               role: "user",
               parts: [
                 {
-                  text: `Read the following message aloud in a single, calm, warm, consistent assistant voice without changing speaker persona:\n\n${cacheKey}`,
-                },
+                  text: cleanSpeech,
+                  speechMetadata: {
+                    style: "Calm, warm, consistent assistant",
+                  },
+                } as any,
               ],
             },
           ],
@@ -5145,7 +5460,8 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               if (!cleanSpeech) {
                 throw new Error("Empty speech text.");
               }
-              const cached = ttsMemoryCache.get(cleanSpeech);
+              const cacheKey = `v2:${cleanSpeech}`;
+              const cached = ttsMemoryCache.get(cacheKey);
               if (cached) {
                 await setDoc(
                   doc(db!, "settings", docSnap.id),
@@ -5169,8 +5485,11 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                         role: "user",
                         parts: [
                           {
-                            text: `Read the following message aloud in a single, calm, warm, consistent assistant voice without changing speaker persona:\n\n${cleanSpeech}`,
-                          },
+                            text: cleanSpeech,
+                            speechMetadata: {
+                              style: "Calm, warm, consistent assistant",
+                            },
+                          } as any,
                         ],
                       },
                     ],
@@ -5201,7 +5520,7 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
                 const oldest = ttsMemoryCache.keys().next().value;
                 if (oldest) ttsMemoryCache.delete(oldest);
               }
-              ttsMemoryCache.set(cleanSpeech, payload);
+              ttsMemoryCache.set(cacheKey, payload);
               await setDoc(
                 doc(db!, "settings", docSnap.id),
                 {

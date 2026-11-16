@@ -413,7 +413,9 @@ export function Admin() {
       if (id.startsWith("profile_")) {
         const uid = id.replace("profile_", "");
         if (uid.startsWith("local_dev_bypass")) {
-          deleteDoc(doc(db, "settings", id)).catch(() => {});
+          if (isRealAdmin) {
+            deleteDoc(doc(db, "settings", id)).catch(() => {});
+          }
           return;
         }
         const emailLower = String(data?.email || "").trim().toLowerCase();
@@ -426,7 +428,9 @@ export function Admin() {
         // If this account is in deleted_accounts and was NOT explicitly recreated after deletion,
         // purge any lingering or resurrected profile doc immediately!
         if (deletedAt > 0 && docRecreatedAt <= deletedAt) {
-          deleteDoc(doc(db, "settings", id)).catch(() => {});
+          if (isRealAdmin) {
+            deleteDoc(doc(db, "settings", id)).catch(() => {});
+          }
           return;
         }
         // Ignore empty presence-only stubs that have no uid, email, or displayName
@@ -447,7 +451,9 @@ export function Admin() {
       } else if (id.startsWith("attempts_")) {
         const uid = id.replace("attempts_", "");
         if (uid.startsWith("local_dev_bypass")) {
-          deleteDoc(doc(db, "settings", id)).catch(() => {});
+          if (isRealAdmin) {
+            deleteDoc(doc(db, "settings", id)).catch(() => {});
+          }
           return;
         }
         if (
@@ -508,19 +514,36 @@ export function Admin() {
             (profile.isOnline === true &&
               Date.now() - (Number(profile.lastActive) || 0) <= 60000));
 
+        const isCurrentUser = Boolean(user?.uid && uid === user.uid);
+        const localSelfPhoto = isCurrentUser
+          ? localStorage.getItem(`custom_user_photo_${uid}`) || ""
+          : "";
+        const localSelfName = isCurrentUser
+          ? localStorage.getItem(`custom_user_name_${uid}`) || ""
+          : "";
+        const localPhotoTs = isCurrentUser
+          ? Number(localStorage.getItem(`custom_user_photo_ts_${uid}`) || 0)
+          : 0;
+        const profileUpdatedAt = Number(profile.updatedAt) || 0;
+        const useLocalSelf = isCurrentUser && localPhotoTs > profileUpdatedAt;
+
         return {
           uid,
           allUids: [uid],
-          displayName: profile.displayName || "Anonymous User",
+          displayName:
+            (useLocalSelf && localSelfName ? localSelfName : profile.displayName) ||
+            "Anonymous User",
           email: emailStr || "No Email provided",
           customPhotoURL: String(
-            profile.customPhotoURL || profile.photoURL || profile.avatar || ""
+            (useLocalSelf && localSelfPhoto
+              ? localSelfPhoto
+              : profile.customPhotoURL || profile.photoURL || profile.avatar) || ""
           ).trim(),
           failedCount: isActuallyAdmin ? 0 : attemptInfo.failedCount,
           lockedByAdmin: isActuallyAdmin ? false : attemptInfo.lockedByAdmin,
           isBlocked,
           recreatedAt: Number(profile.recreatedAt) || 0,
-          updatedAt: profile.updatedAt || 0,
+          updatedAt: Math.max(profileUpdatedAt, localPhotoTs),
           isAdmin: isActuallyAdmin,
           role: actualRole,
           isOnline: isActuallyOnline,
@@ -553,12 +576,14 @@ export function Admin() {
         const accRecreated = Number(acc.recreatedAt) || 0;
         const existingRecreated = Number(existing.recreatedAt) || 0;
         if (accRecreated > existingRecreated && accRecreated > (existing.updatedAt || 0)) {
-          existing.allUids.forEach((staleUid: string) => {
-            if (staleUid !== acc.uid) {
-              deleteDoc(doc(db, "settings", `profile_${staleUid}`)).catch(() => {});
-              deleteDoc(doc(db, "settings", `attempts_${staleUid}`)).catch(() => {});
-            }
-          });
+          if (isRealAdmin) {
+            existing.allUids.forEach((staleUid: string) => {
+              if (staleUid !== acc.uid) {
+                deleteDoc(doc(db, "settings", `profile_${staleUid}`)).catch(() => {});
+                deleteDoc(doc(db, "settings", `attempts_${staleUid}`)).catch(() => {});
+              }
+            });
+          }
           byKey.set(normEmail, {
             ...acc,
             customPhotoURL: pickBestPhotoUrl(acc.customPhotoURL, existing.customPhotoURL),
@@ -567,7 +592,7 @@ export function Admin() {
           return;
         }
         if (existingRecreated > accRecreated && existingRecreated > (acc.updatedAt || 0)) {
-          if (acc.uid !== existing.uid) {
+          if (isRealAdmin && acc.uid !== existing.uid) {
             deleteDoc(doc(db, "settings", `profile_${acc.uid}`)).catch(() => {});
             deleteDoc(doc(db, "settings", `attempts_${acc.uid}`)).catch(() => {});
           }
@@ -578,7 +603,12 @@ export function Admin() {
         }
 
         const mergedUids = Array.from(new Set([...existing.allUids, acc.uid]));
-        const preferCurrent = acc.uid === user?.uid || (acc.updatedAt || 0) >= (existing.updatedAt || 0);
+        const accUpdated = Number(acc.updatedAt) || 0;
+        const existingUpdated = Number(existing.updatedAt) || 0;
+        const preferCurrent =
+          accUpdated !== existingUpdated
+            ? accUpdated > existingUpdated
+            : acc.uid === user?.uid;
         const mergedAdmin = Boolean((preferCurrent ? acc : existing).isAdmin);
         const mergedLocked = mergedAdmin ? false : existing.lockedByAdmin || acc.lockedByAdmin;
         const mergedBlocked = mergedAdmin ? false : Boolean(existing.isBlocked || acc.isBlocked);
@@ -766,6 +796,13 @@ export function Admin() {
 
   const handleResolveConflictVoid = async (conflict: SyncConflictRecord) => {
     if (!user || resolvingConflictId) return;
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can void or resolve conflicted bills."
+      );
+      return;
+    }
     triggerHaptic("medium");
     setResolvingConflictId(conflict.id);
     try {
@@ -791,6 +828,13 @@ export function Admin() {
 
   const handleResolveConflictForceApprove = async (conflict: SyncConflictRecord) => {
     if (!user || resolvingConflictId) return;
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can force-approve conflicted bills."
+      );
+      return;
+    }
     triggerHaptic("heavy");
     setResolvingConflictId(conflict.id);
     try {
@@ -977,6 +1021,14 @@ export function Admin() {
     if (e) e.preventDefault();
     const trimmedMessage = broadcastMessage.trim();
     if (!trimmedMessage || !user) return;
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setShowBroadcastModal(false);
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can broadcast global notifications."
+      );
+      return;
+    }
 
     triggerHaptic("success");
     setSendingBroadcast(true);
@@ -2220,6 +2272,13 @@ export function Admin() {
 
   const handleImportJSONBackup = async (file: File) => {
     if (!file) return;
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can import or restore database backups."
+      );
+      return;
+    }
     triggerHaptic("medium");
     setIsProcessing(true);
     setActionSuccessTitle("Operation Complete");
@@ -2281,6 +2340,13 @@ export function Admin() {
   };
 
   const handleDirectDatabaseCopy = async (oldDatabaseId: string) => {
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can sync or overwrite database records."
+      );
+      return;
+    }
     const rawTrimmed = oldDatabaseId.trim();
     const currentDatabaseId = appletConfig.firestoreDatabaseId || "";
 
@@ -2751,8 +2817,22 @@ export function Admin() {
         ).catch(() => {});
       }
 
-      if (user && targetUids.includes(user.uid)) {
-        localStorage.setItem(`custom_user_photo_${user.uid}`, trimmedPhoto);
+      if (user && (targetUids.includes(user.uid) || isSelfEdit)) {
+        const nowTs = Date.now();
+        if (trimmedPhoto) {
+          localStorage.setItem(`custom_user_photo_${user.uid}`, trimmedPhoto);
+        } else {
+          localStorage.removeItem(`custom_user_photo_${user.uid}`);
+        }
+        localStorage.setItem(`custom_user_photo_ts_${user.uid}`, String(nowTs));
+        if (trimmedName) {
+          localStorage.setItem(`custom_user_name_${user.uid}`, trimmedName);
+        }
+        try {
+          (user as any).displayName = trimmedName;
+          (user as any).photoURL = trimmedPhoto;
+        } catch {}
+        window.dispatchEvent(new Event("profilePhotoUpdated"));
         if (safeEditIsAdmin) {
           localStorage.setItem(`is_admin_cached_${user.uid}`, "true");
           localStorage.setItem(`is_real_admin_cached_${user.uid}`, "true");
@@ -3476,6 +3556,14 @@ export function Admin() {
 
   const handleLogoutAllOtherSessions = async () => {
     if (!user) return;
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setLogoutConfirm(false);
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can force-logout other user sessions."
+      );
+      return;
+    }
     triggerHaptic("heavy");
     setLogoutConfirm(false);
     setActionSuccessTitle("Operation Complete");
@@ -3496,6 +3584,15 @@ export function Admin() {
   };
 
   const handleDeleteAllProducts = async () => {
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setDeleteConfMode("none");
+      setDangerConfirmText("");
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can purge products from the database."
+      );
+      return;
+    }
     triggerHaptic("heavy");
     setDeleteConfMode("none");
     setDangerConfirmText("");
@@ -3559,6 +3656,15 @@ export function Admin() {
   };
 
   const handleDeleteAllBills = async () => {
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setDeleteConfMode("none");
+      setDangerConfirmText("");
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can purge transaction bills."
+      );
+      return;
+    }
     triggerHaptic("heavy");
     setDeleteConfMode("none");
     setDangerConfirmText("");
@@ -3645,6 +3751,15 @@ export function Admin() {
   };
 
   const handleDeleteAllOtherCosts = async () => {
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setDeleteConfMode("none");
+      setDangerConfirmText("");
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can purge other costs and expenses."
+      );
+      return;
+    }
     triggerHaptic("heavy");
     setDeleteConfMode("none");
     setDangerConfirmText("");
@@ -3695,6 +3810,14 @@ export function Admin() {
   };
 
   const handleClearAllLogs = async () => {
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      setShowClearLogsConfirm(false);
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can clear activity logs."
+      );
+      return;
+    }
     setShowClearLogsConfirm(false);
     setClearingLogs(true);
     triggerHaptic("heavy");
@@ -3906,6 +4029,14 @@ export function Admin() {
   };
 
   const handleSavePin = () => {
+    if (!isRealAdmin) {
+      triggerHaptic("error");
+      handleCloseChangePin();
+      setActionErrorMessage(
+        "Access Denied: Only permanent Administrators can change the security PIN."
+      );
+      return;
+    }
     const pinToSave = newPinRef.current;
     if (pinToSave.length !== 4 || isPinSaved) return;
     if (user) {
@@ -4175,9 +4306,9 @@ export function Admin() {
             transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] },
           }}
           transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-          className="pb-6 px-4 pt-4 max-w-sm mx-auto min-h-[85vh] flex flex-col justify-between relative transform-gpu"
+          className="pb-4 px-4 pt-2 max-w-sm mx-auto h-[calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px))] max-h-[100dvh] overflow-hidden select-none touch-none flex flex-col justify-between relative transform-gpu"
         >
-          <header className="w-full flex items-center justify-between pt-2">
+          <header className="w-full flex items-center justify-between pt-1 shrink-0">
             <button
               type="button"
               onClick={() => {
@@ -4363,11 +4494,11 @@ export function Admin() {
             )}
           </AnimatePresence>
 
-          <div className="w-full text-center text-[10px] text-slate-400 dark:text-slate-600 font-medium py-1">
+          <div className="w-full text-center text-[10px] text-slate-400 dark:text-slate-600 font-medium py-1 shrink-0">
             Terminal Secured with 256-bit Firestore Encryption
           </div>
           <style>
-            {"#bottom-nav-container { display: none !important; } #app-scroll-container { padding-bottom: calc(1rem + env(safe-area-inset-bottom)) !important; }"}
+            {"#bottom-nav-container { display: none !important; } #app-scroll-container { overflow: hidden !important; overscroll-behavior: none !important; touch-action: none !important; padding-bottom: env(safe-area-inset-bottom, 0px) !important; height: 100dvh !important; }"}
           </style>
         </motion.div>
       );
@@ -4761,7 +4892,7 @@ export function Admin() {
                           >
                             {/* Top Status & Bill Header Band */}
                             <div
-                              className={`px-4 py-2.5 flex items-center justify-between gap-2 border-b ${
+                              className={`px-3.5 py-2.5 flex items-center justify-between gap-2 border-b ${
                                 isUnresolved
                                   ? "bg-amber-500/[0.06] dark:bg-amber-500/[0.07] border-amber-500/15 dark:border-amber-400/15"
                                   : isForceApproved
@@ -4771,7 +4902,7 @@ export function Admin() {
                             >
                               <div className="flex items-center gap-2 min-w-0">
                                 <span
-                                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-extrabold uppercase tracking-wider shrink-0 ${
+                                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[9.5px] font-extrabold uppercase tracking-wide whitespace-nowrap shrink-0 ${
                                     isUnresolved
                                       ? "bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30"
                                       : isForceApproved
@@ -4780,7 +4911,7 @@ export function Admin() {
                                   }`}
                                 >
                                   <span
-                                    className={`w-1.5 h-1.5 rounded-full ${
+                                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${
                                       isUnresolved
                                         ? "bg-amber-500 dark:bg-amber-400"
                                         : isForceApproved
@@ -4796,15 +4927,15 @@ export function Admin() {
                                     ? "Synced on Retry"
                                     : "Void Confirmed"}
                                 </span>
-                                <span className="px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/[0.08] text-[11px] font-mono font-bold text-slate-700 dark:text-slate-300 truncate">
+                                <span className="px-2 py-0.5 rounded-lg bg-slate-100 dark:bg-white/[0.06] border border-slate-200/80 dark:border-white/[0.08] text-[10.5px] font-mono font-bold text-slate-700 dark:text-slate-200 shrink-0 whitespace-nowrap">
                                   #{String(conflict.billId || "").slice(-6).toUpperCase()}
                                 </span>
                               </div>
 
                               <div className="flex items-center gap-2 shrink-0">
                                 {detectedTime && (
-                                  <span className="inline-flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400 font-mono font-semibold">
-                                    <Clock size={11} className="opacity-75" />
+                                  <span className="inline-flex items-center gap-1 text-[10.5px] text-slate-500 dark:text-slate-400 font-mono font-semibold whitespace-nowrap">
+                                    <Clock size={11} className="opacity-75 shrink-0" />
                                     {new Date(detectedTime).toLocaleTimeString([], {
                                       hour: "2-digit",
                                       minute: "2-digit",
@@ -4817,7 +4948,7 @@ export function Admin() {
                                     onClick={() =>
                                       handleDeleteSingleConflict(conflict.id)
                                     }
-                                    className="w-7 h-7 rounded-full flex items-center justify-center bg-slate-100/80 dark:bg-white/[0.06] text-slate-500 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/15 transition-colors cursor-pointer"
+                                    className="w-7 h-7 rounded-full flex items-center justify-center bg-slate-100/80 dark:bg-white/[0.06] text-slate-500 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-500/15 transition-colors cursor-pointer shrink-0"
                                     title="Delete conflict log"
                                     aria-label="Delete conflict log"
                                   >
@@ -4909,20 +5040,20 @@ export function Admin() {
                                 <div className="grid grid-cols-2 gap-2.5 pt-0.5">
                                   <button
                                     type="button"
-                                    disabled={isResolving}
+                                    disabled={!isRealAdmin || isResolving}
                                     onClick={() => handleResolveConflictVoid(conflict)}
-                                    className="h-10 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-white/[0.06] dark:hover:bg-white/[0.11] text-slate-800 dark:text-slate-200 border border-slate-200/90 dark:border-white/[0.08] font-bold text-xs transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                                    className="h-10 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-white/[0.06] dark:hover:bg-white/[0.11] text-slate-800 dark:text-slate-200 border border-slate-200/90 dark:border-white/[0.08] font-bold text-xs transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:pointer-events-none"
                                   >
                                     <Check size={14} className="text-emerald-600 dark:text-emerald-400 shrink-0" />
                                     <span>Confirm Voided</span>
                                   </button>
                                   <button
                                     type="button"
-                                    disabled={isResolving}
+                                    disabled={!isRealAdmin || isResolving}
                                     onClick={() =>
                                       handleResolveConflictForceApprove(conflict)
                                     }
-                                    className="h-10 px-3 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-bold text-xs shadow-md shadow-indigo-600/25 transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 border border-indigo-400/25"
+                                    className="h-10 px-3 rounded-xl bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 text-white font-bold text-xs shadow-md shadow-indigo-600/25 transition-all active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 disabled:pointer-events-none border border-indigo-400/25"
                                   >
                                     {isResolving ? (
                                       <RefreshCw size={13} className="animate-spin shrink-0" />
@@ -4933,14 +5064,14 @@ export function Admin() {
                                   </button>
                                 </div>
                               ) : (
-                                <div className="flex items-center justify-between text-[11px] font-semibold text-slate-500 dark:text-slate-400 border-t border-slate-100 dark:border-white/[0.06] pt-2.5">
-                                  <span>
-                                    Resolved by{" "}
-                                    <strong className="text-slate-700 dark:text-slate-200">
+                                <div className="flex items-center justify-between gap-3 text-[11px] font-semibold text-slate-500 dark:text-slate-400 border-t border-slate-100 dark:border-white/[0.06] pt-3">
+                                  <div className="flex items-center gap-2 min-w-0">
+                                    <span className="shrink-0">Resolved by</span>
+                                    <strong className="px-2 py-0.5 rounded-md bg-slate-100 dark:bg-white/[0.06] border border-slate-200/70 dark:border-white/[0.07] font-bold text-slate-800 dark:text-slate-100 truncate">
                                       {conflict.resolvedBy || "Admin"}
                                     </strong>
-                                  </span>
-                                  <span className="font-mono">
+                                  </div>
+                                  <span className="font-mono shrink-0">
                                     {conflict.resolvedAt
                                       ? formatDateToDMY(conflict.resolvedAt)
                                       : ""}
@@ -5726,7 +5857,7 @@ export function Admin() {
                               />
                               {acc.customPhotoURL && (
                                 <img
-                                  key={`${acc.uid}_${acc.customPhotoURL.slice(0, 64)}`}
+                                  key={`${acc.uid}_${acc.customPhotoURL.length}_${acc.customPhotoURL.slice(-40)}`}
                                   src={acc.customPhotoURL}
                                   alt={acc.displayName}
                                   className="w-full h-full object-cover absolute inset-0 z-10 transition-opacity duration-200"
@@ -6030,13 +6161,14 @@ export function Admin() {
                               if (photo.dataUrl) {
                                 setUploading(true);
                                 setUploadError("");
-                                const res = await fetch(photo.dataUrl);
-                                const blob = await res.blob();
-                                const file = new File([blob], "avatar.jpg", {
-                                  type: "image/jpeg",
-                                });
-                                const compressedUrl = await compressProfileImage(file);
-                                setEditPhoto(compressedUrl);
+                                try {
+                                  const compressedUrl = await compressProfileImage(
+                                    photo.dataUrl
+                                  );
+                                  setEditPhoto(compressedUrl);
+                                } catch {
+                                  setEditPhoto(photo.dataUrl);
+                                }
                                 triggerHaptic("success");
                               }
                             } catch (err: any) {
@@ -6068,7 +6200,7 @@ export function Admin() {
                               />
                               {editPhoto && (
                                 <img
-                                  key={editPhoto.slice(0, 64)}
+                                  key={`${editPhoto.length}_${editPhoto.slice(-40)}`}
                                   src={editPhoto}
                                   alt="Preview"
                                   className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-110 absolute inset-0 z-10"
@@ -6918,6 +7050,13 @@ export function Admin() {
             whileTap={{ scale: 0.965 }}
             transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.14 }}
             onClick={() => {
+              if (!isRealAdmin) {
+                triggerHaptic("error");
+                setActionErrorMessage(
+                  "Access Denied: Only permanent Administrators can change the security PIN."
+                );
+                return;
+              }
               triggerHaptic("medium");
               if (savePinTimerRef.current) {
                 clearTimeout(savePinTimerRef.current);
@@ -7118,6 +7257,13 @@ export function Admin() {
             whileTap={{ scale: 0.965 }}
             transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.35 }}
             onClick={() => {
+              if (!isRealAdmin) {
+                triggerHaptic("error");
+                setActionErrorMessage(
+                  "Access Denied: Only permanent Administrators can force-logout other user sessions."
+                );
+                return;
+              }
               triggerHaptic("medium");
               setLogoutConfirm(true);
             }}
@@ -7143,6 +7289,13 @@ export function Admin() {
             whileTap={{ scale: 0.965 }}
             transition={{ type: "spring", stiffness: 460, damping: 28, mass: 0.65, delay: 0.38 }}
             onClick={() => {
+              if (!isRealAdmin) {
+                triggerHaptic("error");
+                setActionErrorMessage(
+                  "Access Denied: Only permanent Administrators can purge products, bills, or expenses."
+                );
+                return;
+              }
               triggerHaptic("medium");
               setDeleteConfMode("products");
               setDangerConfirmText("");
@@ -7837,10 +7990,12 @@ export function Admin() {
                   </button>
                   <button
                     disabled={
+                      !isRealAdmin ||
                       dangerConfirmText.trim().toUpperCase() !== "DELETE" ||
                       isProcessing
                     }
                     onClick={async () => {
+                      if (!isRealAdmin) return;
                       if (deleteConfMode === "products") {
                         await handleDeleteAllProducts();
                       } else if (deleteConfMode === "bills") {
@@ -7891,9 +8046,9 @@ export function Admin() {
         transition: { duration: 0.11, ease: [0.32, 0, 0.67, 0] },
       }}
       transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
-      className="pb-6 px-4 pt-4 max-w-sm mx-auto min-h-[90vh] flex flex-col justify-between relative transform-gpu"
+      className="pb-4 px-4 pt-2 max-w-sm mx-auto h-[calc(100dvh-env(safe-area-inset-top,0px)-env(safe-area-inset-bottom,0px))] max-h-[100dvh] overflow-hidden select-none touch-none flex flex-col justify-between relative transform-gpu"
     >
-      <header className="w-full flex items-center justify-between pt-2">
+      <header className="w-full flex items-center justify-between pt-1 shrink-0">
         <button
           onClick={handleExitAdmin}
           className="w-11 h-11 flex-shrink-0 flex items-center justify-center bg-slate-50 hover:bg-slate-100 dark:bg-slate-900/80 dark:hover:bg-slate-850 text-slate-800 dark:text-slate-100 border border-slate-200/80 dark:border-slate-800 rounded-2xl shadow-sm active:scale-95 transition-all outline-none"
@@ -7934,34 +8089,34 @@ export function Admin() {
         </div>
       ) : (
         <div className="my-auto flex flex-col items-center w-full">
-          <div className="mb-8 text-center">
+          <div className="mb-4 sm:mb-6 text-center">
             {/* The Badge - Styled with outstanding dark mode neon color scheme, completely visible (no clipping) */}
-            <div className="w-24 h-24 rounded-3xl bg-gradient-to-tr from-indigo-500/10 via-purple-500/5 to-pink-500/5 dark:from-indigo-500/20 dark:via-purple-500/10 dark:to-pink-500/10 relative flex items-center justify-center mx-auto mb-6 border border-indigo-100/30 dark:border-indigo-500/30 shadow-[0_8px_30px_rgb(99,102,241,0.06)] dark:shadow-[0_8px_30px_rgb(99,102,241,0.15)] p-0.5">
+            <div className="w-20 h-20 sm:w-22 sm:h-22 rounded-3xl bg-gradient-to-tr from-indigo-500/10 via-purple-500/5 to-pink-500/5 dark:from-indigo-500/20 dark:via-purple-500/10 dark:to-pink-500/10 relative flex items-center justify-center mx-auto mb-4 border border-indigo-100/30 dark:border-indigo-500/30 shadow-[0_8px_30px_rgb(99,102,241,0.06)] dark:shadow-[0_8px_30px_rgb(99,102,241,0.15)] p-0.5">
               <div className="absolute inset-0 bg-indigo-500/5 dark:bg-indigo-400/5 blur-xl rounded-3xl" />
               <div className="w-full h-full bg-white dark:bg-slate-900 rounded-[1.35rem] flex items-center justify-center">
                 <Shield
                   className="text-indigo-600 dark:text-indigo-400 drop-shadow-[0_2px_8px_rgba(99,102,241,0.2)]"
-                  size={40}
+                  size={36}
                 />
               </div>
 
               {/* Perfectly sized & positioned lock badge to guarantee full visibility */}
-              <div className="absolute -bottom-1 -right-1 w-8 h-8 rounded-2xl bg-slate-900 dark:bg-slate-100 flex items-center justify-center shadow-md border border-indigo-100/40 dark:border-slate-800">
-                <Lock className="text-white dark:text-slate-900" size={14} />
+              <div className="absolute -bottom-1 -right-1 w-7 h-7 rounded-2xl bg-slate-900 dark:bg-slate-100 flex items-center justify-center shadow-md border border-indigo-100/40 dark:border-slate-800">
+                <Lock className="text-white dark:text-slate-900" size={13} />
               </div>
             </div>
 
-            <h1 className="text-3xl font-black tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-950 dark:from-white dark:via-indigo-100 dark:to-white">
+            <h1 className="text-2xl sm:text-3xl font-black tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-slate-950 via-indigo-950 to-slate-950 dark:from-white dark:via-indigo-100 dark:to-white">
               Admin{" "}
               <span className="text-indigo-600 dark:text-indigo-400">
                 Login
               </span>
             </h1>
-            <p className="text-slate-400 dark:text-slate-500 text-[10px] font-extrabold uppercase tracking-widest mt-2">
+            <p className="text-slate-400 dark:text-slate-500 text-[10px] font-extrabold uppercase tracking-widest mt-1.5">
               Enter 4-Digit Security PIN
             </p>
             {failedAttempts > 0 && (
-              <p className="text-rose-600 dark:text-rose-400 text-xs font-bold mt-2.5 bg-rose-500/10 px-3 py-1 rounded-full border border-rose-500/20 inline-block">
+              <p className="text-rose-600 dark:text-rose-400 text-xs font-bold mt-2 bg-rose-500/10 px-3 py-0.5 rounded-full border border-rose-500/20 inline-block">
                 Failed attempts: {failedAttempts}/3
               </p>
             )}
@@ -7970,7 +8125,7 @@ export function Admin() {
           <motion.div
             animate={error ? { x: [-10, 10, -8, 8, -4, 4, 0] } : { x: 0 }}
             transition={{ duration: 0.36 }}
-            className="flex gap-4 mb-10 justify-center"
+            className="flex gap-4 mb-6 sm:mb-8 justify-center"
           >
             {[0, 1, 2, 3].map((i) => {
               const isFilled = i < pin.length;
@@ -7997,7 +8152,7 @@ export function Admin() {
             })}
           </motion.div>
 
-          <div className="grid grid-cols-3 gap-4 w-full px-4">
+          <div className="grid grid-cols-3 gap-3 sm:gap-3.5 w-full px-4">
             {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num, idx) => (
               <motion.button
                 key={num}
@@ -8013,7 +8168,7 @@ export function Admin() {
                   delay: idx * 0.018,
                 }}
                 onClick={() => handlePinInput(num.toString())}
-                className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-16 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none cursor-pointer"
+                className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-14 sm:h-15 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none cursor-pointer"
               >
                 {num}
               </motion.button>
@@ -8032,7 +8187,7 @@ export function Admin() {
                 delay: 9 * 0.018,
               }}
               onClick={() => handlePinInput("0")}
-              className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-16 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none cursor-pointer"
+              className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-14 sm:h-15 flex items-center justify-center text-slate-850 dark:text-slate-100 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none cursor-pointer"
             >
               0
             </motion.button>
@@ -8049,16 +8204,19 @@ export function Admin() {
                 delay: 10 * 0.018,
               }}
               onClick={handleBackspace}
-              className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-16 flex items-center justify-center text-slate-400 dark:text-slate-500 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none cursor-pointer"
+              className="text-2xl font-black bg-white/60 dark:bg-slate-900/60 backdrop-blur-md rounded-2xl h-14 sm:h-15 flex items-center justify-center text-slate-400 dark:text-slate-500 border border-slate-200/50 dark:border-slate-800/80 shadow-sm active:bg-slate-100 dark:active:!bg-slate-800 transition-colors outline-none cursor-pointer"
             >
               <Delete size={22} className="stroke-[2.5]" />
             </motion.button>
           </div>
         </div>
       )}
-      <div className="w-full text-center text-[10px] text-slate-400 dark:text-slate-600 font-medium py-2">
+      <div className="w-full text-center text-[10px] text-slate-400 dark:text-slate-600 font-medium py-1 shrink-0">
         Terminal Secured with 256-bit Firestore Encryption
       </div>
+      <style>
+        {"#bottom-nav-container { display: none !important; } #app-scroll-container { overflow: hidden !important; overscroll-behavior: none !important; touch-action: none !important; padding-bottom: env(safe-area-inset-bottom, 0px) !important; height: 100dvh !important; }"}
+      </style>
     </motion.div>
   );
 }

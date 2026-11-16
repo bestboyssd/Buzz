@@ -492,40 +492,6 @@ export function Settings() {
                 />
               }
             />
-            {Capacitor.isNativePlatform() && (
-              <SettingItem
-                icon={<Radio size={20} className={batteryUnrestricted ? "text-emerald-500" : "text-amber-500"} />}
-                label="Instant Background Alerts"
-                description={
-                  batteryUnrestricted
-                    ? "Unrestricted background sync active"
-                    : "Allow unrestricted battery for instant alerts"
-                }
-                action={
-                  <div className="flex items-center gap-1.5">
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border ${
-                        batteryUnrestricted
-                          ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25"
-                          : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25"
-                      }`}
-                    >
-                      {batteryUnrestricted ? "Active" : "Restricted"}
-                    </span>
-                    <ChevronRight size={18} className="text-slate-400" />
-                  </div>
-                }
-                onClick={() => {
-                  triggerHaptic("light");
-                  try {
-                    const nativeExporter = (window as any).AndroidExporter;
-                    if (nativeExporter && typeof nativeExporter.requestIgnoreBatteryOptimizations === "function") {
-                      nativeExporter.requestIgnoreBatteryOptimizations();
-                    }
-                  } catch {}
-                }}
-              />
-            )}
             <SettingItem
               icon={<Smartphone size={20} className="text-blue-500" />}
               label="Keep Screen On"
@@ -553,6 +519,59 @@ export function Settings() {
                   onChange={togglePrinterConnected}
                 />
               }
+            />
+            <SettingItem
+              singleLine
+              icon={
+                <Radio
+                  size={20}
+                  className={
+                    notifications && batteryUnrestricted ? "text-emerald-500" : "text-amber-500"
+                  }
+                />
+              }
+              label="Background Alerts"
+              description={
+                !notifications
+                  ? "Enable notifications first"
+                  : batteryUnrestricted
+                  ? "Real-time push & sync active"
+                  : "Tap to allow background sync"
+              }
+              action={
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border ${
+                      notifications && batteryUnrestricted
+                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25"
+                        : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25"
+                    }`}
+                  >
+                    {!notifications ? "Paused" : batteryUnrestricted ? "Active" : "Restricted"}
+                  </span>
+                  <ChevronRight size={18} className="text-slate-400" />
+                </div>
+              }
+              onClick={() => {
+                triggerHaptic("light");
+                try {
+                  const nativeExporter = (window as any).AndroidExporter;
+                  if (
+                    nativeExporter &&
+                    typeof nativeExporter.requestIgnoreBatteryOptimizations === "function"
+                  ) {
+                    nativeExporter.requestIgnoreBatteryOptimizations();
+                    return;
+                  }
+                } catch {}
+                if (!notifications) {
+                  toggleNotifications(true);
+                  return;
+                }
+                if ("Notification" in window && Notification.permission !== "granted") {
+                  Notification.requestPermission().catch(() => {});
+                }
+              }}
             />
           </div>
         </motion.section>
@@ -738,6 +757,7 @@ function SettingItem({
   description,
   action,
   onClick,
+  singleLine,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -745,6 +765,7 @@ function SettingItem({
   description?: React.ReactNode;
   action?: React.ReactNode;
   onClick?: () => void;
+  singleLine?: boolean;
 }) {
   return (
     <motion.div
@@ -762,14 +783,22 @@ function SettingItem({
           {icon}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center flex-wrap gap-2">
-            <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100 leading-snug">
+          <div className={`flex items-center gap-2 ${singleLine ? "flex-nowrap" : "flex-wrap"}`}>
+            <h3
+              className={`font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100 leading-snug ${
+                singleLine ? "truncate whitespace-nowrap" : ""
+              }`}
+            >
               {label}
             </h3>
             {badge}
           </div>
           {description && (
-            <div className="text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 leading-snug break-words mt-0.5">
+            <div
+              className={`text-[11px] sm:text-xs text-slate-500 dark:text-slate-400 leading-snug mt-0.5 ${
+                singleLine ? "truncate whitespace-nowrap" : "break-words"
+              }`}
+            >
               {description}
             </div>
           )}

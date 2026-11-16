@@ -13,6 +13,7 @@ import {
   PauseCircle,
   User,
   Phone,
+  FileText,
   Link2,
   Check,
 } from 'lucide-react';
@@ -441,6 +442,8 @@ export function BillReceiptModal({
   );
   const [liveBill, setLiveBill] = useState<Bill>(selectedBill);
   const [editingUdhaar, setEditingUdhaar] = useState(false);
+  const [udhaarError, setUdhaarError] = useState('');
+  const customerNameInputRef = useRef<HTMLInputElement | null>(null);
   const [customerName, setCustomerName] = useState(
     selectedBill.customerName === 'Walk-in Customer' ? '' : selectedBill.customerName || ''
   );
@@ -449,7 +452,7 @@ export function BillReceiptModal({
   const [savingUdhaar, setSavingUdhaar] = useState(false);
   const { setCart, setEditingBill } = useCart();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, isRealAdmin } = useAuth();
   const timerRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -459,6 +462,7 @@ export function BillReceiptModal({
     );
     setCustomerPhone(selectedBill.customerPhone || '');
     setUdhaarNote(selectedBill.udhaarNote || '');
+    setUdhaarError('');
   }, [selectedBill]);
 
   const handleSaveUdhaar = async () => {
@@ -466,9 +470,11 @@ export function BillReceiptModal({
     const trimmedName = customerName.trim();
     if (!trimmedName) {
       triggerHaptic('error');
-      setActionError('Customer name is required to put a bill on Udhar.');
+      setUdhaarError('Customer name is required to put a bill on Udhar.');
+      customerNameInputRef.current?.focus();
       return;
     }
+    setUdhaarError('');
     setActionError('');
     setSavingUdhaar(true);
     triggerHaptic('medium');
@@ -489,7 +495,7 @@ export function BillReceiptModal({
       setEditingUdhaar(false);
       triggerHaptic('success');
     } catch (e: any) {
-      setActionError(e.message || 'Could not update Udhar details.');
+      setUdhaarError(e.message || 'Could not update Udhar details.');
     } finally {
       setSavingUdhaar(false);
     }
@@ -520,7 +526,12 @@ export function BillReceiptModal({
     });
     const handleAndroidBack = (e: Event) => {
       e.preventDefault();
-      onClose();
+      if (editingUdhaar) {
+        setEditingUdhaar(false);
+        setUdhaarError('');
+      } else {
+        onClose();
+      }
     };
     window.addEventListener('androidBackPress', handleAndroidBack);
     return () => {
@@ -528,7 +539,7 @@ export function BillReceiptModal({
       window.removeEventListener('androidBackPress', handleAndroidBack);
       if (timerRef.current) window.clearTimeout(timerRef.current);
     };
-  }, [onClose]);
+  }, [onClose, editingUdhaar]);
 
   const startThermalPrintSequence = () => {
     const livePrinter = getPrinterState();
@@ -592,6 +603,12 @@ export function BillReceiptModal({
 
   const handleDelete = () => {
     if (!selectedBill.id) return;
+    if (!isRealAdmin) {
+      triggerHaptic('error');
+      setConfirming(false);
+      setActionError('Access Denied: Only permanent Administrators can delete bills.');
+      return;
+    }
     triggerHaptic('success');
 
     deleteBillAndRestoreStock(selectedBill.id, selectedBill.items).catch((err) => {
@@ -1049,114 +1066,41 @@ export function BillReceiptModal({
                   </div>
                 </div>
 
-                {/* Put on Udhar Customer Details Panel */}
+                {/* Put on Udhar Button Row */}
                 <div className="mb-3.5">
-                  <AnimatePresence mode="wait" initial={false}>
-                    {editingUdhaar ? (
-                      <motion.div
-                        key="editing-udhaar-form"
-                        initial={{ opacity: 0, y: 8, scale: 0.97 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: -6, scale: 0.97 }}
-                        transition={{ type: 'spring', stiffness: 500, damping: 30, mass: 0.65 }}
-                        className="p-3.5 rounded-2xl bg-amber-50/70 dark:bg-amber-500/10 border border-amber-200/80 dark:border-amber-500/25 space-y-2.5"
+                  <div className="flex items-center gap-2">
+                    <motion.button
+                      type="button"
+                      whileHover={{ scale: 1.015, y: -1 }}
+                      whileTap={{ scale: 0.96 }}
+                      transition={{ type: 'spring', stiffness: 500, damping: 26 }}
+                      onClick={() => {
+                        triggerHaptic('selection');
+                        setUdhaarError('');
+                        setEditingUdhaar(true);
+                      }}
+                      className="flex-1 py-2.5 px-3 rounded-xl bg-amber-500/12 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/25 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <User size={14} />
+                      <span>
+                        {liveBill.isUdhar ? 'Edit Udhar' : 'Put on Udhar'}
+                      </span>
+                    </motion.button>
+                    {liveBill.isUdhar && (
+                      <motion.button
+                        type="button"
+                        whileHover={{ scale: 1.015, y: -1 }}
+                        whileTap={{ scale: 0.96 }}
+                        transition={{ type: 'spring', stiffness: 500, damping: 26 }}
+                        disabled={savingUdhaar}
+                        onClick={handleSettleBill}
+                        className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition-colors cursor-pointer"
                       >
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-extrabold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
-                            <User size={14} />
-                            Customer Udhar Details
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setEditingUdhaar(false)}
-                            className="text-[11px] font-bold text-slate-500 hover:text-slate-700 dark:text-slate-400 cursor-pointer"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <input
-                            type="text"
-                            required
-                            value={customerName}
-                            onChange={(e) => {
-                              setCustomerName(e.target.value);
-                              if (actionError) setActionError('');
-                            }}
-                            placeholder="Customer Name (Required)"
-                            className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white"
-                          />
-                          <input
-                            type="tel"
-                            value={customerPhone}
-                            onChange={(e) =>
-                              setCustomerPhone(e.target.value.replace(/[^0-9+\-\s]/g, ''))
-                            }
-                            placeholder="Phone Number"
-                            className="px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-mono font-bold text-slate-900 dark:text-white"
-                          />
-                        </div>
-                        <input
-                          type="text"
-                          value={udhaarNote}
-                          onChange={(e) => setUdhaarNote(e.target.value)}
-                          placeholder="Optional note (e.g. promised date)"
-                          className="w-full px-3 py-2 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-medium text-slate-900 dark:text-white"
-                        />
-                        <motion.button
-                          type="button"
-                          whileHover={{ scale: 1.01 }}
-                          whileTap={{ scale: 0.96 }}
-                          transition={{ type: 'spring', stiffness: 500, damping: 26 }}
-                          disabled={savingUdhaar}
-                          onClick={handleSaveUdhaar}
-                          className="w-full py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold transition-colors cursor-pointer"
-                        >
-                          {savingUdhaar ? 'Saving...' : 'Save Udhar'}
-                        </motion.button>
-                      </motion.div>
-                    ) : (
-                      <motion.div
-                        key="udhaar-buttons-row"
-                        initial={{ opacity: 0, y: 4 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, y: -4 }}
-                        transition={{ duration: 0.16 }}
-                        className="flex items-center gap-2"
-                      >
-                        <motion.button
-                          type="button"
-                          whileHover={{ scale: 1.015, y: -1 }}
-                          whileTap={{ scale: 0.96 }}
-                          transition={{ type: 'spring', stiffness: 500, damping: 26 }}
-                          onClick={() => {
-                            triggerHaptic('selection');
-                            setEditingUdhaar(true);
-                          }}
-                          className="flex-1 py-2 px-3 rounded-xl bg-amber-500/12 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/25 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                        >
-                          <User size={14} />
-                          <span>
-                            {liveBill.isUdhar ? 'Edit Udhar' : 'Put on Udhar'}
-                          </span>
-                        </motion.button>
-                        {liveBill.isUdhar && (
-                          <motion.button
-                            type="button"
-                            whileHover={{ scale: 1.015, y: -1 }}
-                            whileTap={{ scale: 0.96 }}
-                            transition={{ type: 'spring', stiffness: 500, damping: 26 }}
-                            disabled={savingUdhaar}
-                            onClick={handleSettleBill}
-                            className="flex-1 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-xs transition-colors cursor-pointer"
-                          >
-                            <Check size={14} />
-                            <span>Settle Udhar</span>
-                          </motion.button>
-                        )}
-                      </motion.div>
+                        <Check size={14} />
+                        <span>Settle Udhar</span>
+                      </motion.button>
                     )}
-                  </AnimatePresence>
+                  </div>
                 </div>
 
                 {/* Expandable Bluetooth/Thermal Printer Guide */}
@@ -1278,14 +1222,17 @@ export function BillReceiptModal({
                       </motion.button>
                       <motion.button
                         type="button"
-                        whileHover={{ scale: 1.02, y: -1 }}
-                        whileTap={{ scale: 0.94 }}
+                        disabled={!isRealAdmin}
+                        title={!isRealAdmin ? 'Only Administrators can delete bills' : 'Delete bill'}
+                        whileHover={isRealAdmin ? { scale: 1.02, y: -1 } : undefined}
+                        whileTap={isRealAdmin ? { scale: 0.94 } : undefined}
                         transition={{ type: 'spring', stiffness: 500, damping: 26 }}
                         onClick={() => {
+                          if (!isRealAdmin) return;
                           triggerHaptic('medium');
                           setConfirming(true);
                         }}
-                        className="flex items-center justify-center gap-1.5 py-3 rounded-xl text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/15 hover:bg-red-100 dark:hover:bg-red-500/25 text-xs font-bold transition-colors cursor-pointer"
+                        className="flex items-center justify-center gap-1.5 py-3 rounded-xl text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-500/15 hover:bg-red-100 dark:hover:bg-red-500/25 text-xs font-bold transition-colors cursor-pointer disabled:opacity-35 disabled:pointer-events-none"
                       >
                         <Trash2 size={15} />
                         <span>Delete</span>
@@ -1298,6 +1245,201 @@ export function BillReceiptModal({
           </AnimatePresence>
         </div>
       </motion.div>
+
+      {/* Standalone Put on Udhar Modal (Identical to Checkout / Cart Udhar Modal) */}
+      <AnimatePresence>
+        {editingUdhaar && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 no-print">
+            <motion.div
+              initial={perfMode ? false : { opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={perfMode ? undefined : { opacity: 0 }}
+              transition={perfMode ? { duration: 0 } : { duration: 0.2 }}
+              onClick={() => {
+                setUdhaarError('');
+                setEditingUdhaar(false);
+              }}
+              className="absolute inset-0 bg-slate-950/65 backdrop-blur-md"
+            />
+            <motion.div
+              initial={
+                perfMode
+                  ? false
+                  : { scale: 0.88, opacity: 0, y: 24, filter: 'blur(6px)' }
+              }
+              animate={{
+                scale: 1,
+                opacity: 1,
+                y: 0,
+                filter: 'blur(0px)',
+                transition: perfMode
+                  ? { duration: 0 }
+                  : {
+                      type: 'spring',
+                      stiffness: 490,
+                      damping: 32,
+                      mass: 0.68,
+                    },
+              }}
+              exit={
+                perfMode
+                  ? undefined
+                  : {
+                      scale: 0.92,
+                      opacity: 0,
+                      y: 14,
+                      filter: 'blur(4px)',
+                      transition: { duration: 0.18, ease: [0.32, 0.72, 0, 1] },
+                    }
+              }
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md bg-white dark:bg-[#151822] border border-slate-200/90 dark:border-white/[0.08] p-5 sm:p-6 rounded-[2rem] shadow-2xl relative z-10 max-h-[90vh] overflow-y-auto transform-gpu"
+            >
+              <div className="flex items-center justify-between pb-3.5 mb-4 border-b border-slate-100 dark:border-white/[0.06]">
+                <div className="flex items-center gap-2.5">
+                  <motion.div
+                    initial={{ scale: 0.8, rotate: -10 }}
+                    animate={{ scale: 1, rotate: 0 }}
+                    transition={{ type: 'spring', stiffness: 500, damping: 24 }}
+                    className="w-9 h-9 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center"
+                  >
+                    <User size={19} />
+                  </motion.div>
+                  <div>
+                    <h3 className="text-base font-extrabold text-slate-900 dark:text-white leading-tight">
+                      Put on Udhar
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">
+                      Unpaid amount:{' '}
+                      <span className="font-mono font-bold text-amber-600 dark:text-amber-400">
+                        ₹{formatPrice(Number(liveBill.total) || 0)}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+                <motion.button
+                  type="button"
+                  whileHover={{ scale: 1.06, rotate: 90 }}
+                  whileTap={{ scale: 0.9 }}
+                  transition={{ type: 'spring', stiffness: 500, damping: 24 }}
+                  onClick={() => {
+                    setUdhaarError('');
+                    setEditingUdhaar(false);
+                  }}
+                  className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700 transition-colors cursor-pointer"
+                >
+                  <X size={16} />
+                </motion.button>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">
+                    Customer Name (Required)
+                  </label>
+                  <div className="relative">
+                    <User
+                      size={15}
+                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    />
+                    <input
+                      ref={customerNameInputRef}
+                      type="text"
+                      required
+                      value={customerName}
+                      onChange={(e) => {
+                        setCustomerName(e.target.value);
+                        if (udhaarError) setUdhaarError('');
+                      }}
+                      placeholder="e.g. Rahul Sharma"
+                      className={`w-full pl-9 pr-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-900 border ${
+                        udhaarError
+                          ? 'border-red-500 focus:ring-red-500/40'
+                          : 'border-slate-200 dark:border-slate-800 focus:ring-amber-500/40'
+                      } text-xs font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2`}
+                    />
+                  </div>
+                  {udhaarError && (
+                    <p className="mt-1.5 text-[11px] font-bold text-red-500 dark:text-red-400">
+                      {udhaarError}
+                    </p>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">
+                    Phone Number (Optional)
+                  </label>
+                  <div className="relative">
+                    <Phone
+                      size={15}
+                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    />
+                    <input
+                      type="tel"
+                      inputMode="tel"
+                      value={customerPhone}
+                      onChange={(e) =>
+                        setCustomerPhone(e.target.value.replace(/[^0-9+\-\s]/g, ''))
+                      }
+                      placeholder="e.g. 9876543210"
+                      className="w-full pl-9 pr-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-mono font-bold text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-300 mb-1">
+                    Udhar Note (Optional)
+                  </label>
+                  <div className="relative">
+                    <FileText
+                      size={15}
+                      className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400"
+                    />
+                    <input
+                      type="text"
+                      value={udhaarNote}
+                      onChange={(e) => setUdhaarNote(e.target.value)}
+                      placeholder="e.g. Will pay on Friday evening"
+                      className="w-full pl-9 pr-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-xs font-semibold text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500/40"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2.5 mt-5">
+                <motion.button
+                  type="button"
+                  whileHover={{ scale: 1.015 }}
+                  whileTap={{ scale: 0.96 }}
+                  transition={{ type: 'spring', stiffness: 500, damping: 26 }}
+                  onClick={() => {
+                    setUdhaarError('');
+                    setEditingUdhaar(false);
+                  }}
+                  className="flex-1 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold transition-colors cursor-pointer"
+                >
+                  Cancel
+                </motion.button>
+                <motion.button
+                  type="button"
+                  whileHover={{ scale: 1.015, y: -1 }}
+                  whileTap={{ scale: 0.96 }}
+                  transition={{ type: 'spring', stiffness: 500, damping: 26 }}
+                  disabled={savingUdhaar}
+                  onClick={handleSaveUdhaar}
+                  className="flex-[1.5] py-3 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold shadow-md shadow-amber-500/20 transition-colors cursor-pointer disabled:opacity-60"
+                >
+                  {savingUdhaar
+                    ? 'Saving...'
+                    : `Confirm Udhar · ₹${formatPrice(Number(liveBill.total) || 0)}`}
+                </motion.button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Fallback Print-Only DOM Node for environments that invoke window.print() directly */}
       <div className="hidden print-only text-black bg-white p-4 font-sans w-full max-w-[300px] mx-auto text-sm">

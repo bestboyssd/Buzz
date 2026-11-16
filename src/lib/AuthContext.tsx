@@ -108,6 +108,8 @@ const wipeLocalAccountCache = (uid: string) => {
   localStorage.removeItem(`is_admin_cached_${uid}`);
   localStorage.removeItem(`is_real_admin_cached_${uid}`);
   localStorage.removeItem(`custom_user_photo_${uid}`);
+  localStorage.removeItem(`custom_user_photo_ts_${uid}`);
+  localStorage.removeItem(`custom_user_name_${uid}`);
   localStorage.removeItem(`is_blocked_cached_${uid}`);
   localStorage.removeItem(`theme_${uid}`);
   localStorage.removeItem(`hapticsEnabled_${uid}`);
@@ -117,8 +119,124 @@ const wipeLocalAccountCache = (uid: string) => {
   localStorage.removeItem(`tempAdminAuth_${uid}`);
 };
 
+const cloneUserWithLiveGetters = (
+  baseUser: User,
+  overrides?: {
+    photoURL?: string;
+    displayName?: string;
+    email?: string;
+  }
+): User => {
+  const uid = baseUser.uid;
+  const providerInfo = baseUser.providerData || [];
+  const rawPhotoDesc = Object.getOwnPropertyDescriptor(baseUser, "photoURL");
+  const rawNameDesc = Object.getOwnPropertyDescriptor(baseUser, "displayName");
+  const rawEmailDesc = Object.getOwnPropertyDescriptor(baseUser, "email");
+
+  let fallbackPhoto =
+    overrides?.photoURL !== undefined
+      ? overrides.photoURL
+      : (rawPhotoDesc && "value" in rawPhotoDesc
+          ? rawPhotoDesc.value
+          : baseUser.photoURL) ||
+        providerInfo.find((p) => p.providerId === "google.com")?.photoURL ||
+        "";
+  let fallbackName =
+    overrides?.displayName !== undefined
+      ? overrides.displayName
+      : (rawNameDesc && "value" in rawNameDesc
+          ? rawNameDesc.value
+          : baseUser.displayName) ||
+        providerInfo.find((p) => p.displayName)?.displayName ||
+        "";
+  let fallbackEmail =
+    overrides?.email !== undefined
+      ? overrides.email
+      : (rawEmailDesc && "value" in rawEmailDesc
+          ? rawEmailDesc.value
+          : baseUser.email) ||
+        providerInfo.find((p) => p.email)?.email ||
+        "";
+
+  const updated = Object.assign(
+    Object.create(Object.getPrototypeOf(baseUser)),
+    baseUser
+  );
+
+  Object.defineProperty(updated, "photoURL", {
+    get() {
+      try {
+        const localCustom = localStorage.getItem(`custom_user_photo_${uid}`);
+        if (localCustom !== null && localCustom !== "") return localCustom;
+      } catch {}
+      const googlePhoto = providerInfo.find(
+        (p) => p.providerId === "google.com"
+      )?.photoURL;
+      if (googlePhoto) return googlePhoto;
+      return fallbackPhoto || "";
+    },
+    set(val) {
+      fallbackPhoto = val || "";
+      if (val) {
+        try {
+          localStorage.setItem(`custom_user_photo_${uid}`, val);
+          localStorage.setItem(
+            `custom_user_photo_ts_${uid}`,
+            String(Date.now())
+          );
+        } catch {}
+      }
+    },
+    enumerable: true,
+    configurable: true,
+  });
+
+  Object.defineProperty(updated, "displayName", {
+    get() {
+      try {
+        const localName = localStorage.getItem(`custom_user_name_${uid}`);
+        if (localName !== null && localName !== "") return localName;
+      } catch {}
+      return (
+        fallbackName ||
+        providerInfo.find((p) => p.displayName)?.displayName ||
+        ""
+      );
+    },
+    set(val) {
+      fallbackName = val || "";
+      if (val) {
+        try {
+          localStorage.setItem(`custom_user_name_${uid}`, val);
+        } catch {}
+      }
+    },
+    enumerable: true,
+    configurable: true,
+  });
+
+  Object.defineProperty(updated, "email", {
+    get() {
+      return (
+        fallbackEmail ||
+        providerInfo.find((p) => p.email)?.email ||
+        ""
+      );
+    },
+    set(val) {
+      fallbackEmail = val || "";
+    },
+    enumerable: true,
+    configurable: true,
+  });
+
+  return updated as User;
+};
+
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  const [user, setUser] = useState<User | null>(() => auth.currentUser);
+  const [user, setUser] = useState<User | null>(() =>
+    auth.currentUser ? cloneUserWithLiveGetters(auth.currentUser) : null
+  );
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState<boolean>(() => {
     const u = auth.currentUser;
@@ -224,50 +342,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           providerInfo.find((p) => p.displayName)?.displayName ||
           "";
         let originalPhotoURL = currentUser.photoURL;
-
-        Object.defineProperty(currentUser, "photoURL", {
-          get() {
-            const localCustom = localStorage.getItem(
-              `custom_user_photo_${currentUser.uid}`
-            );
-            if (localCustom) return localCustom;
-
-            const googlePhoto = providerInfo.find(
-              (p) => p.providerId === "google.com"
-            )?.photoURL;
-            if (googlePhoto) return googlePhoto;
-
-            return originalPhotoURL || "";
-          },
-          set(val) {
-            originalPhotoURL = val;
-          },
-          configurable: true,
+        const patchedCurrentUser = cloneUserWithLiveGetters(currentUser, {
+          photoURL: originalPhotoURL || "",
+          displayName: resolvedName,
+          email: resolvedEmail,
         });
-
-        if (resolvedName) {
-          Object.defineProperty(currentUser, "displayName", {
-            get() {
-              return resolvedName;
-            },
-            set(val) {
-              resolvedName = val;
-            },
-            configurable: true,
-          });
-        }
-
-        if (resolvedEmail) {
-          Object.defineProperty(currentUser, "email", {
-            get() {
-              return resolvedEmail;
-            },
-            set(val) {
-              resolvedEmail = val;
-            },
-            configurable: true,
-          });
-        }
 
         const isOwner =
           resolvedEmail.trim().toLowerCase() === "suman.das.199972@gmail.com";
@@ -297,7 +376,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           }
         }
 
-        setUser(currentUser);
+        setUser(patchedCurrentUser);
         setLoading(false);
 
         // Load instantly from cache
@@ -476,13 +555,28 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 );
               }
 
-              if (customPhotoURL) {
+              const localPhotoTs = Number(
+                localStorage.getItem(`custom_user_photo_ts_${currentUser.uid}`) || 0
+              );
+              const docUpdatedAt = Number(data.updatedAt || 0);
+              const cachedLocalPhoto = localStorage.getItem(
+                `custom_user_photo_${currentUser.uid}`
+              );
+              if (localPhotoTs > docUpdatedAt && cachedLocalPhoto) {
+                customPhotoURL = cachedLocalPhoto;
+              } else if (customPhotoURL) {
                 localStorage.setItem(
                   `custom_user_photo_${currentUser.uid}`,
                   customPhotoURL
                 );
               } else {
                 localStorage.removeItem(`custom_user_photo_${currentUser.uid}`);
+              }
+              if (savedName) {
+                localStorage.setItem(
+                  `custom_user_name_${currentUser.uid}`,
+                  savedName
+                );
               }
 
               // Load saved theme from Firestore if present; otherwise keep device/cached theme
@@ -688,52 +782,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
             setUser((prev) => {
               if (!prev || prev.uid !== currentUser.uid) return prev;
-              const updatedUser = Object.assign(
-                Object.create(Object.getPrototypeOf(prev)),
-                prev
-              );
-              Object.defineProperty(updatedUser, "photoURL", {
-                get() {
-                  const localCustom = localStorage.getItem(
-                    `custom_user_photo_${prev.uid}`
-                  );
-                  if (localCustom) return localCustom;
-
-                  const googlePhoto = prev.providerData?.find(
-                    (p) => p.providerId === "google.com"
-                  )?.photoURL;
-                  if (googlePhoto) return googlePhoto;
-
-                  return originalPhotoURL || "";
-                },
-                set(val) {
-                  originalPhotoURL = val;
-                },
-                configurable: true,
+              return cloneUserWithLiveGetters(prev, {
+                photoURL: originalPhotoURL || "",
+                displayName: savedName,
+                email: savedEmail,
               });
-              if (savedName) {
-                Object.defineProperty(updatedUser, "displayName", {
-                  get() {
-                    return savedName;
-                  },
-                  set(val) {
-                    savedName = val;
-                  },
-                  configurable: true,
-                });
-              }
-              if (savedEmail) {
-                Object.defineProperty(updatedUser, "email", {
-                  get() {
-                    return savedEmail;
-                  },
-                  set(val) {
-                    savedEmail = val;
-                  },
-                  configurable: true,
-                });
-              }
-              return updatedUser as User;
             });
           })
           .catch((err) => {
@@ -784,8 +837,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     const refreshUserAvatar = () => {
       setUser((prev) => {
         if (!prev) return prev;
-        const updated = Object.assign(Object.create(Object.getPrototypeOf(prev)), prev);
-        return updated as User;
+        return cloneUserWithLiveGetters(prev);
       });
     };
 
@@ -841,14 +893,46 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               applyPerformanceMode(targetPerf, user.uid);
             }
           }
-          
-          if (data.customPhotoURL !== undefined) {
-            if (data.customPhotoURL) {
-              localStorage.setItem(`custom_user_photo_${user.uid}`, data.customPhotoURL);
-            } else {
-              localStorage.removeItem(`custom_user_photo_${user.uid}`);
+
+          const localPhotoTs = Number(
+            localStorage.getItem(`custom_user_photo_ts_${user.uid}`) || 0
+          );
+          const remoteUpdatedAt = Number(data.updatedAt || 0);
+          const isStaleRemoteSnapshot =
+            localPhotoTs > 0 &&
+            remoteUpdatedAt > 0 &&
+            remoteUpdatedAt < localPhotoTs;
+
+          if (!isStaleRemoteSnapshot) {
+            let profileIdentityChanged = false;
+            if (data.customPhotoURL !== undefined) {
+              const prevPhoto =
+                localStorage.getItem(`custom_user_photo_${user.uid}`) || "";
+              const nextPhoto = String(data.customPhotoURL || "");
+              if (nextPhoto !== prevPhoto) {
+                if (nextPhoto) {
+                  localStorage.setItem(
+                    `custom_user_photo_${user.uid}`,
+                    nextPhoto
+                  );
+                } else {
+                  localStorage.removeItem(`custom_user_photo_${user.uid}`);
+                }
+                profileIdentityChanged = true;
+              }
             }
-            refreshUserAvatar();
+            if (typeof data.displayName === "string" && data.displayName.trim()) {
+              const prevName =
+                localStorage.getItem(`custom_user_name_${user.uid}`) || "";
+              const nextName = data.displayName.trim();
+              if (nextName !== prevName) {
+                localStorage.setItem(`custom_user_name_${user.uid}`, nextName);
+                profileIdentityChanged = true;
+              }
+            }
+            if (profileIdentityChanged) {
+              refreshUserAvatar();
+            }
           }
 
           // If a legacy tempAdminAuth flag is present on a non-owner profile, clean it up in Firestore

@@ -26,8 +26,9 @@ import androidx.work.WorkManager;
 public class BuzzRealtimeSyncService extends Service {
     public static final String LIVE_SYNC_CHANNEL_ID = "buzz_live_sync_bg_v1";
     private static final int SYNC_NOTIF_ID = 8801;
-    private static final long ACTIVE_POLL_INTERVAL_MS = 6000L;
-    private static final long IDLE_POLL_INTERVAL_MS = 15000L;
+    private static final int WAKE_ALARM_REQ_CODE = 8803;
+    private static final long ACTIVE_POLL_INTERVAL_MS = 4000L;
+    private static final long IDLE_POLL_INTERVAL_MS = 8000L;
 
     private HandlerThread workerThread;
     private Handler workerHandler;
@@ -39,6 +40,7 @@ public class BuzzRealtimeSyncService extends Service {
             if (!isRunning) return;
             Context ctx = getApplicationContext();
             if (!BuzzNotificationWorker.areNotificationsEnabled(ctx)) {
+                cancelWakeAlarm(ctx);
                 stopSelf();
                 return;
             }
@@ -50,17 +52,60 @@ public class BuzzRealtimeSyncService extends Service {
             } catch (Exception ignored) {
             }
 
+            long nextDelay = isDeviceInteractive(ctx) ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
+            if (!MainActivity.isAppInForeground) {
+                scheduleDozeSafeWakeAlarm(ctx, nextDelay);
+            }
             if (isRunning && workerHandler != null) {
-                long nextDelay = isDeviceInteractive(ctx) ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
                 workerHandler.postDelayed(this, nextDelay);
             }
         }
     };
 
+    public static void scheduleDozeSafeWakeAlarm(Context context, long delayMs) {
+        if (context == null) return;
+        try {
+            Intent wakeIntent = new Intent(context, BuzzRealtimeSyncService.class);
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent pi = PendingIntent.getService(context, WAKE_ALARM_REQ_CODE, wakeIntent, flags);
+            AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+            if (am != null && pi != null) {
+                long triggerAt = SystemClock.elapsedRealtime() + Math.max(4000L, delayMs);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi);
+                } else {
+                    am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi);
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    public static void cancelWakeAlarm(Context context) {
+        if (context == null) return;
+        try {
+            Intent wakeIntent = new Intent(context, BuzzRealtimeSyncService.class);
+            int flags = PendingIntent.FLAG_NO_CREATE;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent pi = PendingIntent.getService(context, WAKE_ALARM_REQ_CODE, wakeIntent, flags);
+            AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
+            if (am != null && pi != null) {
+                am.cancel(pi);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
     public static void startIfPermitted(Context context) {
         if (context == null) return;
         ensureLiveSyncChannel(context);
         if (!BuzzNotificationWorker.areNotificationsEnabled(context)) {
+            cancelWakeAlarm(context);
             stopService(context);
             return;
         }
@@ -68,12 +113,14 @@ public class BuzzRealtimeSyncService extends Service {
             Intent intent = new Intent(context, BuzzRealtimeSyncService.class);
             context.startService(intent);
         } catch (Exception ignored) {
+            scheduleDozeSafeWakeAlarm(context, 4000L);
         }
     }
 
     public static void stopService(Context context) {
         if (context == null) return;
         ensureLiveSyncChannel(context);
+        cancelWakeAlarm(context);
         try {
             context.stopService(new Intent(context, BuzzRealtimeSyncService.class));
         } catch (Exception ignored) {
@@ -92,17 +139,17 @@ public class BuzzRealtimeSyncService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         ensureLiveSyncChannel(this);
-        if (!BuzzNotificationWorker.areNotificationsEnabled(getApplicationContext())) {
+        Context ctx = getApplicationContext();
+        if (!BuzzNotificationWorker.areNotificationsEnabled(ctx)) {
+            cancelWakeAlarm(ctx);
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        if (!isRunning) {
-            isRunning = true;
-            if (workerHandler != null) {
-                workerHandler.removeCallbacks(pollTask);
-                workerHandler.post(pollTask);
-            }
+        isRunning = true;
+        if (workerHandler != null) {
+            workerHandler.removeCallbacks(pollTask);
+            workerHandler.post(pollTask);
         }
 
         return START_STICKY;

@@ -636,7 +636,7 @@ export const addProduct = async (product: Omit<Product, 'id'>, existingId?: stri
         name: cleanName,
         price: Math.min(10000, Math.max(0, Number(product.price) || 0)),
         ...(resolvedCostPrice !== undefined ? { costPrice: resolvedCostPrice } : {}),
-        stock: Math.min(2000, Math.max(0, Number(product.stock) || 0)),
+        stock: Math.min(10000, Math.max(0, Number(product.stock) || 0)),
         soldCount: Math.max(0, Number(product.soldCount) || 0),
         createdAt: Number(product.createdAt) || Date.now(),
         updatedAt: Date.now(),
@@ -675,7 +675,7 @@ export const updateProduct = async (id: string, data: Partial<Product>): Promise
     }
     const sanitizedData: Partial<Product> = { ...data };
     if (sanitizedData.stock !== undefined) {
-        sanitizedData.stock = Math.min(2000, Math.max(0, Number(sanitizedData.stock) || 0));
+        sanitizedData.stock = Math.min(10000, Math.max(0, Number(sanitizedData.stock) || 0));
     }
     if (sanitizedData.price !== undefined) {
         sanitizedData.price = Math.min(10000, Math.max(0, Number(sanitizedData.price) || 0));

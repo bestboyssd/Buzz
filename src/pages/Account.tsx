@@ -13,8 +13,9 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/AuthContext";
 import { triggerHaptic } from "../lib/haptics";
 import { updateProfile } from "firebase/auth";
-import { compressProfileImage } from "../lib/imageUtils";
-import { db } from "../lib/firebase";
+import { compressProfileImage, readUncroppedImageDataUrl } from "../lib/imageUtils";
+import { ImageCropperModal } from "../components/ImageCropperModal";
+import { auth, db } from "../lib/firebase";
 import { doc, setDoc } from "firebase/firestore";
 import { Capacitor } from "@capacitor/core";
 import { Camera as CapCamera, CameraResultType, CameraSource } from "@capacitor/camera";
@@ -23,8 +24,29 @@ export function Account() {
   const navigate = useNavigate();
   const { user, signOut } = useAuth();
 
-  const [displayName, setDisplayName] = useState(() => user?.displayName || "");
-  const [photoURL, setPhotoURL] = useState(() => user?.photoURL || "");
+  const resolveCurrentName = () => {
+    if (!user) return "";
+    try {
+      const localName = localStorage.getItem(`custom_user_name_${user.uid}`);
+      if (localName) return localName;
+    } catch {}
+    return user.displayName || "";
+  };
+
+  const resolveCurrentPhoto = () => {
+    if (!user) return "";
+    try {
+      const localPhoto = localStorage.getItem(`custom_user_photo_${user.uid}`);
+      if (localPhoto) return localPhoto;
+    } catch {}
+    return user.photoURL || "";
+  };
+
+  const [displayName, setDisplayName] = useState(resolveCurrentName);
+  const [photoURL, setPhotoURL] = useState(resolveCurrentPhoto);
+  const [savedDisplayName, setSavedDisplayName] = useState(resolveCurrentName);
+  const [savedPhotoURL, setSavedPhotoURL] = useState(resolveCurrentPhoto);
+  const [cropModalSrc, setCropModalSrc] = useState<string | null>(null);
   const [imageLoadError, setImageLoadError] = useState(false);
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState("");
@@ -32,22 +54,44 @@ export function Account() {
 
   useEffect(() => {
     if (user) {
-      setDisplayName(user.displayName || "");
-      setPhotoURL(user.photoURL || "");
+      const nextName = resolveCurrentName();
+      const nextPhoto = resolveCurrentPhoto();
+      setDisplayName(nextName);
+      setPhotoURL(nextPhoto);
+      setSavedDisplayName(nextName);
+      setSavedPhotoURL(nextPhoto);
       setImageLoadError(false);
+      try {
+        localStorage.removeItem(`custom_user_raw_photo_${user.uid}`);
+      } catch {}
     }
-  }, [user?.uid, user?.displayName, user?.photoURL]);
+  }, [user?.uid]);
+
+  useEffect(() => {
+    const handleExternalProfileUpdate = () => {
+      if (!user) return;
+      const nextName = resolveCurrentName();
+      const nextPhoto = resolveCurrentPhoto();
+      setSavedDisplayName(nextName);
+      setSavedPhotoURL(nextPhoto);
+      setPhotoURL(nextPhoto);
+      setDisplayName(nextName);
+      setImageLoadError(false);
+    };
+    window.addEventListener("profilePhotoUpdated", handleExternalProfileUpdate);
+    return () =>
+      window.removeEventListener("profilePhotoUpdated", handleExternalProfileUpdate);
+  }, [user?.uid]);
 
   const handlePickImage = async () => {
     if (Capacitor.isNativePlatform()) {
       try {
         const photo = await CapCamera.getPhoto({
-          quality: 85,
+          quality: 90,
           allowEditing: false,
           resultType: CameraResultType.DataUrl,
           source: CameraSource.Photos,
-          width: 360,
-          height: 360,
+          width: 1200,
           correctOrientation: true,
         });
 
@@ -56,13 +100,11 @@ export function Account() {
           setError("");
           setSuccess("");
           try {
-            const compressedUrl = await compressProfileImage(photo.dataUrl);
-            setPhotoURL(compressedUrl);
-            setImageLoadError(false);
+            const uncroppedUrl = await readUncroppedImageDataUrl(photo.dataUrl);
+            setCropModalSrc(uncroppedUrl);
             triggerHaptic("light");
           } catch (compErr) {
-            setPhotoURL(photo.dataUrl);
-            setImageLoadError(false);
+            setCropModalSrc(photo.dataUrl);
             triggerHaptic("light");
           } finally {
             setLoading(false);
@@ -98,6 +140,7 @@ export function Account() {
 
     const trimmedPhoto = photoURL.trim();
     const trimmedName = displayName.trim();
+    const now = Date.now();
 
     try {
       const isPhotoTooLong =
@@ -106,18 +149,71 @@ export function Account() {
       if (trimmedPhoto) {
         try {
           localStorage.setItem(`custom_user_photo_${user.uid}`, trimmedPhoto);
+          localStorage.setItem(`custom_user_photo_ts_${user.uid}`, String(now));
         } catch (storageErr) {
           console.warn("Local storage cache photo non-fatal error:", storageErr);
         }
       } else {
         try {
           localStorage.removeItem(`custom_user_photo_${user.uid}`);
+          localStorage.setItem(`custom_user_photo_ts_${user.uid}`, String(now));
         } catch (_) {}
       }
 
-      const authPromise = updateProfile(user, {
+      if (trimmedName) {
+        try {
+          localStorage.setItem(`custom_user_name_${user.uid}`, trimmedName);
+        } catch (_) {}
+      }
+
+      try {
+        const cachedAccountsRaw = localStorage.getItem("admin_cached_accounts");
+        if (cachedAccountsRaw) {
+          const parsed = JSON.parse(cachedAccountsRaw);
+          if (Array.isArray(parsed)) {
+            const normUserEmail = String(user.email || "").trim().toLowerCase();
+            const updatedAccounts = parsed.map((acc: any) => {
+              const accEmail = String(acc?.email || "").trim().toLowerCase();
+              if (
+                acc?.uid === user.uid ||
+                (Array.isArray(acc?.allUids) && acc.allUids.includes(user.uid)) ||
+                (normUserEmail && accEmail === normUserEmail)
+              ) {
+                return {
+                  ...acc,
+                  displayName: trimmedName || acc.displayName,
+                  customPhotoURL: trimmedPhoto || "",
+                  updatedAt: now,
+                };
+              }
+              return acc;
+            });
+            localStorage.setItem(
+              "admin_cached_accounts",
+              JSON.stringify(updatedAccounts)
+            );
+          }
+        }
+      } catch (_) {}
+
+      // Update in-memory user properties and baseline state immediately before async calls
+      try {
+        (user as any).displayName = trimmedName;
+        (user as any).photoURL = trimmedPhoto;
+      } catch (_) {}
+
+      setSavedDisplayName(trimmedName);
+      setSavedPhotoURL(trimmedPhoto);
+      setDisplayName(trimmedName);
+      setPhotoURL(trimmedPhoto);
+
+      // Notify other views that profile photo was updated right away
+      window.dispatchEvent(new Event("profilePhotoUpdated"));
+
+      const authTarget = auth.currentUser || user;
+      const authPromise = updateProfile(authTarget, {
         displayName: trimmedName,
-        photoURL: isPhotoTooLong || !trimmedPhoto ? null : trimmedPhoto,
+        ...(isPhotoTooLong ? {} : { photoURL: trimmedPhoto || null }),
       }).catch((authErr) => {
         console.warn("Firebase Auth updateProfile non-fatal error:", authErr);
       });
@@ -125,9 +221,11 @@ export function Account() {
       const dbPromise = setDoc(
         doc(db, "settings", `profile_${user.uid}`),
         {
+          uid: user.uid,
+          email: user.email || "",
           customPhotoURL: trimmedPhoto || "",
           displayName: trimmedName,
-          updatedAt: Date.now(),
+          updatedAt: now,
         },
         { merge: true }
       ).catch((dbErr) => {
@@ -140,13 +238,6 @@ export function Account() {
         new Promise((resolve) => setTimeout(resolve, 120)),
       ]);
 
-      // Update in-memory user properties immediately
-      try {
-        (user as any).displayName = trimmedName;
-        (user as any).photoURL = trimmedPhoto;
-      } catch (_) {}
-
-      // Notify other views that profile photo was updated
       window.dispatchEvent(new Event("profilePhotoUpdated"));
 
       setSuccess("Profile updated successfully!");
@@ -172,8 +263,8 @@ export function Account() {
   };
 
   const hasChanges =
-    displayName !== (user?.displayName || "") ||
-    photoURL !== (user?.photoURL || "");
+    displayName.trim() !== savedDisplayName.trim() ||
+    photoURL.trim() !== savedPhotoURL.trim();
 
   return (
     <motion.div
@@ -256,69 +347,77 @@ export function Account() {
         </AnimatePresence>
 
         <form onSubmit={handleUpdate} className="flex flex-col items-center">
-          <motion.div
-            whileHover={{ scale: 1.03 }}
-            whileTap={{ scale: 0.95 }}
-            transition={{ type: "spring", stiffness: 480, damping: 26 }}
-            className="relative group cursor-pointer mb-6"
-            onClick={handlePickImage}
-          >
-            <div className="w-32 h-32 rounded-full bg-indigo-50 dark:bg-indigo-900/20 flex items-center justify-center overflow-hidden border-4 border-white dark:border-slate-800 shadow-xl shadow-indigo-200/50 dark:shadow-none relative z-10 mx-auto">
-              {photoURL && !imageLoadError ? (
-                <img
-                  src={photoURL}
-                  alt="Profile"
-                  className="w-full h-full object-cover shrink-0 min-h-full min-w-full"
-                  referrerPolicy="no-referrer"
-                  onError={() => setImageLoadError(true)}
-                />
-              ) : (
-                <User
-                  size={48}
-                  className="text-indigo-300 dark:text-indigo-700"
-                />
-              )}
-              <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                <Camera className="text-white" size={32} />
+          <div className="relative mb-5">
+            <motion.div
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.95 }}
+              transition={{ type: "spring", stiffness: 480, damping: 26 }}
+              className="relative group cursor-pointer"
+              onClick={handlePickImage}
+            >
+              <div className="w-32 h-32 rounded-full bg-indigo-50 dark:bg-indigo-900/20 flex items-center justify-center overflow-hidden border-4 border-white dark:border-slate-800 shadow-xl shadow-indigo-200/50 dark:shadow-none relative z-10 mx-auto">
+                {photoURL && !imageLoadError ? (
+                  <img
+                    key={`${photoURL.length}_${photoURL.slice(-40)}`}
+                    src={photoURL}
+                    alt="Profile"
+                    className="w-full h-full object-cover shrink-0 min-h-full min-w-full"
+                    referrerPolicy="no-referrer"
+                    onError={() => setImageLoadError(true)}
+                  />
+                ) : (
+                  <User
+                    size={48}
+                    className="text-indigo-300 dark:text-indigo-700"
+                  />
+                )}
+                <div className="absolute inset-0 bg-black/35 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                  <Camera className="text-white" size={30} />
+                </div>
               </div>
-            </div>
-            <input
-              id="imageUpload"
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={async (e) => {
-                const file = e.target.files?.[0];
-                e.target.value = ""; // Reset input so user can reselect the same file
-                if (file) {
-                  if (file.size > 25000000) {
-                    setError("Image must be less than 25MB");
-                    triggerHaptic("error");
-                    return;
+              <input
+                id="imageUpload"
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = ""; // Reset input so user can reselect the same file
+                  if (file) {
+                    if (file.size > 25000000) {
+                      setError("Image must be less than 25MB");
+                      triggerHaptic("error");
+                      return;
+                    }
+                    setLoading(true);
+                    setError("");
+                    setSuccess("");
+                    try {
+                      const uncroppedUrl = await readUncroppedImageDataUrl(file);
+                      setCropModalSrc(uncroppedUrl);
+                      triggerHaptic("light");
+                    } catch (err: any) {
+                      console.error("Failed to read profile image:", err);
+                      try {
+                        const fallbackUrl = await compressProfileImage(file);
+                        setPhotoURL(fallbackUrl);
+                        setImageLoadError(false);
+                      } catch {
+                        setError("Could not process this image. Please choose another image file.");
+                        triggerHaptic("error");
+                      }
+                    } finally {
+                      setLoading(false);
+                    }
                   }
-                  setLoading(true);
-                  setError("");
-                  setSuccess("");
-                  try {
-                    const compressedUrl = await compressProfileImage(file);
-                    setPhotoURL(compressedUrl);
-                    setImageLoadError(false);
-                    triggerHaptic("light");
-                  } catch (err: any) {
-                    console.error("Failed to compress profile image:", err);
-                    setError("Could not process this image. Please choose another image file.");
-                    triggerHaptic("error");
-                  } finally {
-                    setLoading(false);
-                  }
-                }
-              }}
-            />
-          </motion.div>
+                }}
+              />
+            </motion.div>
+          </div>
 
           <div className="w-full space-y-1 text-center mb-8">
             <h2 className="text-xl font-bold text-slate-800 dark:text-slate-100">
-              {user?.displayName || "Anonymous"}
+              {savedDisplayName || user?.displayName || "Anonymous"}
             </h2>
             <p className="text-slate-500 text-sm font-medium">
               Tap image to update
@@ -372,6 +471,22 @@ export function Account() {
           </div>
         </form>
       </motion.div>
+
+      <ImageCropperModal
+        isOpen={Boolean(cropModalSrc)}
+        imageSrc={cropModalSrc}
+        shape="circle"
+        title="Adjust Profile Photo"
+        targetSize={280}
+        onClose={() => setCropModalSrc(null)}
+        onConfirm={(croppedDataUrl) => {
+          setPhotoURL(croppedDataUrl);
+          setImageLoadError(false);
+          setCropModalSrc(null);
+          setError("");
+          setSuccess("");
+        }}
+      />
     </motion.div>
   );
 }

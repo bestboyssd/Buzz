@@ -753,17 +753,29 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public boolean requestIgnoreBatteryOptimizations() {
             try {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true;
-                PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-                if (pm != null && pm.isIgnoringBatteryOptimizations(getPackageName())) {
-                    return true;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                    boolean alreadyUnrestricted = pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
+                    if (!alreadyUnrestricted) {
+                        try {
+                            android.content.Intent requestIntent = new android.content.Intent(
+                                Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                Uri.parse("package:" + getPackageName())
+                            );
+                            requestIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                            startActivity(requestIntent);
+                            return true;
+                        } catch (Exception ignored) {
+                        }
+                    }
                 }
-                android.content.Intent intent = new android.content.Intent(
-                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-                    Uri.parse("package:" + getPackageName())
+                // Open the exact App Info / Battery & Background settings page for this app on the phone
+                android.content.Intent appDetailsIntent = new android.content.Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.fromParts("package", getPackageName(), null)
                 );
-                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(intent);
+                appDetailsIntent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(appDetailsIntent);
                 return true;
             } catch (Exception e) {
                 try {
@@ -907,8 +919,16 @@ public class MainActivity extends BridgeActivity {
     public void onPause() {
         isAppInForeground = false;
         super.onPause();
+        // Keep WebView JS timers & Firestore real-time push listeners active while minimized so push alerts arrive immediately
+        try {
+            if (getBridge() != null && getBridge().getWebView() != null) {
+                getBridge().getWebView().resumeTimers();
+            }
+        } catch (Exception ignored) {
+        }
         // Start fast 3-second native background polling while minimized so stock/broadcast/security alerts arrive instantly
         try {
+            BuzzRealtimeSyncService.startIfPermitted(getApplicationContext());
             if (bgPollExecutor != null) {
                 bgPollExecutor.shutdownNow();
             }
