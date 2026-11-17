@@ -2489,38 +2489,21 @@ export async function askGeminiAssistantStream(
     );
 
     const fullText = clientRes.reply || "I am here to assist your store. How can I help you today?";
-    const words = fullText.split(" ");
-    let currentText = "";
-    let wordIndex = 0;
-
-    const streamInterval = setInterval(() => {
-      if (completed || userAborted || externalSignal?.aborted) {
-        clearInterval(streamInterval);
-        return;
-      }
-      if (wordIndex < words.length) {
-        const chunk = words.slice(wordIndex, wordIndex + 4).join(" ");
-        currentText += (currentText ? " " : "") + chunk;
-        wordIndex += 4;
-        emitChunk(currentText);
-      } else {
-        clearInterval(streamInterval);
-        safeComplete({
-          reply: fullText,
-          action: validateClientAction(
-            clientRes.action || localActionCandidate,
-            prompt,
-            fullText,
-            compactedContext
-          ),
-          thought: clientRes.thought || generateDynamicThought(prompt, fullText, storeContext),
-          thoughtDuration: clientRes.thoughtDuration || 1,
-        });
-      }
-    }, 20);
+    emitChunk(fullText);
+    safeComplete({
+      reply: fullText,
+      action: validateClientAction(
+        clientRes.action || localActionCandidate,
+        prompt,
+        fullText,
+        compactedContext
+      ),
+      thought: clientRes.thought || generateDynamicThought(prompt, fullText, storeContext),
+      thoughtDuration: clientRes.thoughtDuration || 1,
+    });
   };
 
-  const watchdogMs = Capacitor.isNativePlatform() ? 2800 : 5500;
+  const watchdogMs = Capacitor.isNativePlatform() ? 2000 : 5500;
   const watchdogTimer = setTimeout(() => {
     if (!completed && !userAborted && !lastStreamedChunk) {
       streamClientFallback();

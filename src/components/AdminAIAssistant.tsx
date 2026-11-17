@@ -2504,8 +2504,9 @@ export function AdminAIAssistant({
     let watchdogTimer = window.setTimeout(handleWatchdogExpire, watchdogMs);
     activeWatchdogRef.current = watchdogTimer;
 
+    let historyPayload: ConversationTurnInput[] = [];
     try {
-      const historyPayload: ConversationTurnInput[] = cleanedPrevMessages
+      historyPayload = cleanedPrevMessages
         .filter(
           (m) =>
             m.id !== "welcome-system-msg" &&
@@ -2710,7 +2711,20 @@ export function AdminAIAssistant({
                 : msg
             );
           }
-          return prev.filter((msg) => msg.id !== assistantMsgId);
+          const fallbackRes = generateClientStoreResponse(promptText, storeContext, historyPayload);
+          const fallbackText = fallbackRes?.reply || "I am here to assist your store. How can I help you today?";
+          return prev.map((msg) =>
+            msg.id === assistantMsgId
+              ? {
+                  ...msg,
+                  content: fallbackText,
+                  action: fallbackRes?.action || null,
+                  isStreaming: false,
+                  thought: fallbackRes?.thought || generateDynamicThought(promptText, fallbackText, storeContext),
+                  thoughtDuration: Math.max(msg.thoughtDuration || 1, elapsedSec),
+                }
+              : msg
+          );
         });
         setLoading(false);
         scrollToBottom(false);
@@ -2725,24 +2739,25 @@ export function AdminAIAssistant({
       activeAssistantMsgIdRef.current = null;
 
       const elapsedSec = computeFinalThoughtSeconds(sendStartTime, Date.now());
+      const fallbackRes = generateClientStoreResponse(promptText, storeContext, historyPayload);
+      const fallbackText = fallbackRes?.reply || "I am here to assist your store. How can I help you today?";
+
       setMessages((prev) =>
-        prev
-          .map((msg) =>
-            msg.id === assistantMsgId
-              ? {
-                  ...msg,
-                  isStreaming: false,
-                  thoughtDuration: Math.max(msg.thoughtDuration || 1, elapsedSec),
-                }
-              : msg
-          )
-          .filter((msg) => !(msg.id === assistantMsgId && !msg.content?.trim()))
-      );
-      setErrorMessage(
-        err?.message || "Could not connect to Buzz AI server. Please check your connection and try again."
+        prev.map((msg) =>
+          msg.id === assistantMsgId
+            ? {
+                ...msg,
+                content: msg.content?.trim() || fallbackText,
+                action: msg.action || fallbackRes?.action || null,
+                isStreaming: false,
+                thought: msg.thought || fallbackRes?.thought || generateDynamicThought(promptText, fallbackText, storeContext),
+                thoughtDuration: Math.max(msg.thoughtDuration || 1, elapsedSec),
+              }
+            : msg
+        )
       );
       setLoading(false);
-      triggerHaptic("error");
+      triggerHaptic("light");
       scrollToBottom(false);
     }
   };
