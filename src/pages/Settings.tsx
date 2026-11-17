@@ -27,7 +27,7 @@ import { isPerformanceModeEnabled, applyPerformanceMode } from "../lib/utils";
 import { Capacitor } from "@capacitor/core";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { db } from "../lib/firebase";
-import { doc, setDoc } from "firebase/firestore";
+import { doc, getDoc, getDocFromServer, setDoc } from "firebase/firestore";
 import { PWAInstallButton } from "../components/PWAInstallButton";
 import {
   PrinterState,
@@ -42,7 +42,7 @@ import {
   triggerInstantApkDownload,
   cancelApkDownload,
 } from "../lib/versionCheck";
-import { wakeUpBuzzServer, getApiBaseUrl } from "../lib/geminiApi";
+import { wakeUpBuzzServer, getApiBaseUrl, isCookieGatedAiStudioUrl, CLOUDFLARE_EDGE_AI_URL } from "../lib/geminiApi";
 
 export function Settings() {
   const navigate = useNavigate();
@@ -136,15 +136,55 @@ export function Settings() {
     try {
       wakeUpBuzzServer();
       const baseUrl = getApiBaseUrl();
-      const target = baseUrl ? `${baseUrl}/api/health` : "/api/health";
-      const res = await fetch(target, { method: "GET", cache: "no-store" });
-      if (res.ok) {
-        setAiTestResult("Connected! Cloud bridge is active.");
+      const targets = Array.from(
+        new Set([
+          baseUrl ? `${baseUrl}/api/health` : !Capacitor.isNativePlatform() ? "/api/health" : "",
+          `${CLOUDFLARE_EDGE_AI_URL}/api/health`,
+        ].filter(Boolean))
+      );
+      for (const target of targets) {
+        try {
+          const res = await fetch(target, { method: "GET", cache: "no-store" });
+          const contentType = res.headers.get("content-type") || "";
+          if (res.ok && contentType.includes("application/json")) {
+            const data = await res.json().catch(() => null);
+            if (data?.status === "ok" || data?.ok) {
+              setAiTestResult(
+                data?.geminiConfigured === false
+                  ? "Server reached, but AI key is missing on the server."
+                  : data?.provider === "cloudflare-workers-ai"
+                  ? "Connected! 24/7 Cloudflare Edge AI is online."
+                  : "Connected! Live Buzz AI server is online."
+              );
+              return;
+            }
+          }
+        } catch {}
+      }
+
+      // Check Firestore bridge config heartbeat honestly
+      const bridgeRef = doc(db, "settings", "ai_bridge_config");
+      const snap = await getDocFromServer(bridgeRef).catch(() => getDoc(bridgeRef).catch(() => null));
+      const data = snap?.exists() ? snap.data() : null;
+      const lastBeat = Number(data?.lastHeartbeat || data?.updatedAt || 0);
+      const ageSec = lastBeat > 0 ? Math.round((Date.now() - lastBeat) / 1000) : Infinity;
+      const serverUrl = String(data?.serverUrl || "");
+
+      if (data?.serverOnline && ageSec < 180) {
+        setAiTestResult(
+          isCookieGatedAiStudioUrl(serverUrl)
+            ? "Connected via Firestore RPC Bridge (AI Studio Preview is active)."
+            : "Connected via Firestore RPC Bridge (Buzz AI server is online)."
+        );
       } else {
-        setAiTestResult(`HTTP ${res.status}: Connected to bridge, server responding.`);
+        setAiTestResult(
+          "AI server is currently offline. Open AI Studio preview or deploy server.ts (Render/Railway) and enter its URL above."
+        );
       }
     } catch {
-      setAiTestResult("Synced via Firestore RPC Bridge. AI queries will route reliably.");
+      setAiTestResult(
+        "Could not reach Buzz AI server. Check your internet connection or configure a hosted Buzz AI Server URL above."
+      );
     } finally {
       setIsTestingAi(false);
     }

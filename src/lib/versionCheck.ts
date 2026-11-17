@@ -150,11 +150,11 @@ export function compareSemver(a: string, b: string): number {
 
 export function getInitialBundledVersion(): string {
   try {
-    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.3.3";
-    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.3.3";
+    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.3.4";
+    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.3.4";
     return compareSemver(pkgVer, metaVer) > 0 ? pkgVer : metaVer;
   } catch {
-    return "1.3.3";
+    return "1.3.4";
   }
 }
 

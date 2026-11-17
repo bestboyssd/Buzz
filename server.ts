@@ -5402,6 +5402,10 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
         if (!contentType.startsWith("image/")) return;
         const buf = Buffer.from(await res.arrayBuffer());
         if (buf.length > 100 && buf.length < 350 * 1024) {
+          // Re-check latest document right before writing so we NEVER clobber a custom uploaded avatar
+          const latestSnap = await getDoc(doc(db!, "settings", docSnap.id)).catch(() => null);
+          const latestPhoto = String(latestSnap?.data()?.customPhotoURL || "").trim();
+          if (latestPhoto !== rawPhoto) return;
           const dataUrl = `data:${contentType};base64,${buf.toString("base64")}`;
           await setDoc(
             doc(db!, "settings", docSnap.id),

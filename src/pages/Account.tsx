@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   ArrowLeft,
@@ -16,7 +16,7 @@ import { updateProfile } from "firebase/auth";
 import { compressProfileImage, readUncroppedImageDataUrl } from "../lib/imageUtils";
 import { ImageCropperModal } from "../components/ImageCropperModal";
 import { auth, db } from "../lib/firebase";
-import { doc, setDoc } from "firebase/firestore";
+import { collection, doc, getDocs, setDoc } from "firebase/firestore";
 import { Capacitor } from "@capacitor/core";
 import { Camera as CapCamera, CameraResultType, CameraSource } from "@capacitor/camera";
 
@@ -67,6 +67,16 @@ export function Account() {
     }
   }, [user?.uid]);
 
+  const hasUnsavedPhotoRef = useRef(false);
+  const hasUnsavedNameRef = useRef(false);
+  const cropOpenRef = useRef(false);
+
+  useEffect(() => {
+    hasUnsavedPhotoRef.current = photoURL.trim() !== savedPhotoURL.trim();
+    hasUnsavedNameRef.current = displayName.trim() !== savedDisplayName.trim();
+    cropOpenRef.current = Boolean(cropModalSrc);
+  }, [photoURL, savedPhotoURL, displayName, savedDisplayName, cropModalSrc]);
+
   useEffect(() => {
     const handleExternalProfileUpdate = () => {
       if (!user) return;
@@ -74,9 +84,14 @@ export function Account() {
       const nextPhoto = resolveCurrentPhoto();
       setSavedDisplayName(nextName);
       setSavedPhotoURL(nextPhoto);
-      setPhotoURL(nextPhoto);
-      setDisplayName(nextName);
-      setImageLoadError(false);
+      // Never wipe unsaved edits or an active crop modal when a background sync fires
+      if (!hasUnsavedPhotoRef.current && !cropOpenRef.current) {
+        setPhotoURL(nextPhoto);
+        setImageLoadError(false);
+      }
+      if (!hasUnsavedNameRef.current) {
+        setDisplayName(nextName);
+      }
     };
     window.addEventListener("profilePhotoUpdated", handleExternalProfileUpdate);
     return () =>
@@ -218,24 +233,59 @@ export function Account() {
         console.warn("Firebase Auth updateProfile non-fatal error:", authErr);
       });
 
+      const profilePayload = {
+        uid: user.uid,
+        email: user.email || "",
+        customPhotoURL: trimmedPhoto || "",
+        photoUpdatedAt: now,
+        displayName: trimmedName,
+        updatedAt: now,
+      };
+
       const dbPromise = setDoc(
         doc(db, "settings", `profile_${user.uid}`),
-        {
-          uid: user.uid,
-          email: user.email || "",
-          customPhotoURL: trimmedPhoto || "",
-          displayName: trimmedName,
-          updatedAt: now,
-        },
+        profilePayload,
         { merge: true }
       ).catch((dbErr) => {
         console.warn("Non-fatal: could not sync profile to Firestore immediately:", dbErr);
       });
 
-      // Wait briefly for local cache queue, never block UI on mobile network stream
+      // Also sync the same customPhotoURL / photoUpdatedAt / displayName to any sibling profile_* docs
+      // belonging to the exact same email (e.g. Web tidy-byte-g5xj8 UID vs Native Android buzz-8521 UID)
+      // so the two platforms never overwrite each other with an older avatar!
+      const normEmail = String(user.email || "").trim().toLowerCase();
+      const siblingSyncPromise = normEmail
+        ? getDocs(collection(db, "settings"))
+            .then((snap) => {
+              const updates: Promise<void>[] = [];
+              snap.docs.forEach((d) => {
+                if (d.id.startsWith("profile_") && d.id !== `profile_${user.uid}`) {
+                  const dEmail = String(d.data()?.email || "").trim().toLowerCase();
+                  if (dEmail === normEmail) {
+                    updates.push(
+                      setDoc(
+                        d.ref,
+                        {
+                          customPhotoURL: trimmedPhoto || "",
+                          photoUpdatedAt: now,
+                          displayName: trimmedName,
+                          updatedAt: now,
+                        },
+                        { merge: true }
+                      ).catch(() => {})
+                    );
+                  }
+                }
+              });
+              return Promise.all(updates);
+            })
+            .catch(() => {})
+        : Promise.resolve();
+
+      // Wait briefly so Firestore write lands reliably on mobile without hanging forever if offline
       await Promise.race([
-        Promise.all([authPromise, dbPromise]),
-        new Promise((resolve) => setTimeout(resolve, 120)),
+        Promise.all([authPromise, dbPromise, siblingSyncPromise]),
+        new Promise((resolve) => setTimeout(resolve, 2500)),
       ]);
 
       window.dispatchEvent(new Event("profilePhotoUpdated"));

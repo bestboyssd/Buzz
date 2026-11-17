@@ -1,12 +1,12 @@
 {
   "name": "buzz-pos-stock-management",
   "private": true,
-  "version": "1.3.3",
+  "version": "1.3.4",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
-    "start": "node server.ts",
+    "start": "tsx server.ts",
     "lint": "tsc --noEmit",
     "preview": "vite preview --host 0.0.0.0 --port 3000"
   },
@@ -46,6 +46,7 @@
     "recharts": "^3.10.1",
     "sql.js": "^1.13.0",
     "tailwind-merge": "^3.5.0",
+    "tsx": "^4.21.0",
     "vite-plugin-pwa": "^1.2.0"
   },
   "devDependencies": {
@@ -55,7 +56,6 @@
     "@types/react-dom": "^19.2.3",
     "autoprefixer": "^10.4.21",
     "tailwindcss": "^4.1.14",
-    "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }

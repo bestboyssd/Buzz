@@ -525,7 +525,15 @@ export function Admin() {
           ? Number(localStorage.getItem(`custom_user_photo_ts_${uid}`) || 0)
           : 0;
         const profileUpdatedAt = Number(profile.updatedAt) || 0;
-        const useLocalSelf = isCurrentUser && localPhotoTs > profileUpdatedAt;
+        const profilePhotoUpdatedAt = Number(profile.photoUpdatedAt) || 0;
+        const useLocalSelf =
+          isCurrentUser &&
+          localPhotoTs > 0 &&
+          (profilePhotoUpdatedAt > 0
+            ? localPhotoTs >= profilePhotoUpdatedAt
+            : localPhotoTs > profileUpdatedAt ||
+              (localSelfPhoto.startsWith("data:image/") &&
+                !String(profile.customPhotoURL || "").startsWith("data:image/")));
 
         return {
           uid,
@@ -543,6 +551,7 @@ export function Admin() {
           lockedByAdmin: isActuallyAdmin ? false : attemptInfo.lockedByAdmin,
           isBlocked,
           recreatedAt: Number(profile.recreatedAt) || 0,
+          photoUpdatedAt: Math.max(profilePhotoUpdatedAt, isCurrentUser ? localPhotoTs : 0),
           updatedAt: Math.max(profileUpdatedAt, localPhotoTs),
           isAdmin: isActuallyAdmin,
           role: actualRole,
@@ -613,7 +622,13 @@ export function Admin() {
         const mergedLocked = mergedAdmin ? false : existing.lockedByAdmin || acc.lockedByAdmin;
         const mergedBlocked = mergedAdmin ? false : Boolean(existing.isBlocked || acc.isBlocked);
         const mergedFailed = mergedAdmin ? 0 : Math.max(existing.failedCount || 0, acc.failedCount || 0);
-        const resolvedPhoto = preferCurrent
+        const accPhotoUpdated = Number(acc.photoUpdatedAt) || 0;
+        const existingPhotoUpdated = Number(existing.photoUpdatedAt) || 0;
+        const preferCurrentPhoto =
+          accPhotoUpdated !== existingPhotoUpdated
+            ? accPhotoUpdated > existingPhotoUpdated
+            : preferCurrent;
+        const resolvedPhoto = preferCurrentPhoto
           ? pickBestPhotoUrl(acc.customPhotoURL, existing.customPhotoURL)
           : pickBestPhotoUrl(existing.customPhotoURL, acc.customPhotoURL);
 
@@ -628,6 +643,7 @@ export function Admin() {
               ? existing.displayName
               : acc.displayName,
           customPhotoURL: resolvedPhoto,
+          photoUpdatedAt: Math.max(accPhotoUpdated, existingPhotoUpdated),
           isAdmin: mergedAdmin,
           role: mergedAdmin ? "admin" : "user",
           failedCount: mergedFailed,
@@ -2736,6 +2752,8 @@ export function Admin() {
           : [editingAccount.uid];
 
       const preservedEmail = editingAccount.email || "No Email provided";
+      const saveNow = Date.now();
+      const photoChanged = trimmedPhoto !== origPhoto;
 
       // Update local state immediately for instant feedback
       setAccounts((prev) => {
@@ -2745,12 +2763,13 @@ export function Admin() {
                 ...acc,
                 displayName: trimmedName,
                 customPhotoURL: trimmedPhoto,
+                ...(photoChanged ? { photoUpdatedAt: saveNow } : {}),
                 email: preservedEmail,
                 isAdmin: safeEditIsAdmin,
                 role: safeEditIsAdmin ? "admin" : "user",
                 failedCount: safeEditIsAdmin ? 0 : acc.failedCount,
                 lockedByAdmin: safeEditIsAdmin ? false : acc.lockedByAdmin,
-                updatedAt: Date.now(),
+                updatedAt: saveNow,
               }
             : acc
         );
@@ -2770,11 +2789,12 @@ export function Admin() {
               uid: tUid,
               displayName: trimmedName,
               customPhotoURL: trimmedPhoto,
+              ...(photoChanged ? { photoUpdatedAt: saveNow } : {}),
               email: preservedEmail,
               isAdmin: safeEditIsAdmin,
               role: safeEditIsAdmin ? "admin" : "user",
               tempAdminAuth: false,
-              updatedAt: Date.now(),
+              updatedAt: saveNow,
             },
             { merge: true }
           );
@@ -2818,13 +2838,14 @@ export function Admin() {
       }
 
       if (user && (targetUids.includes(user.uid) || isSelfEdit)) {
-        const nowTs = Date.now();
         if (trimmedPhoto) {
           localStorage.setItem(`custom_user_photo_${user.uid}`, trimmedPhoto);
         } else {
           localStorage.removeItem(`custom_user_photo_${user.uid}`);
         }
-        localStorage.setItem(`custom_user_photo_ts_${user.uid}`, String(nowTs));
+        if (photoChanged) {
+          localStorage.setItem(`custom_user_photo_ts_${user.uid}`, String(saveNow));
+        }
         if (trimmedName) {
           localStorage.setItem(`custom_user_name_${user.uid}`, trimmedName);
         }

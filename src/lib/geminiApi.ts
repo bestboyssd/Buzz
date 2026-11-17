@@ -222,17 +222,21 @@ if (
 
 syncBridgeServerUrl();
 
+// Permanent 24/7 Cloudflare Workers AI edge backend ($0 free tier, zero cold starts, CORS-enabled for native Android APK)
+export const CLOUDFLARE_EDGE_AI_URL = "https://buzz-ai.dassusuman2009.workers.dev";
+
+// AI Studio dev preview URLs (ais-dev-*.run.app) require an interactive Google browser cookie
+// and return a 200 HTML "Cookie check" page to native Capacitor Android WebView fetch() calls.
+export function isCookieGatedAiStudioUrl(url: string): boolean {
+  return /^https?:\/\/ais-dev-[^/]+\.run\.app/i.test(String(url || "").trim());
+}
+
 function shouldPreferFirestoreBridge(hasVideoAttachment: boolean = false): boolean {
   if (hasVideoAttachment) {
     return false;
   }
   if (Capacitor.isNativePlatform()) {
-    const customHost =
-      typeof localStorage !== "undefined" ? localStorage.getItem("buzz_api_server_url") : null;
-    // Only prefer bridge if no server URL is known or HTTP recently failed
-    if (!customHost && !cachedBridgeServerUrl) {
-      return true;
-    }
+    // Only prefer Firestore RPC bridge over direct HTTPS if direct HTTPS recently failed
     if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 90000) {
       return true;
     }
@@ -244,9 +248,17 @@ function shouldPreferFirestoreBridge(hasVideoAttachment: boolean = false): boole
 export function getApiBaseUrl(): string {
   if (Capacitor.isNativePlatform()) {
     const customHost = localStorage.getItem("buzz_api_server_url");
-    if (customHost && customHost.startsWith("http")) return customHost.replace(/\/$/, "");
-    if (cachedBridgeServerUrl && cachedBridgeServerUrl.startsWith("http")) return cachedBridgeServerUrl;
-    return "";
+    if (customHost && customHost.startsWith("http") && !isCookieGatedAiStudioUrl(customHost)) {
+      return customHost.replace(/\/$/, "");
+    }
+    if (
+      cachedBridgeServerUrl &&
+      cachedBridgeServerUrl.startsWith("http") &&
+      !isCookieGatedAiStudioUrl(cachedBridgeServerUrl)
+    ) {
+      return cachedBridgeServerUrl;
+    }
+    return CLOUDFLARE_EDGE_AI_URL;
   }
   return "";
 }
@@ -255,21 +267,34 @@ function getCandidateApiBaseUrls(): string[] {
   const urls: string[] = [];
   const customHost =
     typeof localStorage !== "undefined" ? localStorage.getItem("buzz_api_server_url") : null;
-  if (customHost && customHost.startsWith("http")) {
+  if (
+    customHost &&
+    customHost.startsWith("http") &&
+    (!Capacitor.isNativePlatform() || !isCookieGatedAiStudioUrl(customHost))
+  ) {
     urls.push(customHost.replace(/\/$/, ""));
   }
   if (!Capacitor.isNativePlatform()) {
     urls.push("");
   }
-  if (cachedBridgeServerUrl && cachedBridgeServerUrl.startsWith("http")) {
+  if (
+    cachedBridgeServerUrl &&
+    cachedBridgeServerUrl.startsWith("http") &&
+    (!Capacitor.isNativePlatform() || !isCookieGatedAiStudioUrl(cachedBridgeServerUrl))
+  ) {
     urls.push(cachedBridgeServerUrl);
   }
+  urls.push(CLOUDFLARE_EDGE_AI_URL);
   return Array.from(new Set(urls.filter((u) => Boolean(u) || !Capacitor.isNativePlatform())));
 }
 
 export function wakeUpBuzzServer(): void {
   syncBridgeServerUrl();
-  for (const baseUrl of getCandidateApiBaseUrls()) {
+  const wakeTargets = new Set<string>(getCandidateApiBaseUrls());
+  if (cachedBridgeServerUrl && cachedBridgeServerUrl.startsWith("http")) {
+    wakeTargets.add(cachedBridgeServerUrl);
+  }
+  for (const baseUrl of wakeTargets) {
     if (!baseUrl && Capacitor.isNativePlatform()) continue;
     fetch(`${baseUrl}/api/health`, { method: "GET", mode: "no-cors", cache: "no-store" }).catch(
       () => {}
@@ -1822,13 +1847,17 @@ async function askViaFirestoreBridge(
           if (!settled) startGuardedPolling();
         }, 450);
         if (serverAcknowledged) return;
-        const bridgeAckTimeoutMs = Capacitor.isNativePlatform() ? 3200 : 7000;
+        const bridgeAckTimeoutMs = Capacitor.isNativePlatform() ? 18000 : 14000;
         ackTimer = setTimeout(() => {
           if (!settled && !serverAcknowledged) {
             settled = true;
             clearTimeout(timer);
             cleanup();
-            reject(new Error("Firestore AI bridge server hibernating"));
+            reject(
+              new Error(
+                "Buzz AI cloud server is offline or hibernating. Open your AI Studio preview or configure a 24/7 Buzz AI Server URL in Settings → Buzz AI Engine."
+              )
+            );
           }
         }, bridgeAckTimeoutMs);
       })
@@ -2150,7 +2179,7 @@ export async function askGeminiAssistantStream(
     (m: any) => Array.isArray(m?.attachments) && m.attachments.length > 0
   );
   const hasAnyMedia = hasAttachments || hasHistoryMedia;
-  const tierTimeoutMs = hasAnyMedia ? 14000 : 7500;
+  const tierTimeoutMs = hasAnyMedia ? 26000 : 18000;
   let lastFallbackError = "";
 
   const refreshStreamTimeout = (ms: number = tierTimeoutMs) => {
@@ -2303,12 +2332,14 @@ export async function askGeminiAssistantStream(
             const cleanDisplay = accumulatedRaw
               .replace(/<thought>[\s\S]*?<\/thought>/g, "")
               .replace(/<thought>[\s\S]*$/g, "")
+              .replace(/```(?:action|json)?\s*\{[\s\S]*?"type"[\s\S]*?```/gi, "")
+              .replace(/```(?:action|json)?\s*\{[\s\S]*$/gi, "")
               .replace(/```action[\s\S]*?```/g, "")
               .replace(/```action[\s\S]*$/g, "")
               .trim();
             if (cleanDisplay && !userAborted && !completed) {
               emitChunk(cleanDisplay);
-              refreshStreamTimeout(3000);
+              refreshStreamTimeout(8000);
             }
           }
           if (parsed.done) {
@@ -2473,53 +2504,14 @@ export async function askGeminiAssistantStream(
     );
   });
 
-  const streamClientFallback = () => {
-    if (completed || userAborted || externalSignal?.aborted) return;
-    try {
-      controller.abort();
-    } catch {}
-    try {
-      bridgeAbortController.abort();
-    } catch {}
-
-    const clientRes = generateClientStoreResponse(
-      prompt,
-      compactedContext,
-      compactedHistory
-    );
-
-    const fullText = clientRes.reply || "I am here to assist your store. How can I help you today?";
-    emitChunk(fullText);
-    safeComplete({
-      reply: fullText,
-      action: validateClientAction(
-        clientRes.action || localActionCandidate,
-        prompt,
-        fullText,
-        compactedContext
-      ),
-      thought: clientRes.thought || generateDynamicThought(prompt, fullText, storeContext),
-      thoughtDuration: clientRes.thoughtDuration || 1,
-    });
-  };
-
-  const watchdogMs = Capacitor.isNativePlatform() ? 2000 : 5500;
-  const watchdogTimer = setTimeout(() => {
-    if (!completed && !userAborted && !lastStreamedChunk) {
-      streamClientFallback();
-    }
-  }, watchdogMs);
-
   try {
     const winner = await Promise.any([directHttpPromise, streamPromise, bridgePromise]);
-    clearTimeout(watchdogTimer);
     if (!userAborted && !completed && !externalSignal?.aborted && String(winner?.reply || "").trim()) {
       emitChunk(winner.reply);
       safeComplete(winner);
       return;
     }
   } catch (err: any) {
-    clearTimeout(watchdogTimer);
     if (!lastFallbackError && err?.errors && Array.isArray(err.errors)) {
       const firstMeaningful = err.errors
         .map((e: any) => String(e?.message || ""))
@@ -2529,7 +2521,8 @@ export async function askGeminiAssistantStream(
             !m.startsWith("Status ") &&
             m !== "Aborted" &&
             m !== "Empty stream response" &&
-            m !== "Skipped SSE on native video bridge"
+            m !== "Skipped SSE on native video bridge" &&
+            m !== "No server URL configured on native platform"
         );
       if (firstMeaningful) {
         lastFallbackError = firstMeaningful;
@@ -2550,7 +2543,10 @@ export async function askGeminiAssistantStream(
         thought: generateDynamicThought(prompt, lastStreamedChunk, storeContext),
       });
     } else {
-      streamClientFallback();
+      throw new Error(
+        lastFallbackError ||
+          "Buzz AI cloud server is currently offline. Open AI Studio preview or set a 24/7 Buzz AI Server URL in Settings → Buzz AI Engine."
+      );
     }
   }
 }
@@ -4084,7 +4080,7 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
     getCandidateApiBaseUrls().map(async (baseUrl): Promise<string> => {
       const endpoint = `${baseUrl}/api/gemini/transcribe`;
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 6500);
+      const timer = setTimeout(() => controller.abort(), 15000);
       try {
         const response = await fetch(endpoint, {
           method: "POST",

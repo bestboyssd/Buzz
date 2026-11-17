@@ -179,11 +179,15 @@ const cloneUserWithLiveGetters = (
       fallbackPhoto = val || "";
       if (val) {
         try {
+          const prev = localStorage.getItem(`custom_user_photo_${uid}`) || "";
+          const existingTs = Number(localStorage.getItem(`custom_user_photo_ts_${uid}`) || 0);
           localStorage.setItem(`custom_user_photo_${uid}`, val);
-          localStorage.setItem(
-            `custom_user_photo_ts_${uid}`,
-            String(Date.now())
-          );
+          if (val !== prev || existingTs <= 0) {
+            localStorage.setItem(
+              `custom_user_photo_ts_${uid}`,
+              String(Date.now())
+            );
+          }
         } catch {}
       }
     },
@@ -488,6 +492,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             const freshAccountTs = Math.max(Date.now(), deletedAt + 1000);
 
             let customPhotoURL = "";
+            let shouldWritePhotoOnLogin = isCreatingFreshAccount;
+            let photoTsToWrite = isCreatingFreshAccount ? freshAccountTs : 0;
             let savedName = resolvedName;
             let savedEmail = resolvedEmail;
             let makeAdmin = isOwner;
@@ -558,19 +564,41 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               const localPhotoTs = Number(
                 localStorage.getItem(`custom_user_photo_ts_${currentUser.uid}`) || 0
               );
+              const docPhotoTs = Number(data.photoUpdatedAt || 0);
               const docUpdatedAt = Number(data.updatedAt || 0);
-              const cachedLocalPhoto = localStorage.getItem(
-                `custom_user_photo_${currentUser.uid}`
-              );
-              if (localPhotoTs > docUpdatedAt && cachedLocalPhoto) {
+              const effectiveRemotePhotoTs = docPhotoTs > 0 ? docPhotoTs : docUpdatedAt;
+              const cachedLocalPhoto =
+                localStorage.getItem(`custom_user_photo_${currentUser.uid}`) || "";
+              const remoteHasPhoto = Boolean(String(data.customPhotoURL || "").trim());
+
+              if (
+                cachedLocalPhoto &&
+                localPhotoTs > 0 &&
+                (docPhotoTs > 0
+                  ? localPhotoTs > docPhotoTs
+                  : localPhotoTs > docUpdatedAt ||
+                    (cachedLocalPhoto.startsWith("data:image/") &&
+                      !String(data.customPhotoURL || "").startsWith("data:image/")))
+              ) {
                 customPhotoURL = cachedLocalPhoto;
-              } else if (customPhotoURL) {
+                shouldWritePhotoOnLogin = true;
+                photoTsToWrite = localPhotoTs;
+              } else if (remoteHasPhoto) {
+                customPhotoURL = String(data.customPhotoURL).trim();
                 localStorage.setItem(
                   `custom_user_photo_${currentUser.uid}`,
                   customPhotoURL
                 );
-              } else {
-                localStorage.removeItem(`custom_user_photo_${currentUser.uid}`);
+                if (effectiveRemotePhotoTs > 0) {
+                  localStorage.setItem(
+                    `custom_user_photo_ts_${currentUser.uid}`,
+                    String(effectiveRemotePhotoTs)
+                  );
+                }
+              } else if (cachedLocalPhoto) {
+                customPhotoURL = cachedLocalPhoto;
+                shouldWritePhotoOnLogin = true;
+                photoTsToWrite = localPhotoTs || Date.now();
               }
               if (savedName) {
                 localStorage.setItem(
@@ -729,6 +757,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             // Ensure customPhotoURL is NOT empty if currentUser has a photoURL
             if (!customPhotoURL && currentUser.photoURL) {
               customPhotoURL = currentUser.photoURL;
+              if (!docSnap?.exists() || !String(docSnap?.data()?.customPhotoURL || "").trim()) {
+                shouldWritePhotoOnLogin = true;
+              }
             }
 
             if (skipProfileWriteRef.current) return;
@@ -741,13 +772,21 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             }
 
             // Save/update profile doc in Firestore (overwrite completely when creating a fresh account so no stale fields survive)
+            // Never overwrite an existing profile's customPhotoURL on routine login unless pushing a strictly newer local photo or backfilling empty photo
             setDoc(
               profileDoc,
               {
                 uid: currentUser.uid,
                 email: savedEmail,
-                displayName: savedName,
-                customPhotoURL: customPhotoURL,
+                ...(isCreatingFreshAccount || !docSnap?.data()?.displayName
+                  ? { displayName: savedName }
+                  : {}),
+                ...(shouldWritePhotoOnLogin
+                  ? {
+                      customPhotoURL: customPhotoURL,
+                      photoUpdatedAt: photoTsToWrite || writeNow,
+                    }
+                  : {}),
                 isAdmin: makeAdmin,
                 role: makeAdmin ? "admin" : "user",
                 isBlocked: false,
@@ -897,42 +936,60 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           const localPhotoTs = Number(
             localStorage.getItem(`custom_user_photo_ts_${user.uid}`) || 0
           );
+          const remotePhotoTs = Number(data.photoUpdatedAt || 0);
           const remoteUpdatedAt = Number(data.updatedAt || 0);
-          const isStaleRemoteSnapshot =
+          const prevPhoto =
+            localStorage.getItem(`custom_user_photo_${user.uid}`) || "";
+          const nextPhoto = String(data.customPhotoURL || "").trim();
+
+          // Only accept remote photo if its photoUpdatedAt is >= localPhotoTs (or legacy doc without photoUpdatedAt isn't stale and doesn't downgrade a custom data: photo)
+          const isStalePhotoSnapshot =
+            localPhotoTs > 0 &&
+            (remotePhotoTs > 0
+              ? remotePhotoTs < localPhotoTs
+              : remoteUpdatedAt < localPhotoTs ||
+                (prevPhoto.startsWith("data:image/") &&
+                  !nextPhoto.startsWith("data:image/")));
+
+          const isStaleNameSnapshot =
             localPhotoTs > 0 &&
             remoteUpdatedAt > 0 &&
             remoteUpdatedAt < localPhotoTs;
 
-          if (!isStaleRemoteSnapshot) {
-            let profileIdentityChanged = false;
-            if (data.customPhotoURL !== undefined) {
-              const prevPhoto =
-                localStorage.getItem(`custom_user_photo_${user.uid}`) || "";
-              const nextPhoto = String(data.customPhotoURL || "");
-              if (nextPhoto !== prevPhoto) {
-                if (nextPhoto) {
-                  localStorage.setItem(
-                    `custom_user_photo_${user.uid}`,
-                    nextPhoto
-                  );
-                } else {
-                  localStorage.removeItem(`custom_user_photo_${user.uid}`);
-                }
+          let profileIdentityChanged = false;
+          if (!isStalePhotoSnapshot && data.customPhotoURL !== undefined) {
+            if (nextPhoto !== prevPhoto) {
+              if (nextPhoto) {
+                localStorage.setItem(
+                  `custom_user_photo_${user.uid}`,
+                  nextPhoto
+                );
+                localStorage.setItem(
+                  `custom_user_photo_ts_${user.uid}`,
+                  String(remotePhotoTs || remoteUpdatedAt || Date.now())
+                );
+                profileIdentityChanged = true;
+              } else if (remotePhotoTs > 0 && remotePhotoTs >= localPhotoTs) {
+                localStorage.removeItem(`custom_user_photo_${user.uid}`);
+                localStorage.setItem(
+                  `custom_user_photo_ts_${user.uid}`,
+                  String(remotePhotoTs)
+                );
                 profileIdentityChanged = true;
               }
             }
-            if (typeof data.displayName === "string" && data.displayName.trim()) {
-              const prevName =
-                localStorage.getItem(`custom_user_name_${user.uid}`) || "";
-              const nextName = data.displayName.trim();
-              if (nextName !== prevName) {
-                localStorage.setItem(`custom_user_name_${user.uid}`, nextName);
-                profileIdentityChanged = true;
-              }
+          }
+          if (!isStaleNameSnapshot && typeof data.displayName === "string" && data.displayName.trim()) {
+            const prevName =
+              localStorage.getItem(`custom_user_name_${user.uid}`) || "";
+            const nextName = data.displayName.trim();
+            if (nextName !== prevName) {
+              localStorage.setItem(`custom_user_name_${user.uid}`, nextName);
+              profileIdentityChanged = true;
             }
-            if (profileIdentityChanged) {
-              refreshUserAvatar();
-            }
+          }
+          if (profileIdentityChanged) {
+            refreshUserAvatar();
           }
 
           // If a legacy tempAdminAuth flag is present on a non-owner profile, clean it up in Firestore
