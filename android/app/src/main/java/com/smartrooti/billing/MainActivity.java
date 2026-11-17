@@ -873,14 +873,21 @@ public class MainActivity extends BridgeActivity {
         } catch (Exception ignored) {
         }
 
-        // Request POST_NOTIFICATIONS runtime permission on Android 13+ (API 33+)
+        // Request runtime permissions on startup: POST_NOTIFICATIONS (API 33+) and RECORD_AUDIO (for Gboard voice typing)
+        List<String> startupPerms = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= 33) {
             if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(
-                    new String[]{Manifest.permission.POST_NOTIFICATIONS},
-                    NOTIFICATION_PERMISSION_REQUEST_CODE
-                );
+                startupPerms.add(Manifest.permission.POST_NOTIFICATIONS);
             }
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            startupPerms.add(Manifest.permission.RECORD_AUDIO);
+        }
+        if (!startupPerms.isEmpty()) {
+            requestPermissions(
+                startupPerms.toArray(new String[0]),
+                NOTIFICATION_PERMISSION_REQUEST_CODE
+            );
         }
 
         // Enqueue 15-minute periodic background alert check via WorkManager

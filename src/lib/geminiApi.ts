@@ -1822,6 +1822,7 @@ async function askViaFirestoreBridge(
           if (!settled) startGuardedPolling();
         }, 450);
         if (serverAcknowledged) return;
+        const bridgeAckTimeoutMs = Capacitor.isNativePlatform() ? 3200 : 7000;
         ackTimer = setTimeout(() => {
           if (!settled && !serverAcknowledged) {
             settled = true;
@@ -1829,7 +1830,7 @@ async function askViaFirestoreBridge(
             cleanup();
             reject(new Error("Firestore AI bridge server hibernating"));
           }
-        }, 35000);
+        }, bridgeAckTimeoutMs);
       })
       .catch((err) => {
         if (!settled) {
@@ -2472,14 +2473,70 @@ export async function askGeminiAssistantStream(
     );
   });
 
+  const streamClientFallback = () => {
+    if (completed || userAborted || externalSignal?.aborted) return;
+    try {
+      controller.abort();
+    } catch {}
+    try {
+      bridgeAbortController.abort();
+    } catch {}
+
+    const clientRes = generateClientStoreResponse(
+      prompt,
+      compactedContext,
+      compactedHistory
+    );
+
+    const fullText = clientRes.reply || "I am here to assist your store. How can I help you today?";
+    const words = fullText.split(" ");
+    let currentText = "";
+    let wordIndex = 0;
+
+    const streamInterval = setInterval(() => {
+      if (completed || userAborted || externalSignal?.aborted) {
+        clearInterval(streamInterval);
+        return;
+      }
+      if (wordIndex < words.length) {
+        const chunk = words.slice(wordIndex, wordIndex + 4).join(" ");
+        currentText += (currentText ? " " : "") + chunk;
+        wordIndex += 4;
+        emitChunk(currentText);
+      } else {
+        clearInterval(streamInterval);
+        safeComplete({
+          reply: fullText,
+          action: validateClientAction(
+            clientRes.action || localActionCandidate,
+            prompt,
+            fullText,
+            compactedContext
+          ),
+          thought: clientRes.thought || generateDynamicThought(prompt, fullText, storeContext),
+          thoughtDuration: clientRes.thoughtDuration || 1,
+        });
+      }
+    }, 20);
+  };
+
+  const watchdogMs = Capacitor.isNativePlatform() ? 2800 : 5500;
+  const watchdogTimer = setTimeout(() => {
+    if (!completed && !userAborted && !lastStreamedChunk) {
+      streamClientFallback();
+    }
+  }, watchdogMs);
+
   try {
     const winner = await Promise.any([directHttpPromise, streamPromise, bridgePromise]);
+    clearTimeout(watchdogTimer);
     if (!userAborted && !completed && !externalSignal?.aborted && String(winner?.reply || "").trim()) {
       emitChunk(winner.reply);
       safeComplete(winner);
       return;
     }
   } catch (err: any) {
+    clearTimeout(watchdogTimer);
     if (!lastFallbackError && err?.errors && Array.isArray(err.errors)) {
       const firstMeaningful = err.errors
         .map((e: any) => String(e?.message || ""))
@@ -2510,10 +2567,7 @@ export async function askGeminiAssistantStream(
         thought: generateDynamicThought(prompt, lastStreamedChunk, storeContext),
       });
     } else {
-      throw new Error(
-        lastFallbackError ||
-          "Buzz AI is taking longer than expected or could not reach the server. Please try again."
-      );
+      streamClientFallback();
     }
   }
 }
@@ -3634,7 +3688,6 @@ export function generateClientStoreResponse(
     p.includes("predict") ||
     p.includes("increase sale") ||
     p.includes("grow") ||
-    p.includes("profit") ||
     p.includes("recommend") ||
     p.includes("suggest")
   ) {
@@ -3819,7 +3872,28 @@ export function generateClientStoreResponse(
     };
   }
 
-  // 12. Sales / Revenue
+  // 12. Profit & Financial Margin
+  if (
+    p.includes("profit") ||
+    p.includes("margin") ||
+    p.includes("lav") ||
+    p.includes("laav") ||
+    p.includes("net profit")
+  ) {
+    const expensesTotal = otherCosts.reduce(
+      (s: number, c: any) => s + (Number(c.amount) || 0),
+      0
+    );
+    const estimatedNet = totalRevenue - expensesTotal;
+    return {
+      reply: `**📊 Today's Profit & Revenue Summary:**\n\n• **Gross Revenue:** ₹${totalRevenue.toLocaleString("en-IN")}\n• **Recorded Expenses:** ₹${expensesTotal.toLocaleString("en-IN")}\n• **Estimated Net Operating Profit:** **₹${estimatedNet.toLocaleString("en-IN")}**\n• **Completed Orders:** ${billsToday} bills\n\n*(Net profit is calculated from today's completed sales revenue minus recorded store expenses & costs.)*`,
+      action: null,
+      thought: `Aggregated today's revenue (₹${totalRevenue}) and expenses (₹${expensesTotal}) to calculate net profit.`,
+      thoughtDuration: 1,
+    };
+  }
+
+  // 12b. Sales / Revenue
   if (p.includes("sale") || p.includes("revenue") || p.includes("earning") || p.includes("bill") || p.includes("turnover")) {
     return {
       reply: `**Today's Store Summary:**\n\n• Revenue: **₹${totalRevenue.toLocaleString("en-IN")}**\n• Orders: **${billsToday}**\n• Catalog: **${products.length} items**`,
@@ -4065,7 +4139,7 @@ export async function transcribeAudio(audioBlob: Blob): Promise<string> {
   try {
     return await Promise.any([httpTranscribePromise, bridgeTranscribePromise]);
   } catch {
-    throw new Error("Could not transcribe voice clip. Please speak clearly or type your command.");
+    throw new Error("Could not transcribe voice clip. Please tap the Gboard microphone on your keyboard or type your command.");
   }
 }
 

@@ -5754,6 +5754,8 @@ export function AdminAIAssistant({
 
                   <textarea
                     ref={inputRef}
+                    name="message"
+                    id="buzz-ai-chat-input"
                     rows={1}
                     value={input}
                     onPaste={handlePasteMedia}
@@ -5783,7 +5785,6 @@ export function AdminAIAssistant({
                     autoCorrect="on"
                     autoCapitalize="sentences"
                     spellCheck={true}
-                    inputMode="text"
                     enterKeyHint="send"
                     placeholder={
                       isAiBusy
@@ -5794,11 +5795,7 @@ export function AdminAIAssistant({
                         ? "Add a caption..."
                         : "Ask Buzz AI..."
                     }
-                    className={`flex-1 min-w-0 max-h-24 px-2 py-2 text-xs sm:text-sm bg-transparent focus:outline-none text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 font-medium resize-none leading-5 ${
-                      !input
-                        ? "h-9 overflow-hidden text-ellipsis whitespace-nowrap"
-                        : "min-h-9 overflow-y-auto"
-                    }`}
+                    className="flex-1 min-w-0 min-h-[36px] max-h-24 px-2 py-2 text-xs sm:text-sm bg-transparent focus:outline-none text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-slate-500 font-medium resize-none leading-5 overflow-y-auto whitespace-pre-wrap break-words"
                   />
 
                   {isAiBusy ? (
