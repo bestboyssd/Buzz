@@ -132,9 +132,15 @@
   * Handles bidirectional Udhar/Borrow/Due synchronization: deleting or editing a bill updates or removes its linked `other_costs` record (`linkedOtherCostId`), and settling/deleting a Due/Borrow in `other_costs` updates the linked bill.
 * **`src/lib/CartContext.tsx`**:
   * Manages active POS cart items, custom unit price overrides, discounts, hold-bill slots (`held_bills_v1`), and `MAX_BILL_AMOUNT = 10000` enforcement.
-* **`src/lib/geminiApi.ts` & `server.ts`**:
-  * `server.ts` executes all Gemini API requests server-side via `@google/genai` (`process.env.GEMINI_API_KEY` configured in AI Studio Secrets) with multi-model failover across `gemini-3.1-flash-lite`, `gemini-3.8-flash`, `gemini-flash-latest`, `gemini-3.5-transcribe`, `gemini-3.8-flash-lite-tts`, and `gemini-3.8-flash-tts`. `src/lib/geminiApi.ts` connects to `/api/gemini/*` (relative URL on web, dynamically synced `serverUrl` from `settings/ai_bridge_config` on native APK) and races with the URL-independent Firestore RPC bridge (`settings/ai_rpc_req_*`).
-  * Supports bilingual (English + Bengali / Banglish) store intelligence, live inventory/profit context injection, vision analysis, and structured `<ACTION>{...}</ACTION>` tags (`UPDATE_STOCK`, `UPDATE_PRICE`, `UPDATE_PRODUCT_IMAGE`, `ADD_PRODUCT`, `DELETE_PRODUCT`, `UPDATE_BILL`, `DELETE_BILL`, `PURGE_STORE_DATA`, `ADD_TRANSACTION`, `ADD_EXPENSE`, `DELETE_EXPENSE`, `UPDATE_ROLE`).
+* **`src/lib/geminiApi.ts`, `cloudflare-worker/buzz-ai.mjs` & `server.ts`**:
+  * **24/7 Production Mobile AI Backend (`cloudflare-worker/buzz-ai.mjs`)**: Deployed on Cloudflare Workers at `https://buzz-ai.dassusuman2009.workers.dev` (Account `004b1e645593363772bd49517a72bd63`, `dassusuman2009@gmail.com`, `$0/mo` free tier, zero credit card, zero cold starts, CORS `*`). Uses the Cloudflare Workers AI (`env.AI`) binding with automatic multi-model failover:
+    * **Text & Store Operations (`/api/gemini/chat`, `/api/gemini/chat-stream` SSE)**: `@cf/meta/llama-3.3-70b-instruct-fp8-fast` -> `@cf/google/gemma-4-26b-a4b-it` -> `@cf/meta/llama-3.1-8b-instruct-fp8`.
+    * **Vision & Media Analysis (`/api/gemini/analyze-media` + image attachments)**: `@cf/google/gemma-4-26b-a4b-it` -> `@cf/mistralai/mistral-small-3.1-24b-instruct` -> `@cf/meta/llama-3.2-11b-vision-instruct`.
+    * **Voice Transcription (`/api/gemini/transcribe`)**: `@cf/openai/whisper-large-v3-turbo` -> `@cf/openai/whisper` (English, Bengali/বাংলা, Banglish).
+    * **Utility Routes**: `/api/health`, `/api/gemini/clear-chat`, `/api/avatar-proxy`.
+  * **Local / AI Studio Preview Server (`server.ts`)**: When running inside AI Studio Preview or locally (`npm start` via `tsx server.ts`), `server.ts` executes Gemini API requests via `@google/genai` (`process.env.GEMINI_API_KEY`) and listens to the Firestore RPC bridge (`settings/ai_rpc_req_*`).
+  * **Client Routing (`src/lib/geminiApi.ts`)**: `CLOUDFLARE_EDGE_AI_URL` (`https://buzz-ai.dassusuman2009.workers.dev`) is the built-in 24/7 default for native Android APKs (and web fallback). `isCookieGatedAiStudioUrl()` prevents native Capacitor WebView from calling cookie-gated `ais-dev-*.run.app` URLs (which return an HTML `"Cookie check"` page). Custom server URLs can still override via `Settings -> Buzz AI Engine` (`localStorage.buzz_api_server_url`).
+  * Supports bilingual (English + Bengali / Banglish) store intelligence, live inventory/profit context injection, vision analysis, and structured ` ```action {...}``` ` confirmation cards (`UPDATE_STOCK`, `UPDATE_PRICE`, `UPDATE_PRODUCT_IMAGE`, `ADD_PRODUCT`, `DELETE_PRODUCT`, `UPDATE_BILL`, `DELETE_BILL`, `PURGE_STORE_DATA`, `ADD_TRANSACTION`, `ADD_EXPENSE`, `DELETE_EXPENSE`). Never falls back to dummy canned text.
 * **`src/lib/stockAlerts.ts`**:
   * Instant threshold transition detection (`classifyStockTransition` -> `out_of_stock`, `critical_low`, `low_stock`), local deduplication (`wasStockTransitionRecentlyHandled`), and Firestore `settings/stock_alerts_feed` publishing.
 * **`src/lib/versionCheck.ts`**:
@@ -204,6 +210,31 @@
    * `App.tsx` applies `env(safe-area-inset-top)` padding, and `BottomNav.tsx` uses `bottom: calc(1.1rem + env(safe-area-inset-bottom))`.
    * Hardware Back (`capacitor.ts` -> `androidBackPress`) is intercepted by open drawers/modals/Admin sub-views (Buzz AI, Buy Prices, Accounts, Activity Logs, Sync Conflicts, Z-Report, Receipt & Stock modals) before tab/history navigation.
    * Cohesive 60/120fps spring physics (respecting `performanceMode` when enabled, with clean non-jumping Activity Logs refresh and Buy Prices multi-line layout) are implemented across the app's pages and modals.
+9. **24/7 Cloudflare Workers AI Edge Backend (`cloudflare-worker/buzz-ai.mjs`)**:
+   * **Why It Exists**: AI Studio preview URLs (`https://ais-dev-*.run.app`) hibernate when AI Studio is closed and sit behind an interactive Google `"Cookie check"` HTML login wall that blocks Android Capacitor `fetch()` calls. `buzz-ai` on Cloudflare Workers runs 24/7 globally at **$0/month** (free tier: 100,000 requests/day + 10,000 Workers AI neurons/day, no credit card, zero cold starts) with full CORS headers (`Access-Control-Allow-Origin: *`).
+   * **Deployment Coordinates**:
+     * **Live URL**: `https://buzz-ai.dassusuman2009.workers.dev`
+     * **Worker Script Name**: `buzz-ai` (source tracked in `cloudflare-worker/buzz-ai.mjs`)
+     * **Cloudflare Account**: `Dassusuman2009@gmail.com's Account` (Account ID: `004b1e645593363772bd49517a72bd63`, subdomain `dassusuman2009.workers.dev`)
+     * **Binding**: `{ "type": "ai", "name": "AI" }` (Cloudflare Workers AI), `compatibility_date: "2026-11-17"`, `observability: { enabled: true, traces: { enabled: true } }`
+   * **How Requests Flow on Phone (`src/lib/geminiApi.ts`)**:
+     1. `getApiBaseUrl()` resolves custom override (`localStorage.buzz_api_server_url`) -> non-cookie-gated `cachedBridgeServerUrl` -> default `CLOUDFLARE_EDGE_AI_URL` (`https://buzz-ai.dassusuman2009.workers.dev`).
+     2. `isCookieGatedAiStudioUrl()` filters out `ais-dev-*.run.app` from native direct HTTP calls so mobile never parses an HTML cookie page as JSON.
+     3. `askGeminiAssistantStream()` opens SSE streaming against `/api/gemini/chat-stream` (racing `/api/gemini/chat` and Firestore RPC bridge), receives live token chunks (`data: {"chunk":"..."}`) and final structured `action` payload (`data: {"done":true,"fullText":"...","action":{...}}`).
+     4. `parseAssistantOutput()` in `buzz-ai.mjs` extracts valid POS action JSON from ` ```action `, ` ```json `, or bare ` ``` ` blocks and strips raw JSON out of the visible `reply`. `geminiApi.ts` also strips fenced action JSON mid-stream so raw JSON never flashes on screen.
+     5. Voice clips (`POST /api/gemini/transcribe`) run `@cf/openai/whisper-large-v3-turbo` (fallback `@cf/openai/whisper`) with a `15s` timeout; image attachments run Gemma 4 / Mistral Small 3.1 / Llama 3.2 Vision; TTS on Android uses zero-latency native `AndroidExporter.speakText`.
+     6. `Settings.tsx` (`testAiConnection`) checks JSON `/api/health` against `CLOUDFLARE_EDGE_AI_URL` and confirms `"Connected! 24/7 Cloudflare Edge AI is online."`.
+   * **How to Update / Redeploy the Worker**: Edit `cloudflare-worker/buzz-ai.mjs` and upload via the Cloudflare MCP plugin (`PUT /accounts/004b1e645593363772bd49517a72bd63/workers/scripts/buzz-ai` with multipart `metadata` + `worker.js` and `bindings: [{ type: "ai", name: "AI" }]`), then verify with `GET https://buzz-ai.dassusuman2009.workers.dev/api/health`.
+10. **Profile Image Stability & Cross-UID Synchronization (`AuthContext.tsx`, `Account.tsx`, `Admin.tsx`, `server.ts`)**:
+    * **Dedicated `photoUpdatedAt` Field**: Profile photo conflict resolution uses `photoUpdatedAt` instead of generic `updatedAt` (which `Settings.tsx` bumps on every theme/haptics/notification toggle and login bumps on every startup).
+    * **No Stale Login Overwrites**: `AuthContext.tsx` no longer writes `customPhotoURL` on routine login for existing accounts unless pushing a strictly newer local photo (`localPhotoTs > docPhotoTs`) or backfilling an empty photo.
+    * **Cross-UID Sibling Sync**: Because Web Auth (`tidy-byte-g5xj8`) and Native Android Auth (`buzz-8521`) produce different UIDs for the same Google email, `Account.tsx` (`handleUpdate`) writes `customPhotoURL`, `photoUpdatedAt`, and `displayName` to ALL `settings/profile_*` documents sharing that normalized email (and awaits up to `2500ms`). `Admin.tsx` deduplication also compares `photoUpdatedAt` first when merging sibling accounts.
+    * **Unsaved Edit Protection & Server Guard**: `Account.tsx` (`handleExternalProfileUpdate`) never wipes unsaved `photoURL`/`displayName` edits or an open `ImageCropperModal`. `server.ts` (`syncProfileAvatarToDataUrl`) re-reads the Firestore doc right before writing so background HTTP-to-base64 caching never overwrites a newly uploaded custom photo.
+11. **Android Gboard Native Word Suggestions & Voice Typing (`AdminAIAssistant.tsx`, `MainActivity.java`, `scripts/patch-capacitor-android.mjs`)**:
+    * `AdminAIAssistant.tsx` `<textarea>` uses `name="message"`, `id="buzz-ai-chat-input"`, `autoComplete="on"`, `autoCorrect="on"`, `autoCapitalize="sentences"`, `spellCheck={true}`, `whitespace-pre-wrap break-words`, and intentionally omits `inputMode="text"` and `whitespace-nowrap` so Chromium Blink never suppresses IME word predictions.
+    * `MainActivity.java` requests `Manifest.permission.RECORD_AUDIO` alongside `POST_NOTIFICATIONS` on startup so Xiaomi MIUI/HyperOS does not cross out Gboard's voice typing microphone.
+    * `scripts/patch-capacitor-android.mjs` persists the `CapacitorWebView.onCreateInputConnection(EditorInfo outAttrs)` patch that clears `TYPE_TEXT_FLAG_NO_SUGGESTIONS` & `nm`/`noMicrophoneKey` private IME options and enables `TYPE_TEXT_FLAG_AUTO_CORRECT | TYPE_TEXT_FLAG_AUTO_COMPLETE | TYPE_TEXT_FLAG_CAP_SENTENCES`.
+
 
 
 
