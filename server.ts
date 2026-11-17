@@ -4132,6 +4132,31 @@ app.use((req, res, next) => {
   next();
 });
 
+// Broadcast live server origin to Firestore settings/ai_bridge_config so mobile Android APKs discover this host automatically
+let lastOriginBroadcastAt = 0;
+app.use((req, res, next) => {
+  const host = req.get("host");
+  if (host && !host.includes("localhost") && !host.includes("127.0.0.1") && db) {
+    const now = Date.now();
+    if (now - lastOriginBroadcastAt > 30000) {
+      lastOriginBroadcastAt = now;
+      const proto = (req.headers["x-forwarded-proto"] as string) || req.protocol || "https";
+      const currentOrigin = `${proto}://${host}`;
+      setDoc(
+        doc(db, "settings", "ai_bridge_config"),
+        {
+          serverUrl: currentOrigin,
+          serverOnline: Boolean(getServerGeminiKey()),
+          lastHeartbeat: now,
+          updatedAt: now,
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
+  }
+  next();
+});
+
 // Parse User Authentication Context from Headers/Body
 function extractUserContext(req: Request) {
   const uid =
@@ -5333,21 +5358,22 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
 
   // Start real-time server-side Firestore AI RPC listener for mobile & web clients
   if (db) {
+    const initialServerUrl =
+      process.env.APP_URL ||
+      process.env.AIS_APP_URL ||
+      "";
     setDoc(
       doc(db, "settings", "ai_bridge_config"),
       {
         id: "ai_bridge_config",
         serverOnline: Boolean(getServerGeminiKey()),
-        serverUrl:
-          process.env.APP_URL ||
-          "https://ais-pre-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app",
-        devServerUrl:
-          "https://ais-dev-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app",
+        ...(initialServerUrl ? { serverUrl: initialServerUrl } : {}),
         primaryModel: PRIMARY_AI_MODEL,
         backupModel: BACKUP_AI_MODEL,
         tertiaryModel: TERTIARY_AI_MODEL,
         updatedAt: Date.now(),
-      }
+      },
+      { merge: true }
     ).catch(() => {});
 
     const processedRpcIds = new Set<string>();
@@ -5414,18 +5440,16 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
         if (first) processedRpcIds.delete(first);
       }
 
-      // Only write intermediate "processing" state if the AI call takes longer than 1.5s,
-      // so fast (<1.5s) queries complete in a single Firestore write round-trip!
-      const processingAckTimer = setTimeout(() => {
-        setDoc(
-          doc(db!, "settings", docSnap.id),
-          {
-            status: "processing",
-            updatedAt: Date.now(),
-          },
-          { merge: true }
-        ).catch(() => {});
-      }, 1500);
+      // Immediately write "processing" state so mobile clients know the server acknowledged their turn
+      setDoc(
+        doc(db!, "settings", docSnap.id),
+        {
+          status: "processing",
+          acknowledgedAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      ).catch(() => {});
 
       try {
             const reqType = String(data.type || "chat");
@@ -5610,7 +5634,6 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               { merge: true }
             );
           } catch (rpcErr: any) {
-            clearTimeout(processingAckTimer);
             serverSeenFinishedAt.set(docSnap.id, Date.now());
             await setDoc(
               doc(db!, "settings", docSnap.id),
@@ -5620,8 +5643,6 @@ if (typeof customElements !== 'undefined' && !customElements.get('vite-error-ove
               },
               { merge: true }
             ).catch(() => {});
-          } finally {
-            clearTimeout(processingAckTimer);
           }
     };
 

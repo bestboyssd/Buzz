@@ -29,7 +29,7 @@ export interface ApkDownloadProgressState {
   progress: number;
   downloadedBytes: number;
   totalBytes: number;
-  status: "idle" | "downloading" | "installing" | "completed" | "error";
+  status: "idle" | "connecting" | "downloading" | "installing" | "completed" | "error";
   error?: string;
   version?: string;
 }
@@ -150,11 +150,11 @@ export function compareSemver(a: string, b: string): number {
 
 export function getInitialBundledVersion(): string {
   try {
-    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.3.0";
-    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.3.0";
+    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.3.1";
+    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.3.1";
     return compareSemver(pkgVer, metaVer) > 0 ? pkgVer : metaVer;
   } catch {
-    return "1.3.0";
+    return "1.3.1";
   }
 }
 
@@ -369,16 +369,20 @@ export async function triggerInstantApkDownload(
       nativeExporter &&
       typeof nativeExporter.downloadAndInstallApk === "function"
     ) {
+      const targetSize = resolvedSize || 35478195;
       emitApkProgress({
         isDownloading: true,
-        progress: 1,
+        progress: 0,
         downloadedBytes: 0,
-        totalBytes: resolvedSize,
-        status: "downloading",
+        totalBytes: targetSize,
+        status: "connecting",
         error: "",
         version: cleanVer,
       });
-      const started = nativeExporter.downloadAndInstallApk(targetUrl, cleanVer);
+      const started =
+        nativeExporter.downloadAndInstallApk.length >= 3
+          ? nativeExporter.downloadAndInstallApk(targetUrl, cleanVer, targetSize)
+          : nativeExporter.downloadAndInstallApk(targetUrl, cleanVer);
       if (started) return;
     }
   } catch {}
@@ -492,10 +496,6 @@ export async function triggerInstantApkDownload(
   if (baseApiUrl) {
     streamUrlsToTry.push(`${baseApiUrl}/api/github/apk-download${proxyQuery}`);
   }
-  streamUrlsToTry.push(
-    `https://ais-pre-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app/api/github/apk-download${proxyQuery}`,
-    `https://ais-dev-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app/api/github/apk-download${proxyQuery}`
-  );
 
   const uniqueStreamUrls = Array.from(new Set(streamUrlsToTry));
   let lastErrorMsg = "Could not download update package. Please check your connection and retry.";
@@ -737,9 +737,10 @@ export function useAppVersionCheck() {
         );
 
         if (compareSemver(release.version, currentVer) <= 0) {
-          // App is up to date! Clear outdated grace stamps
+          // App is up to date! Clear outdated grace stamps and clean any cached/leftover APKs
           clearOutdatedGraceTimestamps();
           setPassedThisSession(false);
+          cleanupInstalledApkFiles().catch(() => {});
         } else {
           const firstSeen = getOrSetOutdatedFirstSeen(release.version, currentVer);
           const { remainingGraceMs: remMs } = computeGraceState(firstSeen, Date.now());
@@ -804,14 +805,14 @@ export function useAppVersionCheck() {
         progress?: number;
         downloadedBytes?: number;
         totalBytes?: number;
-        status?: "idle" | "downloading" | "installing" | "completed" | "error";
+        status?: "idle" | "connecting" | "downloading" | "installing" | "completed" | "error";
         error?: string;
         version?: string;
       }>;
       const d = custom.detail;
       if (!d) return;
       const status = d.status || "downloading";
-      const isDownloading = status === "downloading";
+      const isDownloading = status === "downloading" || status === "connecting";
       const next: ApkDownloadProgressState = {
         isDownloading,
         progress: typeof d.progress === "number" ? d.progress : 0,
@@ -826,6 +827,8 @@ export function useAppVersionCheck() {
     };
 
     const handleResumeOrFocus = () => {
+      // Clean up any finished install packages whenever app resumes from package installer
+      cleanupInstalledApkFiles().catch(() => {});
       if (resumeDebounceTimer) clearTimeout(resumeDebounceTimer);
       resumeDebounceTimer = setTimeout(() => {
         resumeDebounceTimer = null;

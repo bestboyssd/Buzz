@@ -37,6 +37,7 @@ import androidx.work.NetworkType;
 import androidx.work.OneTimeWorkRequest;
 import androidx.work.PeriodicWorkRequest;
 import androidx.work.WorkManager;
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -44,6 +45,8 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -83,14 +86,29 @@ public class MainActivity extends BridgeActivity {
         if (context == null) return 0;
         int deletedCount = 0;
         try {
-            File[] dirs = new File[]{
-                context.getCacheDir(),
-                context.getExternalCacheDir(),
-                context.getFilesDir(),
-                context.getExternalFilesDir(null),
-                new File(context.getCacheDir(), "updates"),
-                context.getExternalCacheDir() != null ? new File(context.getExternalCacheDir(), "updates") : null
-            };
+            List<File> dirs = new ArrayList<>();
+            if (context.getCacheDir() != null) {
+                dirs.add(context.getCacheDir());
+                dirs.add(new File(context.getCacheDir(), "updates"));
+            }
+            if (context.getExternalCacheDir() != null) {
+                dirs.add(context.getExternalCacheDir());
+                dirs.add(new File(context.getExternalCacheDir(), "updates"));
+            }
+            if (context.getFilesDir() != null) {
+                dirs.add(context.getFilesDir());
+                dirs.add(new File(context.getFilesDir(), "updates"));
+            }
+            if (context.getExternalFilesDir(null) != null) {
+                dirs.add(context.getExternalFilesDir(null));
+                dirs.add(new File(context.getExternalFilesDir(null), "updates"));
+            }
+            File publicDownloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+            if (publicDownloads != null && publicDownloads.exists()) {
+                dirs.add(publicDownloads);
+                dirs.add(new File(publicDownloads, "updates"));
+            }
+
             for (File dir : dirs) {
                 if (dir != null && dir.exists() && dir.isDirectory()) {
                     File[] files = dir.listFiles();
@@ -99,7 +117,7 @@ public class MainActivity extends BridgeActivity {
                             if (f != null && f.isFile()) {
                                 String name = f.getName().toLowerCase(Locale.US);
                                 if ((name.endsWith(".apk") || name.endsWith(".apk.part"))
-                                        && (name.startsWith("buzz") || name.contains("update"))) {
+                                        && (name.startsWith("buzz") || name.contains("update") || name.contains("smartrooti"))) {
                                     if (f.delete()) {
                                         deletedCount++;
                                     }
@@ -107,6 +125,20 @@ public class MainActivity extends BridgeActivity {
                             }
                         }
                     }
+                }
+            }
+
+            // On Android 10+ (API 29+), also delete any leftover buzz APK entries in MediaStore Downloads
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    Uri contentUri = MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+                    String selection = MediaStore.Downloads.DISPLAY_NAME + " LIKE ? OR " +
+                                       MediaStore.Downloads.DISPLAY_NAME + " LIKE ? OR " +
+                                       MediaStore.Downloads.DISPLAY_NAME + " LIKE ?";
+                    String[] selectionArgs = new String[]{"%buzz%.apk", "%buzz%.apk.part", "%update%.apk"};
+                    int msDeleted = context.getContentResolver().delete(contentUri, selection, selectionArgs);
+                    deletedCount += msDeleted;
+                } catch (Exception ignored) {
                 }
             }
         } catch (Exception ignored) {
@@ -261,6 +293,11 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public boolean downloadAndInstallApk(String url, String version) {
+            return downloadAndInstallApk(url, version, 0L);
+        }
+
+        @JavascriptInterface
+        public boolean downloadAndInstallApk(String url, String version, long expectedTotalBytes) {
             if (url == null || url.trim().isEmpty()) return false;
             final String safeVer = (version != null && !version.trim().isEmpty())
                 ? version.trim().replaceAll("[^0-9a-zA-Z._-]", "")
@@ -288,12 +325,15 @@ public class MainActivity extends BridgeActivity {
                 ? "https://github.com/bestboyssd/Buzz/releases/download/v" + cleanVerNoV + "/Buzz-v" + cleanVerNoV + ".apk"
                 : "https://github.com/bestboyssd/Buzz/releases/latest/download/Buzz.apk";
 
+            final long defaultExpectedBytes = expectedTotalBytes > 0 ? expectedTotalBytes : 35500000L;
+
             Executors.newSingleThreadExecutor().execute(() -> {
                 File partFile = null;
                 Exception lastErr = null;
                 boolean succeeded = false;
                 try {
-                    emitApkProgressToWebView(1, 0, 0, "downloading", "");
+                    // Emit connecting status immediately with expected size so UI shows live preparation instead of fake 1% stall
+                    emitApkProgressToWebView(0, 0, defaultExpectedBytes, "connecting", "");
 
                     File baseDir = getExternalCacheDir() != null ? getExternalCacheDir() : getCacheDir();
                     File updatesDir = new File(baseDir, "updates");
@@ -391,7 +431,7 @@ public class MainActivity extends BridgeActivity {
                             boolean isPartial = (finalCode == HttpURLConnection.HTTP_PARTIAL);
                             long contentLen = conn.getContentLengthLong();
                             long existingBytes = isPartial ? resumeOffset : 0L;
-                            long totalBytes = (contentLen > 0) ? (existingBytes + contentLen) : -1L;
+                            long totalBytes = (contentLen > 0) ? (existingBytes + contentLen) : defaultExpectedBytes;
                             if (!isPartial && partFile.exists()) {
                                 partFile.delete();
                             }
@@ -404,14 +444,14 @@ public class MainActivity extends BridgeActivity {
                             emitApkProgressToWebView(
                                 lastProgress,
                                 downloadedBytes,
-                                totalBytes > 0 ? totalBytes : Math.max(downloadedBytes, 36L * 1024L * 1024L),
+                                totalBytes,
                                 "downloading",
                                 ""
                             );
 
-                            try (InputStream in = conn.getInputStream();
+                            try (InputStream in = new BufferedInputStream(conn.getInputStream(), 131072);
                                  FileOutputStream out = new FileOutputStream(partFile, isPartial)) {
-                                byte[] buffer = new byte[65536];
+                                byte[] buffer = new byte[131072];
                                 int read;
                                 while ((read = in.read(buffer)) != -1) {
                                     if (cancelCurrentDownload) {
@@ -423,17 +463,17 @@ public class MainActivity extends BridgeActivity {
                                     if (totalBytes > 0) {
                                         pct = (int) Math.min(99, Math.max(1, (downloadedBytes * 100L) / totalBytes));
                                     } else {
-                                        pct = (int) Math.min(95, Math.max(1, (downloadedBytes * 100L) / (36L * 1024L * 1024L)));
+                                        pct = (int) Math.min(95, Math.max(1, (downloadedBytes * 100L) / defaultExpectedBytes));
                                     }
                                     long now = System.currentTimeMillis();
-                                    // Emit every 180ms even when integer % hasn't changed yet so 0.0 -> 0.5 MB updates smoothly past 1%
-                                    if (pct != lastProgress || now - lastEmitTime >= 180 || pct >= 99) {
+                                    // Emit every 120ms or on pct change so MB and progress bar animate smoothly
+                                    if (pct != lastProgress || now - lastEmitTime >= 120 || pct >= 99) {
                                         lastProgress = pct;
                                         lastEmitTime = now;
                                         emitApkProgressToWebView(
                                             pct,
                                             downloadedBytes,
-                                            totalBytes > 0 ? totalBytes : Math.max(downloadedBytes, 36L * 1024L * 1024L),
+                                            totalBytes,
                                             "downloading",
                                             ""
                                         );
@@ -827,6 +867,12 @@ public class MainActivity extends BridgeActivity {
         BuzzRealtimeSyncService.ensureLiveSyncChannel(this);
         BuzzRealtimeSyncService.startIfPermitted(this);
 
+        // Schedule reliable background alert check loop via AlarmManager (bypasses Doze mode & background service restrictions)
+        try {
+            BuzzAlertReceiver.scheduleNext(this, 10000L);
+        } catch (Exception ignored) {
+        }
+
         // Request POST_NOTIFICATIONS runtime permission on Android 13+ (API 33+)
         if (Build.VERSION.SDK_INT >= 33) {
             if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
@@ -902,6 +948,21 @@ public class MainActivity extends BridgeActivity {
         }
         BuzzRealtimeSyncService.startIfPermitted(this);
 
+        // Cancel background alarm wake check while user is actively in foreground
+        try {
+            BuzzAlertReceiver.cancelAlarm(this);
+        } catch (Exception ignored) {
+        }
+
+        // Clean up any installed / leftover update APKs every time app returns to foreground
+        final Context resumeCtx = getApplicationContext();
+        Executors.newSingleThreadExecutor().execute(() -> {
+            try {
+                cleanupDownloadedApksStatic(resumeCtx);
+            } catch (Exception ignored) {
+            }
+        });
+
         // If user just granted "Install unknown apps" permission and returned to Buzz POS, automatically launch installer
         try {
             if (pendingInstallApkFile != null && isValidApkFile(pendingInstallApkFile)) {
@@ -926,6 +987,13 @@ public class MainActivity extends BridgeActivity {
             }
         } catch (Exception ignored) {
         }
+
+        // Schedule reliable 3-minute wake loop via BuzzAlertReceiver (bypasses Android Doze and background execution limits)
+        try {
+            BuzzAlertReceiver.scheduleNext(getApplicationContext(), 15000L);
+        } catch (Exception ignored) {
+        }
+
         // Start fast 3-second native background polling while minimized so stock/broadcast/security alerts arrive instantly
         try {
             BuzzRealtimeSyncService.startIfPermitted(getApplicationContext());

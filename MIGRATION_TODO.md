@@ -1,4 +1,4 @@
-# Handover & Architecture Guide — Buzz POS (`v1.3.0`)
+# Handover & Architecture Guide — Buzz POS (`v1.3.1`)
 
 > [!WARNING]
 > ### 🛑 CRITICAL AGENT RULES — READ FIRST
@@ -12,7 +12,7 @@
 >      1. Pull latest changes from the GitHub repo (`git pull origin main`).
 >      2. Build web assets (`npm run build`) and sync Capacitor (`npx cap sync android`).
 >      3. Build the Android APK (`cd android && ./gradlew assembleDebug` or release build).
->      4. Upload/publish the APK to GitHub Releases under tag `vX.Y.Z` (matching the version in `package.json` / `metadata.json`, e.g., `v1.3.0`) with only the `Buzz-vX.Y.Z.apk` asset (do not upload generic `Buzz.apk`).
+>      4. Upload/publish the APK to GitHub Releases under tag `vX.Y.Z` (matching the version in `package.json` / `metadata.json`, e.g., `v1.3.1`) with only the `Buzz-vX.Y.Z.apk` asset (do not upload generic `Buzz.apk`).
 >    * When the user says **`update`**:
 >      1. If any local files or app fixes were made, stage all changes (`git add .`).
 >      2. Commit with a clear message (`git commit -m "..."`).
@@ -21,12 +21,12 @@
 ---
 
 ## 📱 1. Application Overview & Tech Stack
-* **App Name**: Buzz (`Buzz - v1.3.0`)
+* **App Name**: Buzz (`Buzz - v1.3.1`)
 * **Android Package / Namespace**: `com.smartrooti.billing`
-* **Version**: `1.3.0` (`versionCode 130`, `versionName "1.3.0"`) synchronized across:
-  * `package.json` (`"version": "1.3.0"`)
-  * `android/app/build.gradle` (`versionCode 130`, `versionName "1.3.0"`)
-  * `src/lib/versionCheck.ts` (`getInitialBundledVersion()` resolves the highest semver between `package.json` and `metadata.json`, returning `"1.3.0"`)
+* **Version**: `1.3.1` (`versionCode 131`, `versionName "1.3.1"`) synchronized across:
+  * `package.json` (`"version": "1.3.1"`)
+  * `android/app/build.gradle` (`versionCode 131`, `versionName "1.3.1"`)
+  * `src/lib/versionCheck.ts` (`getInitialBundledVersion()` resolves the highest semver between `package.json` and `metadata.json`, returning `"1.3.1"`)
   * `src/pages/Settings.tsx` (`getAppVersion()` resolves via `versionCheck.ts` / `package.json`)
 * **Core Tech Stack**:
   * **Frontend**: React 19 + TypeScript + Vite 6 + Tailwind CSS v4 + `motion/react` + `lucide-react` + `recharts`.

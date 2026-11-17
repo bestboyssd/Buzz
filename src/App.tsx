@@ -2241,6 +2241,8 @@ function AppContent() {
                         ? "Launching package installer..."
                         : downloadState.status === "completed"
                         ? "APK downloaded & verified — ready to install"
+                        : downloadState.status === "connecting"
+                        ? "Connecting to update server..."
                         : `Downloading Buzz v${latestRelease.version}...`}
                     </span>
                     <div className="flex items-center gap-1.5 shrink-0">
@@ -2322,7 +2324,9 @@ function AppContent() {
                     />
                   )}
                   <span>
-                    {downloadState.isDownloading
+                    {downloadState.status === "connecting"
+                      ? "Connecting to server..."
+                      : downloadState.isDownloading
                       ? `Downloading in App... ${downloadState.progress}%`
                       : downloadState.status === "installing"
                       ? "Installing Update..."

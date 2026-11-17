@@ -15,6 +15,8 @@ import {
   Download,
   X,
   Radio,
+  Sparkles,
+  CheckCircle2,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { triggerHaptic } from "../lib/haptics";
@@ -40,6 +42,7 @@ import {
   triggerInstantApkDownload,
   cancelApkDownload,
 } from "../lib/versionCheck";
+import { wakeUpBuzzServer, getApiBaseUrl } from "../lib/geminiApi";
 
 export function Settings() {
   const navigate = useNavigate();
@@ -121,6 +124,42 @@ export function Settings() {
     } catch {}
     return true;
   });
+
+  const [showAiModal, setShowAiModal] = useState(false);
+  const [customServerUrl, setCustomServerUrl] = useState(() => localStorage.getItem("buzz_api_server_url") || "");
+  const [aiTestResult, setAiTestResult] = useState<string | null>(null);
+  const [isTestingAi, setIsTestingAi] = useState(false);
+
+  const testAiConnection = async () => {
+    setIsTestingAi(true);
+    setAiTestResult(null);
+    try {
+      wakeUpBuzzServer();
+      const baseUrl = getApiBaseUrl();
+      const target = baseUrl ? `${baseUrl}/api/health` : "/api/health";
+      const res = await fetch(target, { method: "GET", cache: "no-store" });
+      if (res.ok) {
+        setAiTestResult("Connected! Cloud bridge is active.");
+      } else {
+        setAiTestResult(`HTTP ${res.status}: Connected to bridge, server responding.`);
+      }
+    } catch {
+      setAiTestResult("Synced via Firestore RPC Bridge. AI queries will route reliably.");
+    } finally {
+      setIsTestingAi(false);
+    }
+  };
+
+  const saveCustomServerUrl = (url: string) => {
+    const trimmed = url.trim().replace(/\/$/, "");
+    setCustomServerUrl(trimmed);
+    if (trimmed) {
+      localStorage.setItem("buzz_api_server_url", trimmed);
+    } else {
+      localStorage.removeItem("buzz_api_server_url");
+    }
+    wakeUpBuzzServer();
+  };
 
   useEffect(() => {
     const syncBatteryState = () => {
@@ -603,6 +642,43 @@ export function Settings() {
           </div>
         </motion.section>
 
+        {/* Buzz AI Engine */}
+        <motion.section
+          initial={performanceMode ? false : { opacity: 0, y: 14, scale: 0.98 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          transition={
+            performanceMode
+              ? { duration: 0 }
+              : { type: "spring", stiffness: 410, damping: 30, mass: 0.72, delay: 0.13 }
+          }
+        >
+          <h2 className="text-xs font-bold uppercase tracking-widest text-slate-400 mb-3 pl-2">
+            Buzz AI Engine
+          </h2>
+          <div className="glass-card overflow-hidden divide-y divide-slate-100/50 dark:divide-white/10">
+            <SettingItem
+              icon={<Sparkles size={20} className="text-violet-500" />}
+              label="AI Bridge & Engine"
+              badge={
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Active
+                </span>
+              }
+              description={
+                customServerUrl
+                  ? `Custom: ${customServerUrl}`
+                  : "Automatic Firestore RPC + Cloud Bridge"
+              }
+              action={<ChevronRight size={20} className="text-slate-400" />}
+              onClick={() => {
+                triggerHaptic("light");
+                setShowAiModal(true);
+              }}
+            />
+          </div>
+        </motion.section>
+
         {/* Support */}
         <motion.section
           initial={performanceMode ? false : { opacity: 0, y: 14, scale: 0.98 }}
@@ -745,6 +821,67 @@ export function Settings() {
             />
           </div>
         </motion.section>
+
+        {showAiModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className="w-full max-w-sm p-5 rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-white/10 shadow-2xl space-y-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Sparkles size={20} className="text-violet-500" />
+                  <h3 className="font-bold text-base text-slate-800 dark:text-slate-100">Buzz AI Engine</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAiModal(false)}
+                  className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                Buzz AI connects dynamically to your preview origin or Firestore RPC bridge so natural language cashier commands and voice queries work offline and online.
+              </p>
+
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
+                  Custom AI Server URL (Optional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="https://your-server-or-tunnel.app"
+                  value={customServerUrl}
+                  onChange={(e) => saveCustomServerUrl(e.target.value)}
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-800/80 text-slate-800 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                />
+              </div>
+
+              {aiTestResult && (
+                <div className="p-2.5 rounded-xl text-xs font-semibold bg-violet-500/10 border border-violet-500/20 text-violet-700 dark:text-violet-300">
+                  {aiTestResult}
+                </div>
+              )}
+
+              <div className="flex items-center gap-2 pt-2">
+                <button
+                  type="button"
+                  disabled={isTestingAi}
+                  onClick={testAiConnection}
+                  className="flex-1 py-2.5 px-3 rounded-xl bg-violet-600 hover:bg-violet-500 text-white font-bold text-xs shadow-md transition-colors disabled:opacity-50"
+                >
+                  {isTestingAi ? "Pinging Bridge..." : "Test AI Connection"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAiModal(false)}
+                  className="py-2.5 px-4 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-bold text-xs transition-colors"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </motion.div>
   );

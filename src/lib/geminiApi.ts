@@ -155,36 +155,85 @@ export interface AssistantResponse {
 // Tracks whether direct HTTP /api/gemini/* is reachable from the current origin/device
 let lastHttpFailureAt = 0;
 let cachedBridgeServerUrl = "";
-let lastBridgeSyncAt = 0;
+let bridgeConfigListenerAttached = false;
 
-function syncBridgeServerUrl(): void {
-  const now = Date.now();
-  if (now - lastBridgeSyncAt < 30000) return;
-  lastBridgeSyncAt = now;
-  getDoc(doc(db, "settings", "ai_bridge_config"))
-    .then((snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        if (typeof data?.serverUrl === "string" && data.serverUrl.startsWith("https://")) {
-          cachedBridgeServerUrl = data.serverUrl.replace(/\/$/, "");
-        }
-      }
-    })
-    .catch(() => {});
+// Load persisted server URL from localStorage on startup if available
+if (typeof localStorage !== "undefined") {
+  const stored =
+    localStorage.getItem("buzz_api_server_url") ||
+    localStorage.getItem("buzz_cached_bridge_server_url");
+  if (stored && stored.startsWith("http")) {
+    cachedBridgeServerUrl = stored.replace(/\/$/, "");
+  }
 }
+
+// Synchronize bridge server URL in real-time via Firestore snapshot
+export function syncBridgeServerUrl(): void {
+  if (bridgeConfigListenerAttached) return;
+  bridgeConfigListenerAttached = true;
+
+  try {
+    onSnapshot(
+      doc(db, "settings", "ai_bridge_config"),
+      (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (typeof data?.serverUrl === "string" && data.serverUrl.startsWith("http")) {
+            const cleanUrl = data.serverUrl.replace(/\/$/, "");
+            if (cleanUrl !== cachedBridgeServerUrl) {
+              cachedBridgeServerUrl = cleanUrl;
+              try {
+                localStorage.setItem("buzz_cached_bridge_server_url", cleanUrl);
+              } catch {}
+            }
+          }
+        }
+      },
+      () => {
+        bridgeConfigListenerAttached = false;
+      }
+    );
+  } catch {
+    bridgeConfigListenerAttached = false;
+  }
+}
+
+// Automatically publish live origin to Firestore when running in web preview
+if (
+  typeof window !== "undefined" &&
+  !Capacitor.isNativePlatform() &&
+  window.location.origin &&
+  window.location.origin.startsWith("http") &&
+  !window.location.origin.includes("localhost")
+) {
+  try {
+    setDoc(
+      doc(db, "settings", "ai_bridge_config"),
+      {
+        serverUrl: window.location.origin,
+        serverOnline: true,
+        lastHeartbeat: Date.now(),
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    ).catch(() => {});
+  } catch {}
+}
+
+syncBridgeServerUrl();
 
 function shouldPreferFirestoreBridge(hasVideoAttachment: boolean = false): boolean {
   if (hasVideoAttachment) {
-    // Prefer direct HTTP first for video attachments so full video streams can be uploaded without hitting Firestore's 1MB limit
     return false;
   }
   if (Capacitor.isNativePlatform()) {
     const customHost =
       typeof localStorage !== "undefined" ? localStorage.getItem("buzz_api_server_url") : null;
-    if (!customHost) {
+    // Only prefer bridge if no server URL is known or HTTP recently failed
+    if (!customHost && !cachedBridgeServerUrl) {
       return true;
     }
-    if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 300000) {
+    if (lastHttpFailureAt > 0 && Date.now() - lastHttpFailureAt < 90000) {
       return true;
     }
   }
@@ -195,9 +244,9 @@ function shouldPreferFirestoreBridge(hasVideoAttachment: boolean = false): boole
 export function getApiBaseUrl(): string {
   if (Capacitor.isNativePlatform()) {
     const customHost = localStorage.getItem("buzz_api_server_url");
-    if (customHost) return customHost.replace(/\/$/, "");
-    if (cachedBridgeServerUrl) return cachedBridgeServerUrl;
-    return "https://ais-pre-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app";
+    if (customHost && customHost.startsWith("http")) return customHost.replace(/\/$/, "");
+    if (cachedBridgeServerUrl && cachedBridgeServerUrl.startsWith("http")) return cachedBridgeServerUrl;
+    return "";
   }
   return "";
 }
@@ -206,23 +255,22 @@ function getCandidateApiBaseUrls(): string[] {
   const urls: string[] = [];
   const customHost =
     typeof localStorage !== "undefined" ? localStorage.getItem("buzz_api_server_url") : null;
-  if (customHost) {
+  if (customHost && customHost.startsWith("http")) {
     urls.push(customHost.replace(/\/$/, ""));
   }
   if (!Capacitor.isNativePlatform()) {
     urls.push("");
   }
-  if (cachedBridgeServerUrl) {
+  if (cachedBridgeServerUrl && cachedBridgeServerUrl.startsWith("http")) {
     urls.push(cachedBridgeServerUrl);
   }
-  urls.push("https://ais-pre-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app");
-  urls.push("https://ais-dev-7s24tpfnmdpbk5ly26f4tb-549311647835.asia-southeast1.run.app");
-  return Array.from(new Set(urls));
+  return Array.from(new Set(urls.filter((u) => Boolean(u) || !Capacitor.isNativePlatform())));
 }
 
 export function wakeUpBuzzServer(): void {
   syncBridgeServerUrl();
   for (const baseUrl of getCandidateApiBaseUrls()) {
+    if (!baseUrl && Capacitor.isNativePlatform()) continue;
     fetch(`${baseUrl}/api/health`, { method: "GET", mode: "no-cors", cache: "no-store" }).catch(
       () => {}
     );
@@ -1766,9 +1814,7 @@ async function askViaFirestoreBridge(
     }
     const safePayload = JSON.parse(serializedJson);
 
-    if (!Capacitor.isNativePlatform()) {
-      wakeUpBuzzServer();
-    }
+    wakeUpBuzzServer();
     setDoc(reqRef, safePayload)
       .then(() => {
         if (settled) return;
@@ -1783,7 +1829,7 @@ async function askViaFirestoreBridge(
             cleanup();
             reject(new Error("Firestore AI bridge server hibernating"));
           }
-        }, 14000);
+        }, 35000);
       })
       .catch((err) => {
         if (!settled) {
@@ -2205,12 +2251,12 @@ export async function askGeminiAssistantStream(
 
   // 2. SSE Stream endpoint (/api/gemini/chat-stream) — streams live chunks while racing against directHttpPromise
   const streamPromise = (async (): Promise<AssistantResponse> => {
-    if (shouldPreferFirestoreBridge(hasVideoAttachment)) {
-      throw new Error("Skipped SSE on native video bridge");
+    const baseUrl = getApiBaseUrl();
+    if (Capacitor.isNativePlatform() && !baseUrl) {
+      throw new Error("No server URL configured on native platform");
     }
     refreshStreamTimeout(tierTimeoutMs);
     try {
-      const baseUrl = getApiBaseUrl();
       const endpoint = `${baseUrl}/api/gemini/chat-stream`;
       const response = await fetch(endpoint, {
         method: "POST",

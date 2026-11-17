@@ -29,6 +29,12 @@ public class BootReceiver extends BroadcastReceiver {
             BuzzNotificationWorker.ensureBaselineInitialized(context);
             BuzzRealtimeSyncService.ensureLiveSyncChannel(context);
 
+            // Schedule immediate reliable alert check loop via AlarmManager (bypasses Doze mode & background service restrictions)
+            try {
+                BuzzAlertReceiver.scheduleNext(context, 10000L);
+            } catch (Exception ignored) {
+            }
+
             Constraints constraints = new Constraints.Builder()
                     .setRequiredNetworkType(NetworkType.CONNECTED)
                     .build();
