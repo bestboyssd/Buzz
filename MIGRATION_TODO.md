@@ -244,21 +244,27 @@
 
 ---
 
-## 🚀 5. Cloudflare 24/7 Edge Server Expansion — Implemented & Live (`v1.3.5`)
+## 🚀 5. Cloudflare 24/7 Edge Server Expansion — Implemented & Live (`v1.3.6`)
 
 > [!NOTE]
-> **Status — ALL Priority 1 & Priority 2 Features Implemented & Deployed Live (`v1.3.5`, $0/mo Free Tier, Zero Credit Card)**:
+> **Status — ALL Priority 1 & Priority 2 Features Implemented & Deployed Live (`v1.3.6`, $0/mo Free Tier, Zero Credit Card)**:
 > * **Worker URL**: `https://buzz-ai.dassusuman2009.workers.dev` (Script: `buzz-ai`, source in `cloudflare-worker/buzz-ai.mjs`)
 > * **Cloudflare Bindings**:
 >   * `AI` — Cloudflare Workers AI (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`, Gemma 4, Whisper v3 Turbo)
->   * `BUZZ_EVENTS_KV` — Free Cloudflare KV Namespace (ID: `926ae8a03ab349449b1970d2e05f54d1`) used for the 48-hour event ring buffer, atomic stock ledger, account governance mirror, GitHub release cache, and 30-day nightly cloud backups (zero R2/card required)
+>   * `BUZZ_EVENTS_KV` — Free Cloudflare KV Namespace (ID: `926ae8a03ab349449b1970d2e05f54d1`) used for the 48-hour event ring buffer, atomic stock ledger, account governance mirror, GitHub release cache, cross-platform profile photo sync (`profile_photo:<email>`), and 30-day nightly cloud backups (zero R2/card required)
 > * **Cloudflare Cron Trigger**: `30 19 * * *` (1:00 AM IST daily shift close) — snapshots `products`, `bills`, `other_costs`, and `settings` into `BUZZ_EVENTS_KV` (`backup:YYYY-MM-DD`, 30-day retention) and publishes a `"📊 Daily Store Digest"` alert (`targetAudience: "admins"`) into the Event Hub
 > * **Live Endpoints on `buzz-ai`**:
->   * `POST /api/events/publish`, `GET /api/events/pull`, `GET /api/events/stream` (SSE live push + 48h offline-to-online catch-up queue)
+>   * `POST /api/events/publish`, `GET /api/events/pull`, `GET /api/events/stream` (device-scoped exclusion so same-account second phones receive alerts + 48h offline-to-online catch-up queue)
+>   * `GET/POST /api/profile/photo` (cross-platform Web AI Studio <-> Android phone profile photo sync keyed by normalized email with monotonic `photoUpdatedAt` guard, `<30ms`)
 >   * `POST /api/pos/atomic-checkout` (server-authoritative stock tracker & threshold alerting)
 >   * `GET /api/releases/latest` (edge-cached 60s TTL + rate-limit-proof `github.com/.../releases/latest` fallback) & `GET /api/github/apk-download` (HTTP `Range` resumable APK proxy)
 >   * `GET/POST /api/auth/status` (edge account governance mirror for `blockedUids`, `blockedEmails`, `deletedUids`, `deletedEmails`, `forcedLogoutAt`, `photoVersions`)
 >   * `GET /api/backups/list`, `GET /api/backups/download?date=YYYY-MM-DD`, `POST /api/backups/run-now`
+> * **Critical `v1.3.6` Fixes (Performance, Notifications & Cross-Platform Avatar Sync)**:
+>   * **Fixed Self-Cancelling System Notifications (`src/lib/utils.ts`, `cloudflareEvents.ts`, `stockAlerts.ts`)**: Removed the duplicate `wasNativeAlertHandled` abort inside `showLocalNotification()` that was silently dropping every system notification whenever its caller called `markNativeAlertHandled()` right beforehand (leaving only in-app modals visible). Also ensured `BuzzNotificationWorker.sendNotification()` always calls `ensureChannel(context)`.
+>   * **Fixed Same-Account Second-Phone Alert Filtering (`buzz-ai.mjs`, `BuzzNotificationWorker.java`)**: `filterEventsForClient` now excludes only matching `sourceDeviceId` (not `sourceUid`), and `BuzzNotificationWorker` checks Cloudflare first on every tick/reconnect while running Firestore fallback every `12s` so alerts triggered from Google AI Studio also arrive promptly.
+>   * **Fixed Startup Lag & Sluggishness (`AuthContext.tsx`, `cloudflareEvents.ts`, `App.tsx`)**: Replaced the endless 20s crashing `EventSource` reconnect loop with a lightweight 25s visible-only pull + instant `online`/`appResumed` catch-up; restored 0ms instant startup whenever a cached photo exists; replaced the blocking full-`settings`-collection scan with targeted `where("email", "==", ...)` + `<30ms` Cloudflare Edge lookup; eliminated double `setUser()` re-render on `profilePhotoUpdated`.
+>   * **Fixed Web vs. Phone Profile Photo Mismatch (`AuthContext.tsx`, `Account.tsx`, `buzz-ai.mjs`)**: Stopped stamping `Date.now()` onto old cached/fallback photos, compared strictly against `photoUpdatedAt` (never `updatedAt`), added live sibling email `onSnapshot(query(where("email", "==", ...)))`, and mirrored canonical profile photos to Cloudflare KV (`/api/profile/photo`).
 > * **Client & Native Android Integration**:
 >   * `src/lib/cloudflareEvents.ts` — Event Hub publisher (with offline pending queue `buzz_cf_pending_events_v1`), foreground SSE subscriber, instant reconnect `pullCloudflareEvents`, `publishAtomicCheckoutToEdge`, `syncCloudflareAuthGovernance`
 >   * `src/lib/stockAlerts.ts`, `src/pages/Admin.tsx`, `src/lib/AuthContext.tsx`, `src/lib/firestoreHooks.ts` — Publish stock alerts, Admin broadcasts, 3-attempt PIN lockouts, offline sync conflicts, atomic checkout stock deductions, and account governance updates to Cloudflare Edge

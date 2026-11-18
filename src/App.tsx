@@ -1079,6 +1079,7 @@ function AppContent() {
 
     const handleEdgeCatchUp = () => {
       if (typeof navigator !== "undefined" && !navigator.onLine) return;
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       pullCloudflareEvents(user.uid, userIsAdmin).catch(() => {});
     };
 

@@ -189,8 +189,10 @@ function filterEventsForClient(events, { since, uid, role, deviceId }) {
   return events.filter((ev) => {
     if (!ev) return false;
     if (Number(ev.cursor || 0) <= since) return false;
-    if (deviceId && ev.sourceDeviceId && ev.sourceDeviceId === deviceId) return false;
-    if (uid && ev.sourceUid && ev.sourceUid === uid && ev.kind !== "security" && ev.kind !== "digest") {
+    // Exclude only the exact originating physical device so a second phone signed into the same account still receives alerts
+    if (deviceId && ev.sourceDeviceId) {
+      if (ev.sourceDeviceId === deviceId) return false;
+    } else if (uid && ev.sourceUid && ev.sourceUid === uid && ev.kind !== "security" && ev.kind !== "digest") {
       return false;
     }
     if (ev.targetAudience === "admins" && !isAdmin) return false;
@@ -1358,6 +1360,75 @@ async function handleAvatarProxy(urlObj) {
   }
 }
 
+// ============================================================================
+// 5B. CROSS-PLATFORM EDGE PROFILE PHOTO SYNC (WEB AI STUDIO <-> ANDROID PHONE)
+// ============================================================================
+
+async function handleProfilePhotoGet(url, env) {
+  const email = String(url.searchParams.get("email") || "").trim().toLowerCase();
+  if (!email) return jsonResponse({ ok: false, error: "email required" }, 400);
+  if (!env?.BUZZ_EVENTS_KV) return jsonResponse({ ok: true, found: false });
+
+  try {
+    const saved = await env.BUZZ_EVENTS_KV.get(`profile_photo:${email}`, "json");
+    if (saved && typeof saved === "object" && saved.photoUrl) {
+      return jsonResponse({
+        ok: true,
+        found: true,
+        email,
+        photoUrl: String(saved.photoUrl || ""),
+        displayName: String(saved.displayName || ""),
+        photoUpdatedAt: Number(saved.photoUpdatedAt || 0),
+      });
+    }
+  } catch {}
+
+  return jsonResponse({ ok: true, found: false, email });
+}
+
+async function handleProfilePhotoPost(request, env) {
+  const body = await request.json().catch(() => null);
+  const email = String(body?.email || "").trim().toLowerCase();
+  const photoUrl = String(body?.photoUrl || "").trim();
+  const displayName = String(body?.displayName || "").trim();
+  const photoUpdatedAt = Number(body?.photoUpdatedAt || Date.now());
+  if (!email) return jsonResponse({ ok: false, error: "email required" }, 400);
+  if (!env?.BUZZ_EVENTS_KV) return jsonResponse({ ok: false, error: "KV not configured" }, 503);
+
+  // Limit stored photo size to 120 KB to stay lean & fast in KV
+  if (photoUrl.length > 120000) {
+    return jsonResponse({ ok: false, error: "photo too large" }, 413);
+  }
+
+  const kvKey = `profile_photo:${email}`;
+  let existing = null;
+  try {
+    existing = await env.BUZZ_EVENTS_KV.get(kvKey, "json");
+  } catch {}
+
+  const existingTs = Number(existing?.photoUpdatedAt || 0);
+  if (existing && existingTs > photoUpdatedAt && body?.force !== true) {
+    return jsonResponse({
+      ok: true,
+      accepted: false,
+      reason: "newer_exists",
+      photoUrl: String(existing.photoUrl || ""),
+      displayName: String(existing.displayName || ""),
+      photoUpdatedAt: existingTs,
+    });
+  }
+
+  const record = {
+    email,
+    photoUrl,
+    displayName: displayName || String(existing?.displayName || ""),
+    photoUpdatedAt,
+    updatedAt: Date.now(),
+  };
+  await env.BUZZ_EVENTS_KV.put(kvKey, JSON.stringify(record));
+  return jsonResponse({ ok: true, accepted: true, ...record });
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -1372,7 +1443,7 @@ export default {
         status: "ok",
         ok: true,
         service: "buzz-ai-cloudflare-worker",
-        version: "1.3.5",
+        version: "1.3.6",
         provider: "cloudflare-workers-ai",
         geminiConfigured: true,
         eventHubEnabled: Boolean(env?.BUZZ_EVENTS_KV),
@@ -1388,6 +1459,7 @@ export default {
           "nightly-backups",
           "daily-digest",
           "edge-auth-governance",
+          "edge-profile-photo-sync",
         ],
         models: {
           chat: TEXT_MODELS[0],
@@ -1447,6 +1519,12 @@ export default {
     }
     if (path === "/api/auth/status" && request.method === "POST") {
       return handleAuthStatusPost(request, env);
+    }
+    if (path === "/api/profile/photo" && request.method === "GET") {
+      return handleProfilePhotoGet(url, env);
+    }
+    if (path === "/api/profile/photo" && request.method === "POST") {
+      return handleProfilePhotoPost(request, env);
     }
     if (path === "/api/backups/list" && request.method === "GET") {
       return handleBackupsList(env);

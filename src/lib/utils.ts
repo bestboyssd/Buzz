@@ -260,15 +260,6 @@ export const showLocalNotification = async (
             return;
         }
 
-        const nativeMeta = inferNativeMetaFromTag(dedupeTag);
-        if (nativeMeta && wasNativeAlertHandled(nativeMeta.kind, nativeMeta.key, nativeMeta.ts)) {
-            recentNotificationsMemory.set(key, now);
-            try {
-                localStorage.setItem(storageDedupeKey, String(now));
-            } catch {}
-            return;
-        }
-
         recentNotificationsMemory.set(key, now);
         try {
             localStorage.setItem(storageDedupeKey, String(now));

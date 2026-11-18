@@ -25,6 +25,7 @@ import {
   deleteDoc,
   collection,
   query,
+  where,
   orderBy,
   getDocs,
   getDocsFromServer,
@@ -40,7 +41,11 @@ import {
   applyPerformanceMode,
 } from "./utils";
 import { logActivity } from "./firestoreHooks";
-import { publishCloudflareEvent } from "./cloudflareEvents";
+import {
+  publishCloudflareEvent,
+  fetchEdgeProfilePhoto,
+  pushEdgeProfilePhoto,
+} from "./cloudflareEvents";
 
 import { updateStatusBarTheme } from "./capacitor";
 
@@ -165,21 +170,29 @@ export const saveResolvedProfilePhotoToCache = (
 ) => {
   const cleanPhoto = String(photoUrl || "").trim();
   const cleanEmail = String(email || "").trim().toLowerCase();
-  const ts = timestampMs > 0 ? timestampMs : Date.now();
+  const ts = timestampMs > 0 ? timestampMs : 0;
   try {
     if (cleanPhoto) {
       localStorage.setItem(`custom_user_photo_${uid}`, cleanPhoto);
-      localStorage.setItem(`custom_user_photo_ts_${uid}`, String(ts));
+      if (ts > 0) {
+        localStorage.setItem(`custom_user_photo_ts_${uid}`, String(ts));
+      }
       if (cleanEmail) {
         localStorage.setItem(`custom_user_photo_email_${cleanEmail}`, cleanPhoto);
-        localStorage.setItem(`custom_user_photo_email_ts_${cleanEmail}`, String(ts));
+        if (ts > 0) {
+          localStorage.setItem(`custom_user_photo_email_ts_${cleanEmail}`, String(ts));
+        }
       }
     } else {
       localStorage.removeItem(`custom_user_photo_${uid}`);
-      localStorage.setItem(`custom_user_photo_ts_${uid}`, String(ts));
+      if (ts > 0) {
+        localStorage.setItem(`custom_user_photo_ts_${uid}`, String(ts));
+      }
       if (cleanEmail) {
         localStorage.removeItem(`custom_user_photo_email_${cleanEmail}`);
-        localStorage.setItem(`custom_user_photo_email_ts_${cleanEmail}`, String(ts));
+        if (ts > 0) {
+          localStorage.setItem(`custom_user_photo_email_ts_${cleanEmail}`, String(ts));
+        }
       }
     }
     localStorage.setItem(`custom_user_photo_verified_${uid}`, "true");
@@ -343,10 +356,8 @@ const cloneUserWithLiveGetters = (
       if (val) {
         const normEmail = String(fallbackEmail || "").trim().toLowerCase();
         try {
-          const prev = localStorage.getItem(`custom_user_photo_${uid}`) || "";
           const existingTs = Number(localStorage.getItem(`custom_user_photo_ts_${uid}`) || 0);
-          const nextTs = val !== prev || existingTs <= 0 ? Date.now() : existingTs;
-          saveResolvedProfilePhotoToCache(uid, normEmail, val, nextTs);
+          saveResolvedProfilePhotoToCache(uid, normEmail, val, existingTs);
         } catch {}
       }
     },
@@ -599,62 +610,93 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           window.dispatchEvent(new Event("profilePhotoUpdated"));
         };
 
-        if (isOfflineNow || alreadySyncedPhotoThisSession) {
+        const hasCachedLocalPhoto = Boolean(
+          localStorage.getItem(`custom_user_photo_${currentUser.uid}`) ||
+            (normInitialEmail &&
+              localStorage.getItem(`custom_user_photo_email_${normInitialEmail}`)) ||
+            localStorage.getItem(`custom_user_photo_verified_${currentUser.uid}`) === "true"
+        );
+
+        if (isOfflineNow || alreadySyncedPhotoThisSession || hasCachedLocalPhoto) {
           revealAuthenticatedUser();
         }
 
-        // Safety fallback so a slow network never blocks login longer than 1.8s
+        // Safety fallback so a slow network on a brand-new device never blocks login longer than 900ms
         const revealSafetyTimer = setTimeout(() => {
           revealAuthenticatedUser();
-        }, 1800);
+        }, 900);
 
-        const fetchBestSiblingPhoto = async (emailToMatch: string) => {
+        const fetchBestSiblingPhoto = async (rawEmailVal: string, emailToMatch: string) => {
           if (!emailToMatch || isOfflineNow) return null;
           try {
-            const snap = await Promise.race([
-              getDocsFromServer(collection(db, "settings")).catch(() =>
-                getDocs(collection(db, "settings"))
-              ),
-              new Promise<null>((resolve) => setTimeout(() => resolve(null), 1200)),
-            ]);
-            if (!snap) return null;
-            let bestPhoto = "";
-            let bestPhotoTs = 0;
-            let bestName = "";
-            snap.docs.forEach((d) => {
-              if (!d.id.startsWith("profile_")) return;
-              const dData = d.data();
-              const dEmail = String(dData?.email || "").trim().toLowerCase();
-              if (dEmail !== emailToMatch) return;
-              const pUrl = String(dData?.customPhotoURL || "").trim();
-              if (!pUrl) return;
-              const pTs = Number(dData?.photoUpdatedAt || dData?.updatedAt || 0);
-              const isBetter =
-                !bestPhoto ||
-                (pTs !== bestPhotoTs
-                  ? pTs > bestPhotoTs
-                  : pUrl.startsWith("data:image/") &&
-                    !bestPhoto.startsWith("data:image/"));
-              if (isBetter) {
-                bestPhoto = pUrl;
-                bestPhotoTs = pTs;
-                if (dData?.displayName) {
-                  bestName = String(dData.displayName).trim();
+            const [edgePhoto, targetedSnap] = await Promise.all([
+              fetchEdgeProfilePhoto(emailToMatch).catch(() => null),
+              (async () => {
+                const emailCandidates = Array.from(
+                  new Set([rawEmailVal.trim(), emailToMatch].filter(Boolean))
+                );
+                for (const candidate of emailCandidates) {
+                  try {
+                    const q = query(
+                      collection(db, "settings"),
+                      where("email", "==", candidate)
+                    );
+                    const snap = await Promise.race([
+                      getDocsFromServer(q).catch(() => getDocs(q)),
+                      new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+                    ]);
+                    if (snap && snap.docs.length > 0) return snap;
+                  } catch {}
                 }
-              }
-            });
-            return bestPhoto ? { photoUrl: bestPhoto, photoTs: bestPhotoTs, displayName: bestName } : null;
+                return null;
+              })(),
+            ]);
+
+            let bestPhoto = edgePhoto?.photoUrl || "";
+            let bestPhotoTs = Number(edgePhoto?.photoUpdatedAt || 0);
+            let bestName = edgePhoto?.displayName || "";
+
+            if (targetedSnap) {
+              targetedSnap.docs.forEach((d) => {
+                if (!d.id.startsWith("profile_")) return;
+                const dData = d.data();
+                const dEmail = String(dData?.email || "").trim().toLowerCase();
+                if (dEmail !== emailToMatch) return;
+                const pUrl = String(dData?.customPhotoURL || "").trim();
+                if (!pUrl) return;
+                const pTs = Number(dData?.photoUpdatedAt || 0);
+                const isBetter =
+                  !bestPhoto ||
+                  (pTs > 0 && bestPhotoTs > 0
+                    ? pTs > bestPhotoTs
+                    : pTs > bestPhotoTs ||
+                      (pTs === bestPhotoTs &&
+                        pUrl.startsWith("data:image/") &&
+                        !bestPhoto.startsWith("data:image/")));
+                if (isBetter) {
+                  bestPhoto = pUrl;
+                  bestPhotoTs = pTs;
+                  if (dData?.displayName) {
+                    bestName = String(dData.displayName).trim();
+                  }
+                }
+              });
+            }
+
+            return bestPhoto
+              ? { photoUrl: bestPhoto, photoTs: bestPhotoTs, displayName: bestName }
+              : null;
           } catch {
             return null;
           }
         };
 
-        // Always query fresh server documents first when online so deleted/unblocked accounts and custom profile photos are resolved before first render
+        // Always query fresh server documents first when online so deleted/unblocked accounts and custom profile photos are resolved cleanly
         Promise.all([
           fetchFreshDoc(profileDoc),
           fetchFreshDoc(blockedListDoc),
           fetchFreshDoc(deletedListDoc),
-          fetchBestSiblingPhoto(normInitialEmail),
+          fetchBestSiblingPhoto(resolvedEmail, normInitialEmail),
         ])
           .then(async ([docSnap, blockedSnap, deletedSnap, siblingProfile]) => {
             clearTimeout(revealSafetyTimer);
@@ -813,38 +855,39 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               );
               let docPhotoTs = Number(data.photoUpdatedAt || 0);
               const docUpdatedAt = Number(data.updatedAt || 0);
-              let effectiveRemotePhotoTs = docPhotoTs > 0 ? docPhotoTs : docUpdatedAt;
+              let effectiveRemotePhotoTs = docPhotoTs;
+              const prevCachedPhotoBeforeSync =
+                localStorage.getItem(`custom_user_photo_${currentUser.uid}`) || "";
 
-              // Check if a sibling profile_* doc for the same email has a newer photo or a custom data:image/ photo
+              // Check if a sibling profile_* doc or Cloudflare Edge KV for the same email has a newer photo.
+              // Compare strictly against docPhotoTs (NEVER docUpdatedAt, which bumps on every login/theme toggle!).
               if (siblingProfile?.photoUrl) {
                 const sibUrl = siblingProfile.photoUrl;
-                const sibTs = siblingProfile.photoTs || 0;
+                const sibTs = Number(siblingProfile.photoTs || 0);
                 const preferSibling =
                   !customPhotoURL ||
-                  (sibTs > effectiveRemotePhotoTs) ||
-                  (sibUrl.startsWith("data:image/") &&
+                  (sibTs > 0 && sibTs > docPhotoTs) ||
+                  (sibTs === docPhotoTs &&
+                    sibUrl.startsWith("data:image/") &&
                     !customPhotoURL.startsWith("data:image/"));
                 if (preferSibling) {
                   customPhotoURL = sibUrl;
                   docPhotoTs = Math.max(docPhotoTs, sibTs);
-                  effectiveRemotePhotoTs = Math.max(effectiveRemotePhotoTs, sibTs);
+                  effectiveRemotePhotoTs = docPhotoTs;
                   shouldWritePhotoOnLogin = true;
-                  photoTsToWrite = effectiveRemotePhotoTs || Date.now();
+                  photoTsToWrite = docPhotoTs || Date.now();
                 }
               }
 
-              const cachedLocalPhoto =
-                localStorage.getItem(`custom_user_photo_${currentUser.uid}`) || "";
+              const cachedLocalPhoto = prevCachedPhotoBeforeSync;
               const remoteHasPhoto = Boolean(customPhotoURL);
 
               if (
                 cachedLocalPhoto &&
                 localPhotoTs > 0 &&
-                (docPhotoTs > 0
-                  ? localPhotoTs > docPhotoTs
-                  : localPhotoTs > effectiveRemotePhotoTs &&
-                    cachedLocalPhoto.startsWith("data:image/") &&
-                    !customPhotoURL.startsWith("data:image/"))
+                docPhotoTs > 0 &&
+                localPhotoTs > docPhotoTs &&
+                cachedLocalPhoto !== customPhotoURL
               ) {
                 customPhotoURL = cachedLocalPhoto;
                 shouldWritePhotoOnLogin = true;
@@ -860,12 +903,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                   currentUser.uid,
                   normEmail,
                   customPhotoURL,
-                  effectiveRemotePhotoTs || Date.now()
+                  effectiveRemotePhotoTs
                 );
               } else if (cachedLocalPhoto) {
                 customPhotoURL = cachedLocalPhoto;
                 shouldWritePhotoOnLogin = true;
-                photoTsToWrite = localPhotoTs || Date.now();
+                photoTsToWrite = localPhotoTs || docUpdatedAt || Date.now();
                 saveResolvedProfilePhotoToCache(
                   currentUser.uid,
                   normEmail,
@@ -877,8 +920,22 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                   currentUser.uid,
                   normEmail,
                   originalPhotoURL || "",
-                  Date.now()
+                  0
                 );
+              }
+
+              // Mirror winning photo to Cloudflare Edge KV if it has a real photoUpdatedAt so Web & Phone always match
+              if (normEmail && customPhotoURL && (docPhotoTs > 0 || shouldWritePhotoOnLogin)) {
+                pushEdgeProfilePhoto({
+                  email: normEmail,
+                  photoUrl: customPhotoURL,
+                  displayName: savedName,
+                  photoUpdatedAt: photoTsToWrite || docPhotoTs || Date.now(),
+                }).catch(() => {});
+              }
+
+              if (hasRevealedSession && customPhotoURL !== prevCachedPhotoBeforeSync) {
+                window.dispatchEvent(new Event("profilePhotoUpdated"));
               }
               if (savedName) {
                 localStorage.setItem(
@@ -1298,7 +1355,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             }
           }
           if (profileIdentityChanged) {
-            refreshUserAvatar();
             window.dispatchEvent(new Event("profilePhotoUpdated"));
           }
 
@@ -1440,11 +1496,70 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
       () => {}
     );
 
+    // Real-time sibling email listener: keeps Web (Google AI Studio) & Android UIDs synced to the exact same profile photo live
+    const rawUserEmail = String(user.email || "").trim();
+    const unsubscribeSiblings = rawUserEmail
+      ? onSnapshot(
+          query(collection(db, "settings"), where("email", "==", rawUserEmail)),
+          (snap) => {
+            const normSnapEmail = rawUserEmail.toLowerCase();
+            let bestPhoto = "";
+            let bestPhotoTs = 0;
+            let bestName = "";
+            snap.docs.forEach((d) => {
+              if (!d.id.startsWith("profile_")) return;
+              const dData = d.data();
+              const pUrl = String(dData?.customPhotoURL || "").trim();
+              const pTs = Number(dData?.photoUpdatedAt || 0);
+              if (pUrl && pTs > bestPhotoTs) {
+                bestPhoto = pUrl;
+                bestPhotoTs = pTs;
+                if (typeof dData?.displayName === "string" && dData.displayName.trim()) {
+                  bestName = dData.displayName.trim();
+                }
+              }
+            });
+            if (!bestPhoto || bestPhotoTs <= 0) return;
+
+            const currentLocalPhoto =
+              localStorage.getItem(`custom_user_photo_${user.uid}`) || "";
+            const currentLocalTs = Number(
+              localStorage.getItem(`custom_user_photo_ts_${user.uid}`) || 0
+            );
+            if (bestPhotoTs > currentLocalTs || (bestPhotoTs === currentLocalTs && bestPhoto !== currentLocalPhoto)) {
+              saveResolvedProfilePhotoToCache(user.uid, normSnapEmail, bestPhoto, bestPhotoTs);
+              if (bestName) {
+                localStorage.setItem(`custom_user_name_${user.uid}`, bestName);
+                localStorage.setItem(`custom_user_name_email_${normSnapEmail}`, bestName);
+              }
+              setDoc(
+                doc(db, "settings", `profile_${user.uid}`),
+                {
+                  customPhotoURL: bestPhoto,
+                  photoUpdatedAt: bestPhotoTs,
+                  ...(bestName ? { displayName: bestName } : {}),
+                },
+                { merge: true }
+              ).catch(() => {});
+              pushEdgeProfilePhoto({
+                email: normSnapEmail,
+                photoUrl: bestPhoto,
+                displayName: bestName,
+                photoUpdatedAt: bestPhotoTs,
+              }).catch(() => {});
+              window.dispatchEvent(new Event("profilePhotoUpdated"));
+            }
+          },
+          () => {}
+        )
+      : () => {};
+
     return () => {
       window.removeEventListener("profilePhotoUpdated", refreshUserAvatar);
       unsubscribe();
       unsubscribeBlocked();
       unsubscribeDeleted();
+      unsubscribeSiblings();
     };
   }, [user?.uid]);
 

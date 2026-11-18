@@ -21,7 +21,8 @@ import { updateProfile } from "firebase/auth";
 import { compressProfileImage, readUncroppedImageDataUrl } from "../lib/imageUtils";
 import { ImageCropperModal } from "../components/ImageCropperModal";
 import { auth, db } from "../lib/firebase";
-import { collection, doc, getDocs, setDoc } from "firebase/firestore";
+import { collection, doc, getDocs, getDocsFromServer, query, setDoc, where } from "firebase/firestore";
+import { pushEdgeProfilePhoto } from "../lib/cloudflareEvents";
 import { Capacitor } from "@capacitor/core";
 import { Camera as CapCamera, CameraResultType, CameraSource } from "@capacitor/camera";
 
@@ -236,37 +237,53 @@ export function Account() {
       // belonging to the exact same email (e.g. Web tidy-byte-g5xj8 UID vs Native Android buzz-8521 UID)
       // so the two platforms never overwrite each other with an older avatar!
       const normEmail = String(user.email || "").trim().toLowerCase();
+      const rawEmail = String(user.email || "").trim();
+      const edgePhotoPromise = normEmail
+        ? pushEdgeProfilePhoto({
+            email: normEmail,
+            photoUrl: trimmedPhoto || "",
+            displayName: trimmedName,
+            photoUpdatedAt: now,
+          })
+        : Promise.resolve();
+
       const siblingSyncPromise = normEmail
-        ? getDocs(collection(db, "settings"))
-            .then((snap) => {
+        ? (async () => {
+            try {
+              const targetQuery = query(
+                collection(db, "settings"),
+                where("email", "==", rawEmail || normEmail)
+              );
+              const snap = await getDocsFromServer(targetQuery).catch(() =>
+                getDocs(targetQuery)
+              );
               const updates: Promise<void>[] = [];
               snap.docs.forEach((d) => {
                 if (d.id.startsWith("profile_") && d.id !== `profile_${user.uid}`) {
-                  const dEmail = String(d.data()?.email || "").trim().toLowerCase();
-                  if (dEmail === normEmail) {
-                    updates.push(
-                      setDoc(
-                        d.ref,
-                        {
-                          customPhotoURL: trimmedPhoto || "",
-                          photoUpdatedAt: now,
-                          displayName: trimmedName,
-                          updatedAt: now,
-                        },
-                        { merge: true }
-                      ).catch(() => {})
-                    );
-                  }
+                  updates.push(
+                    setDoc(
+                      d.ref,
+                      {
+                        customPhotoURL: trimmedPhoto || "",
+                        photoUpdatedAt: now,
+                        displayName: trimmedName,
+                        updatedAt: now,
+                      },
+                      { merge: true }
+                    ).catch(() => {})
+                  );
                 }
               });
-              return Promise.all(updates);
-            })
-            .catch(() => {})
+              if (updates.length > 0) {
+                await Promise.all(updates);
+              }
+            } catch {}
+          })()
         : Promise.resolve();
 
-      // Wait briefly so Firestore write lands reliably on mobile without hanging forever if offline
+      // Wait briefly so Firestore & Cloudflare edge writes land reliably without hanging offline
       await Promise.race([
-        Promise.all([authPromise, dbPromise, siblingSyncPromise]),
+        Promise.all([authPromise, dbPromise, edgePhotoPromise, siblingSyncPromise]),
         new Promise((resolve) => setTimeout(resolve, 2500)),
       ]);
 

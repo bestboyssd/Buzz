@@ -193,13 +193,13 @@ export async function publishStockTransitionAlerts(
     const alreadyNotifiedNative =
       wasNativeAlertHandled('stock', eventId, now) ||
       wasNativeAlertHandled('stock', canonicalKey, now);
-    markNativeAlertHandled('stock', eventId, now);
-    markNativeAlertHandled('stock', canonicalKey, now);
 
     if (!alreadyNotifiedNative) {
       const { title, body } = formatStockAlertNotification(entry);
       showLocalNotification(title, body, '/pwa-192x192.png', canonicalKey).catch(() => {});
     }
+    markNativeAlertHandled('stock', eventId, now);
+    markNativeAlertHandled('stock', canonicalKey, now);
   }
 
   if (entries.length === 0) return;

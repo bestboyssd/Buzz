@@ -170,6 +170,65 @@ export async function syncCloudflareAuthGovernance(payload: {
   } catch {}
 }
 
+/**
+ * Fetches the canonical cross-platform profile photo for an email from Cloudflare Edge KV (<30ms).
+ * Keeps Web (Google AI Studio) and Native Android UIDs 100% synced to the latest uploaded photo.
+ */
+export async function fetchEdgeProfilePhoto(
+  email: string
+): Promise<{ photoUrl: string; displayName: string; photoUpdatedAt: number } | null> {
+  const normEmail = String(email || "").trim().toLowerCase();
+  if (!normEmail) return null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(
+      `${CLOUDFLARE_EDGE_AI_URL}/api/profile/photo?email=${encodeURIComponent(normEmail)}`,
+      { method: "GET", cache: "no-store", signal: controller.signal }
+    );
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (data?.ok && data?.found && data?.photoUrl) {
+      return {
+        photoUrl: String(data.photoUrl || "").trim(),
+        displayName: String(data.displayName || "").trim(),
+        photoUpdatedAt: Number(data.photoUpdatedAt || 0),
+      };
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Publishes the latest profile photo for an email to Cloudflare Edge KV (monotonic timestamp guard).
+ */
+export async function pushEdgeProfilePhoto(payload: {
+  email: string;
+  photoUrl: string;
+  displayName?: string;
+  photoUpdatedAt: number;
+}): Promise<void> {
+  const normEmail = String(payload?.email || "").trim().toLowerCase();
+  if (!normEmail) return;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    await fetch(`${CLOUDFLARE_EDGE_AI_URL}/api/profile/photo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: normEmail,
+        photoUrl: String(payload.photoUrl || "").trim(),
+        displayName: String(payload.displayName || "").trim(),
+        photoUpdatedAt: Number(payload.photoUpdatedAt || Date.now()),
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+  } catch {}
+}
+
 function handleIncomingCloudflareEvent(
   ev: CloudflareStoreEvent,
   uid: string
@@ -186,15 +245,15 @@ function handleIncomingCloudflareEvent(
     wasNativeAlertHandled(kind as any, canonicalKey, ts);
   if (alreadyHandled) return;
 
-  markNativeAlertHandled(kind as any, ev.id, ts);
-  markNativeAlertHandled(kind as any, canonicalKey, ts);
-
   showLocalNotification(
     ev.title || "Buzz POS Alert",
     ev.body || "",
     "/pwa-192x192.png",
     canonicalKey
   ).catch(() => {});
+
+  markNativeAlertHandled(kind as any, ev.id, ts);
+  markNativeAlertHandled(kind as any, canonicalKey, ts);
 }
 
 /**
@@ -253,97 +312,30 @@ export async function pullCloudflareEvents(
 }
 
 /**
- * Opens a live foreground SSE stream to Cloudflare Event Hub for sub-second push delivery.
- * Returns an unsubscribe cleanup function.
+ * Keeps the foreground session synced with the 24/7 Cloudflare Event Hub without holding open
+ * a heavy EventSource socket that reconnects/errors every 20s on mobile WebViews.
+ * Immediate catch-up runs on mount, online reconnect, and app resume, plus a light 25s visible check.
  */
 export function startCloudflareEventStream(
   uid: string,
   isAdmin: boolean
 ): () => void {
-  if (!uid || typeof window === "undefined" || typeof EventSource === "undefined") {
+  if (!uid || typeof window === "undefined") {
     return () => {};
   }
 
   let closed = false;
-  let es: EventSource | null = null;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  const cursorKey = `buzz_cf_last_cursor_${uid}`;
+  pullCloudflareEvents(uid, isAdmin).catch(() => {});
 
-  const connect = () => {
+  const intervalId = setInterval(() => {
     if (closed) return;
     if (typeof navigator !== "undefined" && !navigator.onLine) return;
-
-    const rawCursor = localStorage.getItem(cursorKey);
-    const since = rawCursor ? Math.max(0, Number(rawCursor) || 0) : Date.now();
-    if (!rawCursor) {
-      try {
-        localStorage.setItem(cursorKey, String(since));
-      } catch {}
-    }
-
-    const url =
-      `${CLOUDFLARE_EDGE_AI_URL}/api/events/stream` +
-      `?since=${encodeURIComponent(String(since))}` +
-      `&uid=${encodeURIComponent(uid)}` +
-      `&role=${encodeURIComponent(isAdmin ? "admin" : "user")}` +
-      `&deviceId=${encodeURIComponent(getDeviceId())}`;
-
-    try {
-      es = new EventSource(url);
-      es.onmessage = (msg) => {
-        if (closed) return;
-        try {
-          const parsed = JSON.parse(msg.data);
-          if (parsed?.latestCursor) {
-            const prev = Number(localStorage.getItem(cursorKey) || 0);
-            if (Number(parsed.latestCursor) > prev) {
-              localStorage.setItem(cursorKey, String(parsed.latestCursor));
-            }
-          }
-          if (parsed?.type === "event" && parsed?.event) {
-            const ev: CloudflareStoreEvent = parsed.event;
-            const prev = Number(localStorage.getItem(cursorKey) || 0);
-            if (Number(ev.cursor || 0) > prev) {
-              localStorage.setItem(cursorKey, String(ev.cursor));
-            }
-            handleIncomingCloudflareEvent(ev, uid);
-          }
-        } catch {}
-      };
-      es.onerror = () => {
-        if (es) {
-          try {
-            es.close();
-          } catch {}
-          es = null;
-        }
-        if (!closed) {
-          reconnectTimer = setTimeout(connect, 4000);
-        }
-      };
-    } catch {
-      if (!closed) {
-        reconnectTimer = setTimeout(connect, 5000);
-      }
-    }
-  };
-
-  // Seed cursor via pull first, then attach live SSE stream
-  pullCloudflareEvents(uid, isAdmin).finally(() => {
-    if (!closed) connect();
-  });
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    pullCloudflareEvents(uid, isAdmin).catch(() => {});
+  }, 25000);
 
   return () => {
     closed = true;
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    if (es) {
-      try {
-        es.close();
-      } catch {}
-      es = null;
-    }
+    clearInterval(intervalId);
   };
 }

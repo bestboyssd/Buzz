@@ -36,7 +36,7 @@ public class BuzzNotificationWorker extends Worker {
     private static final String DEFAULT_DATABASE_ID = "ai-studio-remixbuzzv111-8ceddc6a-4499-4e60-a805-dedb47b5266b";
     private static final String DEFAULT_API_KEY = "AIzaSyBhbO3om_V-n5RJ471DtuPNAvoUkElIjz4";
     private static final String CLOUDFLARE_EVENTS_PULL_URL = "https://buzz-ai.dassusuman2009.workers.dev/api/events/pull";
-    private static final long FIRESTORE_FALLBACK_INTERVAL_MS = 60000L;
+    private static final long FIRESTORE_FALLBACK_INTERVAL_MS = 12000L;
     private static final long CANONICAL_STOCK_TTL_MS = 180000L; // 3 minutes
     private static final Object PREFS_LOCK = new Object();
     private static final java.util.concurrent.atomic.AtomicBoolean IS_RUNNING_CHECK = new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -826,6 +826,7 @@ public class BuzzNotificationWorker extends Worker {
     }
 
     public static void sendNotification(Context context, int id, String title, String body) {
+        ensureChannel(context);
         NotificationManager nm = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (nm == null) return;
 
