@@ -49,7 +49,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import android.speech.tts.TextToSpeech;
 import androidx.core.content.FileProvider;
@@ -59,7 +58,6 @@ public class MainActivity extends BridgeActivity {
     private static final int AUDIO_PERMISSION_REQUEST_CODE = 1002;
     private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 1003;
     private boolean exporterAttached = false;
-    private ScheduledExecutorService bgPollExecutor = null;
     private TextToSpeech nativeTts = null;
     private boolean ttsReady = false;
     private WebView printWebView = null;
@@ -715,11 +713,14 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public boolean setNotificationsEnabled(boolean enabled) {
             try {
-                BuzzNotificationWorker.setNotificationsEnabled(getApplicationContext(), enabled);
+                Context appCtx = getApplicationContext();
+                BuzzNotificationWorker.setNotificationsEnabled(appCtx, enabled);
                 if (enabled) {
                     BuzzRealtimeSyncService.startIfPermitted(MainActivity.this);
+                    BuzzAlertReceiver.scheduleNext(appCtx, 30000L);
                 } else {
                     BuzzRealtimeSyncService.stopService(MainActivity.this);
+                    BuzzAlertReceiver.cancelAlarm(appCtx);
                 }
                 return true;
             } catch (Exception e) {
@@ -946,13 +947,6 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         isAppInForeground = true;
-        if (bgPollExecutor != null) {
-            try {
-                bgPollExecutor.shutdownNow();
-            } catch (Exception ignored) {
-            }
-            bgPollExecutor = null;
-        }
         BuzzRealtimeSyncService.startIfPermitted(this);
 
         // Cancel background alarm wake check while user is actively in foreground
@@ -995,25 +989,12 @@ public class MainActivity extends BridgeActivity {
         } catch (Exception ignored) {
         }
 
-        // Schedule reliable 3-minute wake loop via BuzzAlertReceiver (bypasses Android Doze and background execution limits)
+        // Schedule silent Doze-safe BroadcastReceiver wake loop (no persistent "Live sync active" notification)
         try {
-            BuzzAlertReceiver.scheduleNext(getApplicationContext(), 15000L);
-        } catch (Exception ignored) {
-        }
-
-        // Start fast 3-second native background polling while minimized so stock/broadcast/security alerts arrive instantly
-        try {
-            BuzzRealtimeSyncService.startIfPermitted(getApplicationContext());
-            if (bgPollExecutor != null) {
-                bgPollExecutor.shutdownNow();
-            }
-            bgPollExecutor = Executors.newSingleThreadScheduledExecutor();
-            bgPollExecutor.scheduleAtFixedRate(
-                () -> BuzzNotificationWorker.runAlertCheckNow(getApplicationContext()),
-                1,
-                3,
-                TimeUnit.SECONDS
-            );
+            Context appCtx = getApplicationContext();
+            BuzzAlertReceiver.scheduleNext(appCtx, 15000L);
+            BuzzAlertReceiver.enqueueReconnectCatchupWork(appCtx);
+            BuzzRealtimeSyncService.startIfPermitted(appCtx);
         } catch (Exception ignored) {
         }
 
@@ -1034,6 +1015,30 @@ public class MainActivity extends BridgeActivity {
             );
         } catch (Exception ignored) {
         }
+    }
+
+    @Override
+    public void onStop() {
+        isAppInForeground = false;
+        try {
+            Context appCtx = getApplicationContext();
+            BuzzAlertReceiver.scheduleNext(appCtx, 15000L);
+            BuzzAlertReceiver.enqueueReconnectCatchupWork(appCtx);
+        } catch (Exception ignored) {
+        }
+        super.onStop();
+    }
+
+    @Override
+    public void onDestroy() {
+        isAppInForeground = false;
+        try {
+            Context appCtx = getApplicationContext();
+            BuzzAlertReceiver.scheduleNext(appCtx, 15000L);
+            BuzzAlertReceiver.enqueueReconnectCatchupWork(appCtx);
+        } catch (Exception ignored) {
+        }
+        super.onDestroy();
     }
 
     @Override

@@ -14,7 +14,6 @@ import {
   Zap,
   Download,
   X,
-  Radio,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { triggerHaptic } from "../lib/haptics";
@@ -112,32 +111,6 @@ export function Settings() {
   const [printerState, setPrinterState] = useState<PrinterState>(() =>
     getPrinterState()
   );
-  const [batteryUnrestricted, setBatteryUnrestricted] = useState<boolean>(() => {
-    try {
-      const nativeExporter = (window as any).AndroidExporter;
-      if (nativeExporter && typeof nativeExporter.isIgnoringBatteryOptimizations === "function") {
-        return Boolean(nativeExporter.isIgnoringBatteryOptimizations());
-      }
-    } catch {}
-    return true;
-  });
-
-  useEffect(() => {
-    const syncBatteryState = () => {
-      try {
-        const nativeExporter = (window as any).AndroidExporter;
-        if (nativeExporter && typeof nativeExporter.isIgnoringBatteryOptimizations === "function") {
-          setBatteryUnrestricted(Boolean(nativeExporter.isIgnoringBatteryOptimizations()));
-        }
-      } catch {}
-    };
-    window.addEventListener("focus", syncBatteryState);
-    window.addEventListener("appResumed", syncBatteryState);
-    return () => {
-      window.removeEventListener("focus", syncBatteryState);
-      window.removeEventListener("appResumed", syncBatteryState);
-    };
-  }, []);
 
   useEffect(() => {
     return subscribePrinterState((state) => {
@@ -262,6 +235,15 @@ export function Settings() {
       const nativeExporter = (window as any).AndroidExporter;
       if (nativeExporter && typeof nativeExporter.setNotificationsEnabled === "function") {
         nativeExporter.setNotificationsEnabled(Boolean(checked));
+      }
+      if (
+        checked &&
+        nativeExporter &&
+        typeof nativeExporter.isIgnoringBatteryOptimizations === "function" &&
+        !nativeExporter.isIgnoringBatteryOptimizations() &&
+        typeof nativeExporter.requestIgnoreBatteryOptimizations === "function"
+      ) {
+        nativeExporter.requestIgnoreBatteryOptimizations();
       }
     } catch {}
     if (checked) {
@@ -519,59 +501,6 @@ export function Settings() {
                   onChange={togglePrinterConnected}
                 />
               }
-            />
-            <SettingItem
-              singleLine
-              icon={
-                <Radio
-                  size={20}
-                  className={
-                    notifications && batteryUnrestricted ? "text-emerald-500" : "text-amber-500"
-                  }
-                />
-              }
-              label="Background Alerts"
-              description={
-                !notifications
-                  ? "Enable notifications first"
-                  : batteryUnrestricted
-                  ? "Real-time push & sync active"
-                  : "Tap to allow background sync"
-              }
-              action={
-                <div className="flex items-center gap-1.5">
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold tracking-tight whitespace-nowrap border ${
-                      notifications && batteryUnrestricted
-                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/25"
-                        : "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25"
-                    }`}
-                  >
-                    {!notifications ? "Paused" : batteryUnrestricted ? "Active" : "Restricted"}
-                  </span>
-                  <ChevronRight size={18} className="text-slate-400" />
-                </div>
-              }
-              onClick={() => {
-                triggerHaptic("light");
-                try {
-                  const nativeExporter = (window as any).AndroidExporter;
-                  if (
-                    nativeExporter &&
-                    typeof nativeExporter.requestIgnoreBatteryOptimizations === "function"
-                  ) {
-                    nativeExporter.requestIgnoreBatteryOptimizations();
-                    return;
-                  }
-                } catch {}
-                if (!notifications) {
-                  toggleNotifications(true);
-                  return;
-                }
-                if ("Notification" in window && Notification.permission !== "granted") {
-                  Notification.requestPermission().catch(() => {});
-                }
-              }}
             />
           </div>
         </motion.section>

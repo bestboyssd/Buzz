@@ -65,24 +65,9 @@ public class BuzzRealtimeSyncService extends Service {
 
     public static void scheduleDozeSafeWakeAlarm(Context context, long delayMs) {
         if (context == null) return;
-        try {
-            Intent wakeIntent = new Intent(context, BuzzRealtimeSyncService.class);
-            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                flags |= PendingIntent.FLAG_IMMUTABLE;
-            }
-            PendingIntent pi = PendingIntent.getService(context, WAKE_ALARM_REQ_CODE, wakeIntent, flags);
-            AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-            if (am != null && pi != null) {
-                long triggerAt = SystemClock.elapsedRealtime() + Math.max(4000L, delayMs);
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi);
-                } else {
-                    am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi);
-                }
-            }
-        } catch (Exception ignored) {
-        }
+        // Route through BuzzAlertReceiver (PendingIntent.getBroadcast) instead of PendingIntent.getService,
+        // because Android 8+ (API 26+) silently blocks background service starts from AlarmManager.
+        BuzzAlertReceiver.scheduleNext(context.getApplicationContext(), Math.max(15000L, delayMs));
     }
 
     public static void cancelWakeAlarm(Context context) {
@@ -206,19 +191,10 @@ public class BuzzRealtimeSyncService extends Service {
         } catch (Exception ignored) {
         }
 
-        try {
-            Intent restartIntent = new Intent(ctx, BuzzRealtimeSyncService.class);
-            int pendingFlags = PendingIntent.FLAG_ONE_SHOT;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                pendingFlags |= PendingIntent.FLAG_IMMUTABLE;
-            }
-            PendingIntent pi = PendingIntent.getService(ctx, 8802, restartIntent, pendingFlags);
-            AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
-            if (am != null && pi != null) {
-                am.set(AlarmManager.ELAPSED_REALTIME_WAKEUP, SystemClock.elapsedRealtime() + 2500L, pi);
-            }
-        } catch (Exception ignored) {
-        }
+        // Schedule silent BroadcastReceiver wake alarm (PendingIntent.getBroadcast works on Android 8-15
+        // even after the app is swiped from Recents, with ZERO persistent notification)
+        BuzzAlertReceiver.scheduleNext(ctx, 15000L);
+        BuzzAlertReceiver.enqueueReconnectCatchupWork(ctx);
     }
 
     @Override

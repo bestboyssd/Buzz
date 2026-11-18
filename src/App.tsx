@@ -622,8 +622,10 @@ function AppContent() {
     lastNotifiedRef.current = userNotified;
   }, [user?.uid]);
 
-  // Synchronize auth role & deviceId into Android native SharedPreferences so background worker honors role, sender, and device boundaries
+  // Synchronize auth role & deviceId into Android native SharedPreferences so background worker honors role, sender, and device boundaries.
+  // Never wipe current_uid while Firebase Auth is still initializing on cold start (loading === true).
   useEffect(() => {
+    if (loading) return;
     syncNativeNotificationContext(
       user?.uid || "",
       user?.email || "",
@@ -631,7 +633,7 @@ function AppContent() {
       Boolean(isRealAdmin),
       getDeviceId()
     );
-  }, [user?.uid, user?.email, isAdmin, isRealAdmin]);
+  }, [loading, user?.uid, user?.email, isAdmin, isRealAdmin]);
 
   const getNotifiedSecurityIdsKey = (uid?: string) =>
     uid ? `notified_security_ids_${uid}` : user ? `notified_security_ids_${user.uid}` : "notified_security_ids";

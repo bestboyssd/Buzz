@@ -8,6 +8,9 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.media.AudioAttributes;
 import android.media.RingtoneManager;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.PowerManager;
@@ -64,13 +67,16 @@ public class BuzzNotificationWorker extends Worker {
             String deviceId
     ) {
         if (context == null) return;
+        final Context appCtx = context.getApplicationContext();
+        boolean needsCloudflareSeed = false;
         synchronized (PREFS_LOCK) {
-            SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            SharedPreferences prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
             String cleanUid = userUid != null ? userUid.trim() : "";
             String cleanEmail = userEmail != null ? userEmail.trim().toLowerCase(Locale.US) : "";
             String cleanDeviceId = deviceId != null ? deviceId.trim() : "";
             String prevUid = prefs.getString("current_uid", "");
             long now = System.currentTimeMillis();
+            boolean accountSwitched = !cleanUid.isEmpty() && !cleanUid.equals(prevUid);
             SharedPreferences.Editor editor = prefs.edit()
                     .putBoolean("auth_context_known", true)
                     .putString("current_uid", cleanUid)
@@ -78,14 +84,84 @@ public class BuzzNotificationWorker extends Worker {
                     .putBoolean("is_admin", isAdmin)
                     .putBoolean("is_real_admin", isRealAdmin)
                     .putString("device_id", cleanDeviceId);
-            if (!cleanUid.isEmpty() && !cleanUid.equals(prevUid)) {
+            if (accountSwitched) {
                 editor.putLong("last_broadcast_ts", Math.max(prefs.getLong("last_broadcast_ts", 0L), now))
                         .putLong("last_security_ts", Math.max(prefs.getLong("last_security_ts", 0L), now))
                         .putLong("last_stock_ts", Math.max(prefs.getLong("last_stock_ts", 0L), now))
                         .putLong("last_conflict_ts", Math.max(prefs.getLong("last_conflict_ts", 0L), now))
-                        .putLong("last_cf_cursor", Math.max(prefs.getLong("last_cf_cursor", 0L), now));
+                        .putLong("last_cf_cursor", 0L);
             }
             editor.apply();
+
+            if (!cleanUid.isEmpty()) {
+                boolean initialized = prefs.getBoolean("worker_initialized_v2", false);
+                long cursor = prefs.getLong("last_cf_cursor", 0L);
+                needsCloudflareSeed = accountSwitched || !initialized || cursor <= 0L;
+            }
+        }
+
+        // Seed Cloudflare's server cursor & worker_initialized_v2 immediately while the user is in the app,
+        // so the VERY FIRST background check after closing the app delivers real notifications instead of swallowing them!
+        if (needsCloudflareSeed) {
+            seedCloudflareBaselineAsync(appCtx);
+        }
+    }
+
+    public static void seedCloudflareBaselineAsync(final Context context) {
+        if (context == null) return;
+        new Thread(() -> {
+            try {
+                Context appCtx = context.getApplicationContext();
+                if (!isNetworkConnected(appCtx)) return;
+                SharedPreferences prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+                String currentUid = prefs.getString("current_uid", "");
+                if (currentUid.isEmpty()) return;
+                boolean isAdmin = prefs.getBoolean("is_admin", false) || prefs.getBoolean("is_real_admin", false);
+                String role = isAdmin ? "admin" : "user";
+                String deviceId = prefs.getString("device_id", "");
+
+                String queryUrl = CLOUDFLARE_EVENTS_PULL_URL
+                        + "?since=0"
+                        + "&uid=" + URLEncoder.encode(currentUid, "UTF-8")
+                        + "&role=" + URLEncoder.encode(role, "UTF-8")
+                        + "&deviceId=" + URLEncoder.encode(deviceId != null ? deviceId : "", "UTF-8");
+
+                JSONObject resp = fetchJson(queryUrl);
+                if (resp == null || !resp.optBoolean("ok", false)) return;
+
+                long latestCursor = resp.optLong("latestCursor", 0L);
+                long serverTime = resp.optLong("serverTime", System.currentTimeMillis());
+                long seedCursor = latestCursor > 0L ? latestCursor : serverTime;
+
+                synchronized (PREFS_LOCK) {
+                    long existingCursor = prefs.getLong("last_cf_cursor", 0L);
+                    SharedPreferences.Editor ed = prefs.edit()
+                            .putBoolean("worker_initialized_v1", true)
+                            .putBoolean("worker_initialized_v2", true);
+                    if (existingCursor <= 0L) {
+                        ed.putLong("last_cf_cursor", seedCursor);
+                    }
+                    ed.apply();
+                }
+            } catch (Exception ignored) {
+            }
+        }, "BuzzCfBaselineSeed").start();
+    }
+
+    public static boolean isNetworkConnected(Context ctx) {
+        if (ctx == null) return true;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) ctx.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return true;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Network nw = cm.getActiveNetwork();
+                if (nw == null) return false;
+                NetworkCapabilities caps = cm.getNetworkCapabilities(nw);
+                return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+            }
+            return cm.getActiveNetworkInfo() != null && cm.getActiveNetworkInfo().isConnected();
+        } catch (Exception e) {
+            return true;
         }
     }
 
@@ -267,7 +343,7 @@ public class BuzzNotificationWorker extends Worker {
                 if (pm != null) {
                     wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BuzzPOS:AlertCheckWakeLock");
                     wakeLock.setReferenceCounted(false);
-                    wakeLock.acquire(4500L);
+                    wakeLock.acquire(15000L);
                 }
             } catch (Exception ignored) {
             }
@@ -381,7 +457,7 @@ public class BuzzNotificationWorker extends Worker {
             long serverTime = resp.optLong("serverTime", System.currentTimeMillis());
 
             if (shouldSeedOnly) {
-                long seedCursor = Math.max(latestCursor, serverTime);
+                long seedCursor = latestCursor > 0L ? latestCursor : serverTime;
                 synchronized (PREFS_LOCK) {
                     prefs.edit().putLong("last_cf_cursor", seedCursor).apply();
                 }
@@ -754,8 +830,8 @@ public class BuzzNotificationWorker extends Worker {
             URL url = new URL(urlStr);
             conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
-            conn.setConnectTimeout(3500);
-            conn.setReadTimeout(3500);
+            conn.setConnectTimeout(8000);
+            conn.setReadTimeout(8000);
             int code = conn.getResponseCode();
             if (code != 200) return null;
 
@@ -843,6 +919,9 @@ public class BuzzNotificationWorker extends Worker {
                 .setContentText(body)
                 .setStyle(new NotificationCompat.BigTextStyle().bigText(body))
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
                 .setAutoCancel(true)
                 .setContentIntent(pi);
 
