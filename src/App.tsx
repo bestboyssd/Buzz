@@ -36,6 +36,7 @@ import { SplashScreen } from "@capacitor/splash-screen";
 import { LocalNotifications } from "@capacitor/local-notifications";
 import { AlertOctagon, Bell, WifiOff, RefreshCw, AlertTriangle, IndianRupee, Download, ArrowRight, X, CheckCircle2 } from "lucide-react";
 import { useAppVersionCheck, triggerInstantApkDownload, cancelApkDownload } from "./lib/versionCheck";
+import { pullCloudflareEvents, startCloudflareEventStream } from "./lib/cloudflareEvents";
 import { triggerHaptic } from "./lib/haptics";
 import {
   doc,
@@ -1069,6 +1070,29 @@ function AppContent() {
       window.removeEventListener("appResumed", handleWakeOrOnline);
     };
   }, [user?.uid, isRealAdmin]);
+
+  // 24/7 Cloudflare Edge Notification Hub: real-time foreground SSE + instant offline-to-online catch-up
+  useEffect(() => {
+    if (!user?.uid) return;
+    const userIsAdmin = Boolean(isAdmin || isRealAdmin);
+    const stopStream = startCloudflareEventStream(user.uid, userIsAdmin);
+
+    const handleEdgeCatchUp = () => {
+      if (typeof navigator !== "undefined" && !navigator.onLine) return;
+      pullCloudflareEvents(user.uid, userIsAdmin).catch(() => {});
+    };
+
+    window.addEventListener("online", handleEdgeCatchUp);
+    window.addEventListener("appResumed", handleEdgeCatchUp);
+    document.addEventListener("visibilitychange", handleEdgeCatchUp);
+
+    return () => {
+      stopStream();
+      window.removeEventListener("online", handleEdgeCatchUp);
+      window.removeEventListener("appResumed", handleEdgeCatchUp);
+      document.removeEventListener("visibilitychange", handleEdgeCatchUp);
+    };
+  }, [user?.uid, isAdmin, isRealAdmin]);
 
   // Background Service Worker + Unthrottled Web Worker Notification Bridge
   useEffect(() => {

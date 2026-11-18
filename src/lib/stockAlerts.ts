@@ -7,6 +7,7 @@ import {
   markNativeAlertHandled,
   wasNativeAlertHandled,
 } from './utils';
+import { publishCloudflareEvents } from './cloudflareEvents';
 
 export type StockAlertSeverity = 'out_of_stock' | 'critical_low' | 'low_stock';
 
@@ -202,6 +203,29 @@ export async function publishStockTransitionAlerts(
   }
 
   if (entries.length === 0) return;
+
+  // Publish instantly to the 24/7 Cloudflare Worker Event Hub so online phones get <50ms push
+  // and offline phones receive all missed out-of-stock / low-stock alerts immediately on reconnect.
+  publishCloudflareEvents(
+    entries.map((entry) => {
+      const { title, body } = formatStockAlertNotification(entry);
+      return {
+        id: entry.id,
+        kind: 'stock' as const,
+        severity: entry.type,
+        title,
+        body,
+        canonicalKey: buildCanonicalStockKey(entry.type, entry.productId, entry.stock),
+        targetAudience: 'all' as const,
+        sourceUid: entry.sourceUid || currentUid,
+        sourceDeviceId: entry.sourceDeviceId || deviceId,
+        productId: entry.productId,
+        productName: entry.productName,
+        stock: entry.stock,
+        timestamp: entry.timestamp,
+      };
+    })
+  ).catch(() => {});
 
   try {
     const feedRef = doc(db, 'settings', 'stock_alerts_feed');

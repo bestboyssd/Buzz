@@ -33,6 +33,7 @@ public class BuzzRealtimeSyncService extends Service {
     private HandlerThread workerThread;
     private Handler workerHandler;
     private volatile boolean isRunning = false;
+    private ConnectivityManager.NetworkCallback networkCallback;
 
     private final Runnable pollTask = new Runnable() {
         @Override
@@ -134,6 +135,33 @@ public class BuzzRealtimeSyncService extends Service {
         workerThread = new HandlerThread("BuzzRealtimeSyncThread");
         workerThread.start();
         workerHandler = new Handler(workerThread.getLooper());
+
+        // Instant offline-to-online reconnect catch-up via ConnectivityManager.NetworkCallback
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) {
+                    networkCallback = new ConnectivityManager.NetworkCallback() {
+                        @Override
+                        public void onAvailable(Network network) {
+                            if (workerHandler != null) {
+                                workerHandler.post(() -> {
+                                    try {
+                                        Context ctx = getApplicationContext();
+                                        if (BuzzNotificationWorker.areNotificationsEnabled(ctx)) {
+                                            BuzzNotificationWorker.runAlertCheckNow(ctx);
+                                        }
+                                    } catch (Exception ignored) {
+                                    }
+                                });
+                            }
+                        }
+                    };
+                    cm.registerDefaultNetworkCallback(networkCallback);
+                }
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     @Override
@@ -196,6 +224,16 @@ public class BuzzRealtimeSyncService extends Service {
     @Override
     public void onDestroy() {
         isRunning = false;
+        if (networkCallback != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            try {
+                ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) {
+                    cm.unregisterNetworkCallback(networkCallback);
+                }
+            } catch (Exception ignored) {
+            }
+            networkCallback = null;
+        }
         if (workerHandler != null) {
             workerHandler.removeCallbacksAndMessages(null);
             workerHandler = null;

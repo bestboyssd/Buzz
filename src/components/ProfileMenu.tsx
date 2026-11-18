@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { Shield, Settings, X, User } from 'lucide-react';
-import { useAuth } from '../lib/AuthContext';
+import { useAuth, getResolvedUserPhoto, getResolvedUserName } from '../lib/AuthContext';
 import { triggerHaptic } from '../lib/haptics';
 import { isPerformanceModeEnabled } from '../lib/utils';
 import { useNavigate } from 'react-router-dom';
@@ -80,23 +80,8 @@ export function ProfileMenu() {
 
   const [photoRevision, setPhotoRevision] = useState(0);
 
-  const currentPhotoURL = (() => {
-    if (!user) return "";
-    try {
-      const localCustom = localStorage.getItem(`custom_user_photo_${user.uid}`);
-      if (localCustom) return localCustom;
-    } catch {}
-    return user.photoURL || "";
-  })();
-
-  const currentDisplayName = (() => {
-    if (!user) return "";
-    try {
-      const localName = localStorage.getItem(`custom_user_name_${user.uid}`);
-      if (localName) return localName;
-    } catch {}
-    return user.displayName || "";
-  })();
+  const currentPhotoURL = getResolvedUserPhoto(user, user?.photoURL || "");
+  const currentDisplayName = getResolvedUserName(user, user?.displayName || "");
 
   useEffect(() => {
     setImageError(false);

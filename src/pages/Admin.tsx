@@ -47,6 +47,10 @@ import {
 } from "lucide-react";
 import { AdminAIAssistant } from "../components/AdminAIAssistant";
 import { getApiBaseUrl } from "../lib/geminiApi";
+import {
+  publishCloudflareEvent,
+  syncCloudflareAuthGovernance,
+} from "../lib/cloudflareEvents";
 import appletConfig from "../../firebase-applet-config.json";
 import { triggerHaptic } from "../lib/haptics";
 import {
@@ -1069,6 +1073,22 @@ export function Admin() {
       };
 
       await setDoc(doc(db, "settings", "admin_broadcast_notification"), payload);
+
+      publishCloudflareEvent({
+        id: payload.id,
+        kind: "broadcast",
+        severity: "normal",
+        title: payload.title,
+        body: payload.message,
+        canonicalKey: payload.id,
+        targetAudience:
+          broadcastTarget === "admins" || broadcastTarget === "users"
+            ? broadcastTarget
+            : "all",
+        sourceUid: user.uid,
+        sourceDeviceId: getDeviceId(),
+        timestamp: ts,
+      }).catch(() => {});
 
       logActivity(
         "admin_broadcast",
@@ -3260,6 +3280,11 @@ export function Admin() {
           : []),
       ]);
 
+      syncCloudflareAuthGovernance({
+        blockedUids: Array.from(currentUids),
+        blockedEmails: Array.from(currentEmails),
+      }).catch(() => {});
+
       if (user) {
         const targetName =
           targetAccount.displayName || targetAccount.email || "User";
@@ -3428,6 +3453,13 @@ export function Admin() {
       });
 
       await batch.commit();
+
+      syncCloudflareAuthGovernance({
+        blockedUids: nextBlockedUids,
+        blockedEmails: nextBlockedEmails,
+        deletedUids: nextDeletedUids,
+        deletedEmails: nextDeletedEmails,
+      }).catch(() => {});
 
       if (user) {
         const targetName =

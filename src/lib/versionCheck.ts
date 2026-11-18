@@ -5,7 +5,7 @@ import { Filesystem, Directory } from "@capacitor/filesystem";
 import metadata from "../../metadata.json";
 import pkg from "../../package.json";
 import { showLocalNotification } from "./utils";
-import { getApiBaseUrl } from "./geminiApi";
+import { CLOUDFLARE_EDGE_AI_URL, getApiBaseUrl } from "./geminiApi";
 
 const GITHUB_RELEASES_API = "https://api.github.com/repos/bestboyssd/Buzz/releases";
 const GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/bestboyssd/Buzz/releases/latest";
@@ -150,11 +150,11 @@ export function compareSemver(a: string, b: string): number {
 
 export function getInitialBundledVersion(): string {
   try {
-    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.3.4";
-    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.3.4";
+    const metaVer = extractCleanVersion((metadata as any)?.name) || "1.3.5";
+    const pkgVer = extractCleanVersion((pkg as any)?.version) || "1.3.5";
     return compareSemver(pkgVer, metaVer) > 0 ? pkgVer : metaVer;
   } catch {
-    return "1.3.4";
+    return "1.3.5";
   }
 }
 
@@ -209,6 +209,27 @@ function parseReleaseEntry(rel: any): ReleaseCheckResult | null {
 }
 
 export async function fetchLatestGithubRelease(): Promise<ReleaseCheckResult | null> {
+  // 1. Try 24/7 Cloudflare Edge-cached release endpoint first (<20ms, bypasses GitHub 60 req/hr IP limit)
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4500);
+    const edgeRes = await fetch(
+      `${CLOUDFLARE_EDGE_AI_URL}/api/releases/latest?t=${Date.now()}`,
+      {
+        cache: "no-store",
+        signal: controller.signal,
+      }
+    );
+    clearTimeout(timer);
+    if (edgeRes.ok) {
+      const edgeItem = await edgeRes.json();
+      const parsed = parseReleaseEntry(edgeItem);
+      if (parsed) return parsed;
+    }
+  } catch (e) {
+    console.debug("Cloudflare edge release check skipped, falling back to GitHub API:", e);
+  }
+
   const headers: Record<string, string> = {
     Accept: "application/vnd.github+json",
   };

@@ -3,12 +3,17 @@ import assert from "node:assert/strict";
 import {
   extractCleanVersion,
   compareSemver,
+  getInitialBundledVersion,
   GITHUB_RELEASES_FALLBACK_URL,
   getOrSetOutdatedFirstSeen,
   computeGraceState,
 } from "./versionCheck";
 
 describe("versionCheck utilities", () => {
+  it("resolves initial bundled version to 1.3.5", () => {
+    assert.equal(getInitialBundledVersion(), "1.3.5");
+  });
+
   it("extracts clean semver versions from tags and strings", () => {
     assert.equal(extractCleanVersion("v1.1.1"), "1.1.1");
     assert.equal(extractCleanVersion("Buzz - v1.0.0"), "1.0.0");

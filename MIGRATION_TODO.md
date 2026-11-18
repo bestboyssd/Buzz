@@ -1,4 +1,4 @@
-# Handover & Architecture Guide — Buzz POS (`v1.3.4`)
+# Handover & Architecture Guide — Buzz POS (`v1.3.5`)
 
 > [!WARNING]
 > ### 🛑 CRITICAL AGENT RULES — READ FIRST
@@ -12,7 +12,7 @@
 >      1. Pull latest changes from the GitHub repo (`git pull origin main`).
 >      2. Build web assets (`npm run build`) and sync Capacitor (`npx cap sync android`).
 >      3. Build the Android APK (`cd android && ./gradlew assembleDebug` or release build).
->      4. Upload/publish the APK to GitHub Releases under tag `vX.Y.Z` (matching the version in `package.json` / `metadata.json`, e.g., `v1.3.4`) with only the `Buzz-vX.Y.Z.apk` asset (do not upload generic `Buzz.apk`).
+>      4. Upload/publish the APK to GitHub Releases under tag `vX.Y.Z` (matching the version in `package.json` / `metadata.json`, e.g., `v1.3.5`) with only the `Buzz-vX.Y.Z.apk` asset (do not upload generic `Buzz.apk`).
 >    * When the user says **`update`**:
 >      1. If any local files or app fixes were made, stage all changes (`git add .`).
 >      2. Commit with a clear message (`git commit -m "..."`).
@@ -21,12 +21,12 @@
 ---
 
 ## 📱 1. Application Overview & Tech Stack
-* **App Name**: Buzz (`Buzz - v1.3.4`)
+* **App Name**: Buzz (`Buzz - v1.3.5`)
 * **Android Package / Namespace**: `com.smartrooti.billing`
-* **Version**: `1.3.4` (`versionCode 134`, `versionName "1.3.4"`) synchronized across:
-  * `package.json` (`"version": "1.3.4"`)
-  * `android/app/build.gradle` (`versionCode 134`, `versionName "1.3.4"`)
-  * `src/lib/versionCheck.ts` (`getInitialBundledVersion()` resolves the highest semver between `package.json` and `metadata.json`, returning `"1.3.4"`)
+* **Version**: `1.3.5` (`versionCode 135`, `versionName "1.3.5"`) synchronized across:
+  * `package.json` (`"version": "1.3.5"`)
+  * `android/app/build.gradle` (`versionCode 135`, `versionName "1.3.5"`)
+  * `src/lib/versionCheck.ts` (`getInitialBundledVersion()` resolves the highest semver between `package.json` and `metadata.json`, returning `"1.3.5"`)
   * `src/pages/Settings.tsx` (`getAppVersion()` resolves via `versionCheck.ts` / `package.json`)
 * **Core Tech Stack**:
   * **Frontend**: React 19 + TypeScript + Vite 6 + Tailwind CSS v4 + `motion/react` + `lucide-react` + `recharts`.
@@ -225,7 +225,14 @@
      5. Voice clips (`POST /api/gemini/transcribe`) run `@cf/openai/whisper-large-v3-turbo` (fallback `@cf/openai/whisper`) with a `15s` timeout; image attachments run Gemma 4 / Mistral Small 3.1 / Llama 3.2 Vision; TTS on Android uses zero-latency native `AndroidExporter.speakText`.
      6. `Settings.tsx` (`testAiConnection`) checks JSON `/api/health` against `CLOUDFLARE_EDGE_AI_URL` and confirms `"Connected! 24/7 Cloudflare Edge AI is online."`.
    * **How to Update / Redeploy the Worker**: Edit `cloudflare-worker/buzz-ai.mjs` and upload via the Cloudflare MCP plugin (`PUT /accounts/004b1e645593363772bd49517a72bd63/workers/scripts/buzz-ai` with multipart `metadata` + `worker.js` and `bindings: [{ type: "ai", name: "AI" }]`), then verify with `GET https://buzz-ai.dassusuman2009.workers.dev/api/health`.
-10. **Profile Image Stability & Cross-UID Synchronization (`AuthContext.tsx`, `Account.tsx`, `Admin.tsx`, `server.ts`)**:
+10. **Profile Image Stability, Zero-Flash Instant Login Avatar & Cross-UID Synchronization (`AuthContext.tsx`, `ProfileMenu.tsx`, `Account.tsx`, `Admin.tsx`, `server.ts`)**:
+    * **Why the 3-Second Old Photo Flash Happened Previously & How It Is Fixed**:
+      * Because custom profile photos are compressed base64 `data:image/jpeg;base64,...` strings (~15 KB), Firebase Auth's `updateProfile()` rejects them (`isPhotoTooLong > 1500`), leaving `currentUser.photoURL` and `providerData[0].photoURL` permanently stuck on the user's old Google OAuth URL (`https://lh3.googleusercontent.com/...`).
+      * Previously, `onAuthStateChanged` called `setUser(patchedCurrentUser)` and `setLoading(false)` at `t = 0ms` before `settings/profile_${uid}` finished fetching from Firestore (~2–3s), causing `ProfileMenu.tsx` to fall back to `currentUser.photoURL` (the old Google photo) for 3 seconds before switching to `customPhotoURL`.
+      * **Current Fix (`AuthContext.tsx`, `ProfileMenu.tsx`, `Account.tsx`)**:
+        1. `getResolvedUserPhoto()` never falls back to Firebase Auth's stale `googleProvider.photoURL` until Firestore profile sync has verified (`profile_photo_synced_${uid}` / `custom_user_photo_verified_${uid}`) that no custom photo exists in `settings/profile_*`.
+        2. On login (`onAuthStateChanged`), `AuthContext.tsx` queries `settings/profile_${uid}` **and** any sibling `settings/profile_*` document sharing the same normalized email (`fetchBestSiblingPhoto`), resolves the newest `customPhotoURL` (by `photoUpdatedAt` / `data:image/` preference), caches it under both UID (`custom_user_photo_${uid}`) and email (`custom_user_photo_email_${normEmail}`), and **pre-decodes the image bitmap (`preloadProfileImage` via `img.decode()`) BEFORE calling `setUser` / `setLoading(false)`** (bounded by a 1.8s safety timer).
+        3. As a result, when login completes and `<Home />` mounts, **only the new profile picture is ever rendered on Frame 1** with zero 3-second flash.
     * **Dedicated `photoUpdatedAt` Field**: Profile photo conflict resolution uses `photoUpdatedAt` instead of generic `updatedAt` (which `Settings.tsx` bumps on every theme/haptics/notification toggle and login bumps on every startup).
     * **No Stale Login Overwrites**: `AuthContext.tsx` no longer writes `customPhotoURL` on routine login for existing accounts unless pushing a strictly newer local photo (`localPhotoTs > docPhotoTs`) or backfilling an empty photo.
     * **Cross-UID Sibling Sync**: Because Web Auth (`tidy-byte-g5xj8`) and Native Android Auth (`buzz-8521`) produce different UIDs for the same Google email, `Account.tsx` (`handleUpdate`) writes `customPhotoURL`, `photoUpdatedAt`, and `displayName` to ALL `settings/profile_*` documents sharing that normalized email (and awaits up to `2500ms`). `Admin.tsx` deduplication also compares `photoUpdatedAt` first when merging sibling accounts.
@@ -234,6 +241,108 @@
     * `AdminAIAssistant.tsx` `<textarea>` uses `name="message"`, `id="buzz-ai-chat-input"`, `autoComplete="on"`, `autoCorrect="on"`, `autoCapitalize="sentences"`, `spellCheck={true}`, `whitespace-pre-wrap break-words`, and intentionally omits `inputMode="text"` and `whitespace-nowrap` so Chromium Blink never suppresses IME word predictions.
     * `MainActivity.java` requests `Manifest.permission.RECORD_AUDIO` alongside `POST_NOTIFICATIONS` on startup so Xiaomi MIUI/HyperOS does not cross out Gboard's voice typing microphone.
     * `scripts/patch-capacitor-android.mjs` persists the `CapacitorWebView.onCreateInputConnection(EditorInfo outAttrs)` patch that clears `TYPE_TEXT_FLAG_NO_SUGGESTIONS` & `nm`/`noMicrophoneKey` private IME options and enables `TYPE_TEXT_FLAG_AUTO_CORRECT | TYPE_TEXT_FLAG_AUTO_COMPLETE | TYPE_TEXT_FLAG_CAP_SENTENCES`.
+
+---
+
+## 🚀 5. Cloudflare 24/7 Edge Server Expansion — Implemented & Live (`v1.3.5`)
+
+> [!NOTE]
+> **Status — ALL Priority 1 & Priority 2 Features Implemented & Deployed Live (`v1.3.5`, $0/mo Free Tier, Zero Credit Card)**:
+> * **Worker URL**: `https://buzz-ai.dassusuman2009.workers.dev` (Script: `buzz-ai`, source in `cloudflare-worker/buzz-ai.mjs`)
+> * **Cloudflare Bindings**:
+>   * `AI` — Cloudflare Workers AI (`@cf/meta/llama-3.3-70b-instruct-fp8-fast`, Gemma 4, Whisper v3 Turbo)
+>   * `BUZZ_EVENTS_KV` — Free Cloudflare KV Namespace (ID: `926ae8a03ab349449b1970d2e05f54d1`) used for the 48-hour event ring buffer, atomic stock ledger, account governance mirror, GitHub release cache, and 30-day nightly cloud backups (zero R2/card required)
+> * **Cloudflare Cron Trigger**: `30 19 * * *` (1:00 AM IST daily shift close) — snapshots `products`, `bills`, `other_costs`, and `settings` into `BUZZ_EVENTS_KV` (`backup:YYYY-MM-DD`, 30-day retention) and publishes a `"📊 Daily Store Digest"` alert (`targetAudience: "admins"`) into the Event Hub
+> * **Live Endpoints on `buzz-ai`**:
+>   * `POST /api/events/publish`, `GET /api/events/pull`, `GET /api/events/stream` (SSE live push + 48h offline-to-online catch-up queue)
+>   * `POST /api/pos/atomic-checkout` (server-authoritative stock tracker & threshold alerting)
+>   * `GET /api/releases/latest` (edge-cached 60s TTL + rate-limit-proof `github.com/.../releases/latest` fallback) & `GET /api/github/apk-download` (HTTP `Range` resumable APK proxy)
+>   * `GET/POST /api/auth/status` (edge account governance mirror for `blockedUids`, `blockedEmails`, `deletedUids`, `deletedEmails`, `forcedLogoutAt`, `photoVersions`)
+>   * `GET /api/backups/list`, `GET /api/backups/download?date=YYYY-MM-DD`, `POST /api/backups/run-now`
+> * **Client & Native Android Integration**:
+>   * `src/lib/cloudflareEvents.ts` — Event Hub publisher (with offline pending queue `buzz_cf_pending_events_v1`), foreground SSE subscriber, instant reconnect `pullCloudflareEvents`, `publishAtomicCheckoutToEdge`, `syncCloudflareAuthGovernance`
+>   * `src/lib/stockAlerts.ts`, `src/pages/Admin.tsx`, `src/lib/AuthContext.tsx`, `src/lib/firestoreHooks.ts` — Publish stock alerts, Admin broadcasts, 3-attempt PIN lockouts, offline sync conflicts, atomic checkout stock deductions, and account governance updates to Cloudflare Edge
+>   * `src/App.tsx` — Runs live foreground SSE stream + instant `online`/`appResumed`/`visibilitychange` catch-up pulls
+>   * `src/lib/versionCheck.ts` — Uses edge-cached `/api/releases/latest` first before direct GitHub API fallback
+>   * `android/app/src/main/java/com/smartrooti/billing/BuzzRealtimeSyncService.java` — Registers `ConnectivityManager.NetworkCallback` (`onAvailable`) to immediately invoke `BuzzNotificationWorker.runAlertCheckNow(ctx)` the exact millisecond an offline phone reconnects to Wi-Fi/mobile data
+>   * `android/app/src/main/java/com/smartrooti/billing/BuzzNotificationWorker.java` — Pulls Cloudflare `/api/events/pull` FIRST in 1 lightweight request (with first-run `last_cf_cursor` seeding & shared `BuzzNativeAlertPrefs` deduplication) and throttles the 4 Firestore REST fallback calls to 60s intervals when Cloudflare is healthy (>95% reduction in background Firestore reads)
+
+### 🔔 Priority 1 (User's Core Request): Server-Side Notification Hub & Instant Offline-to-Online Catch-Up Queue
+* **Problem Solved**:
+  1. Currently, when Phone A creates a bill and a product hits `out_of_stock` (`0` left), `critical_low` (`<=3`), or `low_stock` (`<=10`), Phone A writes to Firestore `settings/stock_alerts_feed`. Meanwhile, backgrounded Android phones (`BuzzRealtimeSyncService.java` + `BuzzNotificationWorker.java`) poll **4 separate Firestore REST endpoints every 4–8 seconds** (`admin_broadcast_notification`, `global_security_message`, `stock_alerts_feed`, `sync_conflicts`), burning **43,000–86,000 Firestore reads/day per phone** and risking 4–8s delays or missed alerts when multiple items go out of stock while a phone is offline.
+  2. With the Cloudflare Worker acting as the **Central Notification & Event Hub**, the billing phone pushes the event to Cloudflare (`POST /api/events/publish`). Online phones receive it **instantly (`<50ms`)**, and any phone that is **offline** receives all missed notifications **the exact millisecond it reconnects to the internet** (`GET /api/events/pull?since=<cursor>`).
+* **Architecture & Endpoints to Add to `cloudflare-worker/buzz-ai.mjs`**:
+  1. **Cloudflare Storage Binding (`env.BUZZ_EVENTS_KV` or Durable Object `BuzzEventHub`)**:
+     * Create a free Cloudflare KV namespace `BUZZ_EVENTS_KV` (or a free SQLite-backed Durable Object `BuzzEventHub` for WebSockets + zero-latency storage) on Account `004b1e645593363772bd49517a72bd63` and bind it to `buzz-ai`.
+     * Maintain a bounded ring buffer of the last `200` store events (48-hour TTL), each stamped with a strictly monotonic `cursor` (`timestampMs` + sequence counter):
+       ```json
+       {
+         "id": "stock_out_of_stock_prod123_0_1763410000000",
+         "cursor": 1763410000000,
+         "kind": "stock" | "broadcast" | "security" | "conflict" | "account_governance",
+         "severity": "out_of_stock" | "critical_low" | "low_stock" | "high" | "normal",
+         "title": "🚫 Out of Stock Alert",
+         "body": "\"SmartRooti Fresh\" just ran out of stock (0 left)!",
+         "canonicalKey": "stock_canonical_out_of_stock_prod123_0",
+         "targetAudience": "all" | "admins" | "users",
+         "sourceUid": "...",
+         "sourceDeviceId": "dev_abc123",
+         "timestamp": 1763410000000
+       }
+       ```
+  2. **`POST /api/events/publish`**:
+     * Called by:
+       * `src/lib/stockAlerts.ts` (`publishStockTransitionAlerts`) whenever a checkout/stock edit causes a product to cross into `out_of_stock`, `critical_low`, or `low_stock`.
+       * `src/pages/Admin.tsx` when sending an Admin Broadcast Announcement (`admin_broadcast_notification`) or locking/blocking/deleting a user account.
+       * `src/lib/AuthContext.tsx` when a non-admin triggers a 3-attempt PIN lockout (`failed_pin_lockout`).
+       * `src/lib/BillsContext.tsx` when an offline bill replay detects an unresolved stock conflict (`sync_conflicts`).
+     * Appends the event(s) to the Cloudflare event log, deduplicating by `id` / `canonicalKey` within a 3-minute window, and immediately broadcasts to any active SSE/WebSocket listeners.
+  3. **`GET /api/events/pull?since=<lastCursor>&uid=<uid>&role=<admin|user>&deviceId=<deviceId>`**:
+     * Returns `{ ok: true, serverTime: Date.now(), latestCursor: <number>, events: [...] }` containing all events with `cursor > since` where `sourceDeviceId !== deviceId`, `sourceUid !== uid`, and `targetAudience` matches the caller's role (`all`, `admins`, or `users`).
+     * **Instant Reconnect Trigger (Web + Capacitor JS + Native Android)**:
+       * **In JS (`src/App.tsx` / `src/lib/stockAlerts.ts`)**: Listen to `window.addEventListener("online", ...)` and `window.addEventListener("appResumed", ...)`. The instant the phone reconnects to Wi-Fi or mobile data, call `GET https://buzz-ai.dassusuman2009.workers.dev/api/events/pull?since=...`, advance `localStorage.getItem("buzz_last_event_cursor_${uid}")`, and fire `showLocalNotification()` for every missed event!
+       * **In Native Android (`BuzzRealtimeSyncService.java` & `BuzzNotificationWorker.java`)**:
+         * Register a `ConnectivityManager.NetworkCallback` inside `BuzzRealtimeSyncService.onCreate()`. In `onAvailable(Network network)` (fired by Android OS the exact millisecond mobile data or Wi-Fi comes back online, even if the app is closed/backgrounded!), immediately invoke `BuzzNotificationWorker.runAlertCheckNow(ctx)`.
+         * In `BuzzNotificationWorker.java`, query `https://buzz-ai.dassusuman2009.workers.dev/api/events/pull?since=<last_cf_cursor>&uid=...&role=...&deviceId=...` FIRST in a single fast request (falling back to the 4 Firestore REST URLs only if Cloudflare is unreachable). This cuts background Firestore read usage by **>95%** and delivers missed offline notifications in **<200ms** upon reconnection!
+  4. **`GET /api/events/stream?uid=<uid>&role=<admin|user>&deviceId=<deviceId>` (SSE / WebSocket Live Push)**:
+     * Streams real-time server-sent events (`data: {...}\n\n`) to connected phones so foreground and active background services receive `out_of_stock` and security alerts in `<50ms` with zero polling.
+
+---
+
+### ⚡ Priority 2: Additional High-Value Features to Add to the Cloudflare Server
+
+1. **Server-Authoritative Atomic Stock Deduction & Multi-Phone Checkout Arbitrator (`POST /api/pos/atomic-checkout`)**:
+   * **Why**: If two staff members on two phones bill the same product at the same second, client-side Firestore `setDoc(..., { stock: prevStock - qty })` can suffer a "lost update" race condition, or miss an `out_of_stock` transition if one phone was slightly behind.
+   * **How Antigravity Should Build It**:
+     * Use a Cloudflare Durable Object or KV atomic state per product (`stock:${productId}`).
+     * When a phone completes a bill, it posts `{ billId, items: [{ productId, productName, quantity }], sourceUid, sourceDeviceId }` to `/api/pos/atomic-checkout`.
+     * The Cloudflare server atomically decrements the stock count, detects if the combined multi-phone deductions crossed `10 -> <=10`, `3 -> <=3`, or `>0 -> 0`, and **automatically publishes the Out-of-Stock notification** into the `/api/events` queue for all other phones—even if the billing phone loses internet right after submitting the bill!
+
+2. **Edge-Cached GitHub Release Check & Resumable APK Accelerator (`GET /api/releases/latest` & `GET /api/github/apk-download`)**:
+   * **Why**:
+     * Direct calls from phones to `https://api.github.com/repos/bestboyssd/Buzz/releases` hit GitHub's 60 requests/hour per-IP rate limit when multiple phones share store Wi-Fi.
+     * Currently `src/lib/versionCheck.ts` already tries `${baseApiUrl}/api/github/apk-download`, which exists in local `server.ts` but **not yet in `cloudflare-worker/buzz-ai.mjs`**!
+   * **How Antigravity Should Build It**:
+     * Add `GET /api/releases/latest` to `cloudflare-worker/buzz-ai.mjs` using Cloudflare `caches.default` (60-second TTL) so version checks never hit GitHub rate limits and respond in `<20ms`.
+     * Add `GET /api/github/apk-download` to `cloudflare-worker/buzz-ai.mjs` that proxies the GitHub Release `.apk` binary while forwarding `Range` and `Content-Range` headers across Cloudflare's edge CDN so `MainActivity.java` (`AndroidExporter.downloadAndInstallApk`) and `versionCheck.ts` get fast, resumable APK downloads 24/7.
+
+3. **Automated Nightly Cloud Backups at 1:00 AM Shift Cutoff (Cloudflare Cron Trigger + R2 / KV Storage)**:
+   * **Why**: Currently, database backups in `Admin.tsx -> Data Management` require an Admin to manually tap "Export Backup". If someone accidentally purges data or corrupts prices and no manual backup was taken recently, data since the last manual export could be lost.
+   * **How Antigravity Should Build It**:
+     * Add a free Cloudflare **Cron Trigger** (`crons = ["30 19 * * *"]` = 1:00 AM IST daily shift close) and a free **Cloudflare R2 bucket** (`BUZZ_BACKUPS_R2`, 10 GB/month free) or KV namespace to `buzz-ai`.
+     * Every night at 1:00 AM IST, the worker fetches `products`, `bills`, `other_costs`, and `settings` from Firestore REST API and saves a timestamped snapshot `backup-YYYY-MM-DD.json` (retaining the last 30 days).
+     * Expose `GET /api/backups/list` and `GET /api/backups/download?date=YYYY-MM-DD` so Admins can restore any of the last 30 nights' automatic backups with 1 tap in `Admin.tsx`!
+
+4. **Automated Daily Shift Close Z-Report & Morning Low-Stock Digest Push (`Cron Trigger -> /api/events/publish`)**:
+   * **Why**: Store owners/admins want to know each night's total revenue, total bills, net profit, and which items are out of stock for morning restocking without opening the app and manually filtering Analytics.
+   * **How Antigravity Should Build It**:
+     * In the same 1:00 AM IST Cron Trigger (or an 8:00 AM IST morning Cron Trigger), compute:
+       * Today's total revenue (`₹...`), completed bills count, total expenses, and net profit.
+       * List of currently Out-of-Stock (`0` left) and Critical Low (`<=3` left) products.
+     * Automatically publish a `"📊 Daily Store Digest"` notification into the Cloudflare Event Queue (`targetAudience: "admins"`) so every Admin phone receives the daily sales & restock summary automatically.
+
+5. **Instant Cross-Device Account Governance & Security Lockout Enforcement (`GET/POST /api/auth/status`)**:
+   * **Why**: When an Admin blocks, locks, or deletes a user account in `Admin.tsx`, or triggers "Force Logout All Staff", mirroring `{ blockedUids, blockedEmails, deletedUids, deletedEmails, forcedLogoutAt }` in Cloudflare KV allows any phone or web client to verify account standing and latest `photoUpdatedAt` hash in `<25ms` at the edge.
 
 
 

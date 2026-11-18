@@ -4,6 +4,7 @@ import { db, handleFirestoreError, OperationType } from './firebase';
 import { useAuth } from './AuthContext';
 import { sqliteSaveBill, sqliteSaveProduct, sqliteDeleteProduct, sqliteDeleteBill } from './sqliteAdapter';
 import { publishStockTransitionAlerts, StockTransitionInput } from './stockAlerts';
+import { publishCloudflareEvent, publishAtomicCheckoutToEdge } from './cloudflareEvents';
 import {
     markProductDeletedLocal,
     unmarkProductsDeletedLocal,
@@ -1120,6 +1121,16 @@ export const checkoutNewBill = async (
             }
             if (stockTransitionsForAlerts.length > 0) {
                 publishStockTransitionAlerts(stockTransitionsForAlerts).catch(() => {});
+                publishAtomicCheckoutToEdge({
+                    billId: newBillRef.id,
+                    items: stockTransitionsForAlerts.map((t) => ({
+                        productId: t.productId,
+                        productName: t.productName,
+                        quantity: Math.max(1, Number(t.prevStock) - Number(t.nextStock)),
+                        prevStock: Number(t.prevStock),
+                    })),
+                    sourceUid: cashier?.uid,
+                }).catch(() => {});
             }
             return newBillRef.id;
         } catch (txErr: any) {
@@ -1508,6 +1519,18 @@ export const syncOfflinePendingBills = async (): Promise<void> => {
                     setDoc(doc(db, 'sync_conflicts', conflictId), conflictRecord, { merge: true }).catch((e) =>
                         console.warn('Failed to write sync_conflicts doc:', e)
                     );
+
+                    publishCloudflareEvent({
+                        id: conflictId,
+                        kind: 'conflict',
+                        severity: 'high',
+                        title: '⚠️ Offline Bill Stock Conflict',
+                        body: conflictRecord.reason,
+                        canonicalKey: conflictId,
+                        targetAudience: 'admins',
+                        sourceUid: conflictRecord.userId || undefined,
+                        timestamp: nowTs,
+                    }).catch(() => {});
 
                     logActivity(
                         'sync_conflict',

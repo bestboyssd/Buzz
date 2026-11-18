@@ -40,6 +40,7 @@ import {
   applyPerformanceMode,
 } from "./utils";
 import { logActivity } from "./firestoreHooks";
+import { publishCloudflareEvent } from "./cloudflareEvents";
 
 import { updateStatusBarTheme } from "./capacitor";
 
@@ -104,11 +105,12 @@ const fetchFreshDoc = async (ref: ReturnType<typeof doc>) => {
   }
 };
 
-const wipeLocalAccountCache = (uid: string) => {
+const wipeLocalAccountCache = (uid: string, email?: string) => {
   localStorage.removeItem(`is_admin_cached_${uid}`);
   localStorage.removeItem(`is_real_admin_cached_${uid}`);
   localStorage.removeItem(`custom_user_photo_${uid}`);
   localStorage.removeItem(`custom_user_photo_ts_${uid}`);
+  localStorage.removeItem(`custom_user_photo_verified_${uid}`);
   localStorage.removeItem(`custom_user_name_${uid}`);
   localStorage.removeItem(`is_blocked_cached_${uid}`);
   localStorage.removeItem(`theme_${uid}`);
@@ -117,6 +119,175 @@ const wipeLocalAccountCache = (uid: string) => {
   localStorage.removeItem(`keepScreenOn_${uid}`);
   localStorage.removeItem(`performanceMode_${uid}`);
   localStorage.removeItem(`tempAdminAuth_${uid}`);
+  try {
+    sessionStorage.removeItem(`profile_photo_synced_${uid}`);
+  } catch {}
+  const normEmail = String(email || "").trim().toLowerCase();
+  if (normEmail) {
+    localStorage.removeItem(`custom_user_photo_email_${normEmail}`);
+    localStorage.removeItem(`custom_user_photo_email_ts_${normEmail}`);
+    localStorage.removeItem(`custom_user_name_email_${normEmail}`);
+  }
+};
+
+export const preloadProfileImage = (src?: string | null): Promise<void> => {
+  const clean = String(src || "").trim();
+  if (!clean || typeof window === "undefined" || typeof Image === "undefined") {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const img = new Image();
+    const timer = setTimeout(() => resolve(), 450);
+    img.onload = () => {
+      clearTimeout(timer);
+      if (typeof img.decode === "function") {
+        img
+          .decode()
+          .catch(() => {})
+          .finally(() => resolve());
+      } else {
+        resolve();
+      }
+    };
+    img.onerror = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    img.src = clean;
+  });
+};
+
+export const saveResolvedProfilePhotoToCache = (
+  uid: string,
+  email: string | undefined | null,
+  photoUrl: string,
+  timestampMs: number
+) => {
+  const cleanPhoto = String(photoUrl || "").trim();
+  const cleanEmail = String(email || "").trim().toLowerCase();
+  const ts = timestampMs > 0 ? timestampMs : Date.now();
+  try {
+    if (cleanPhoto) {
+      localStorage.setItem(`custom_user_photo_${uid}`, cleanPhoto);
+      localStorage.setItem(`custom_user_photo_ts_${uid}`, String(ts));
+      if (cleanEmail) {
+        localStorage.setItem(`custom_user_photo_email_${cleanEmail}`, cleanPhoto);
+        localStorage.setItem(`custom_user_photo_email_ts_${cleanEmail}`, String(ts));
+      }
+    } else {
+      localStorage.removeItem(`custom_user_photo_${uid}`);
+      localStorage.setItem(`custom_user_photo_ts_${uid}`, String(ts));
+      if (cleanEmail) {
+        localStorage.removeItem(`custom_user_photo_email_${cleanEmail}`);
+        localStorage.setItem(`custom_user_photo_email_ts_${cleanEmail}`, String(ts));
+      }
+    }
+    localStorage.setItem(`custom_user_photo_verified_${uid}`, "true");
+    sessionStorage.setItem(`profile_photo_synced_${uid}`, "true");
+  } catch {}
+};
+
+export const getResolvedUserPhoto = (
+  baseUser?: User | null,
+  fallbackOverride?: string
+): string => {
+  if (!baseUser?.uid) return "";
+  const uid = baseUser.uid;
+  const providerInfo = baseUser.providerData || [];
+  const rawEmailDesc = Object.getOwnPropertyDescriptor(baseUser, "email");
+  const rawEmail =
+    (rawEmailDesc && "value" in rawEmailDesc ? rawEmailDesc.value : "") ||
+    providerInfo.find((p) => p.email)?.email ||
+    "";
+  const normEmail = String(rawEmail || "").trim().toLowerCase();
+
+  try {
+    const localUidPhoto = localStorage.getItem(`custom_user_photo_${uid}`) || "";
+    const localUidTs = Number(localStorage.getItem(`custom_user_photo_ts_${uid}`) || 0);
+    const localEmailPhoto = normEmail
+      ? localStorage.getItem(`custom_user_photo_email_${normEmail}`) || ""
+      : "";
+    const localEmailTs = normEmail
+      ? Number(localStorage.getItem(`custom_user_photo_email_ts_${normEmail}`) || 0)
+      : 0;
+
+    if (localUidPhoto && localEmailPhoto) {
+      if (localEmailTs > localUidTs) return localEmailPhoto;
+      if (localUidTs > localEmailTs) return localUidPhoto;
+      if (
+        localEmailPhoto.startsWith("data:image/") &&
+        !localUidPhoto.startsWith("data:image/")
+      ) {
+        return localEmailPhoto;
+      }
+      return localUidPhoto;
+    }
+    if (localUidPhoto) return localUidPhoto;
+    if (localEmailPhoto) return localEmailPhoto;
+
+    const cachedAccountsRaw = localStorage.getItem("admin_cached_accounts");
+    if (cachedAccountsRaw) {
+      const parsed = JSON.parse(cachedAccountsRaw);
+      if (Array.isArray(parsed)) {
+        const match = parsed.find(
+          (acc: any) =>
+            acc?.uid === uid ||
+            (Array.isArray(acc?.allUids) && acc.allUids.includes(uid)) ||
+            (normEmail && String(acc?.email || "").trim().toLowerCase() === normEmail)
+        );
+        if (match?.customPhotoURL) {
+          return String(match.customPhotoURL).trim();
+        }
+      }
+    }
+
+    // Never fall back to the stale Firebase Auth Google OAuth photo until Firestore profile sync has verified
+    // that no custom photo exists in settings/profile_*
+    const isVerified =
+      sessionStorage.getItem(`profile_photo_synced_${uid}`) === "true" ||
+      localStorage.getItem(`custom_user_photo_verified_${uid}`) === "true";
+    if (!isVerified) {
+      return "";
+    }
+  } catch {}
+
+  const googlePhoto = providerInfo.find((p) => p.providerId === "google.com")?.photoURL;
+  if (googlePhoto) return googlePhoto;
+  return fallbackOverride || "";
+};
+
+export const getResolvedUserName = (
+  baseUser?: User | null,
+  fallbackOverride?: string
+): string => {
+  if (!baseUser?.uid) return "";
+  const uid = baseUser.uid;
+  const providerInfo = baseUser.providerData || [];
+  const rawEmailDesc = Object.getOwnPropertyDescriptor(baseUser, "email");
+  const rawEmail =
+    (rawEmailDesc && "value" in rawEmailDesc ? rawEmailDesc.value : "") ||
+    providerInfo.find((p) => p.email)?.email ||
+    "";
+  const normEmail = String(rawEmail || "").trim().toLowerCase();
+
+  try {
+    const localName = localStorage.getItem(`custom_user_name_${uid}`);
+    if (localName !== null && localName !== "") return localName;
+    if (normEmail) {
+      const emailName = localStorage.getItem(`custom_user_name_email_${normEmail}`);
+      if (emailName !== null && emailName !== "") return emailName;
+    }
+  } catch {}
+
+  const rawNameDesc = Object.getOwnPropertyDescriptor(baseUser, "displayName");
+  const baseName =
+    rawNameDesc && "value" in rawNameDesc ? rawNameDesc.value : "";
+  return (
+    fallbackOverride ||
+    baseName ||
+    providerInfo.find((p) => p.displayName)?.displayName ||
+    ""
+  );
 };
 
 const cloneUserWithLiveGetters = (
@@ -165,29 +336,17 @@ const cloneUserWithLiveGetters = (
 
   Object.defineProperty(updated, "photoURL", {
     get() {
-      try {
-        const localCustom = localStorage.getItem(`custom_user_photo_${uid}`);
-        if (localCustom !== null && localCustom !== "") return localCustom;
-      } catch {}
-      const googlePhoto = providerInfo.find(
-        (p) => p.providerId === "google.com"
-      )?.photoURL;
-      if (googlePhoto) return googlePhoto;
-      return fallbackPhoto || "";
+      return getResolvedUserPhoto(baseUser, fallbackPhoto);
     },
     set(val) {
       fallbackPhoto = val || "";
       if (val) {
+        const normEmail = String(fallbackEmail || "").trim().toLowerCase();
         try {
           const prev = localStorage.getItem(`custom_user_photo_${uid}`) || "";
           const existingTs = Number(localStorage.getItem(`custom_user_photo_ts_${uid}`) || 0);
-          localStorage.setItem(`custom_user_photo_${uid}`, val);
-          if (val !== prev || existingTs <= 0) {
-            localStorage.setItem(
-              `custom_user_photo_ts_${uid}`,
-              String(Date.now())
-            );
-          }
+          const nextTs = val !== prev || existingTs <= 0 ? Date.now() : existingTs;
+          saveResolvedProfilePhotoToCache(uid, normEmail, val, nextTs);
         } catch {}
       }
     },
@@ -197,21 +356,17 @@ const cloneUserWithLiveGetters = (
 
   Object.defineProperty(updated, "displayName", {
     get() {
-      try {
-        const localName = localStorage.getItem(`custom_user_name_${uid}`);
-        if (localName !== null && localName !== "") return localName;
-      } catch {}
-      return (
-        fallbackName ||
-        providerInfo.find((p) => p.displayName)?.displayName ||
-        ""
-      );
+      return getResolvedUserName(baseUser, fallbackName);
     },
     set(val) {
       fallbackName = val || "";
       if (val) {
         try {
           localStorage.setItem(`custom_user_name_${uid}`, val);
+          const normEmail = String(fallbackEmail || "").trim().toLowerCase();
+          if (normEmail) {
+            localStorage.setItem(`custom_user_name_email_${normEmail}`, val);
+          }
         } catch {}
       }
     },
@@ -238,9 +393,20 @@ const cloneUserWithLiveGetters = (
 };
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
-  const [user, setUser] = useState<User | null>(() =>
-    auth.currentUser ? cloneUserWithLiveGetters(auth.currentUser) : null
-  );
+  // Only initialize user synchronously on frame 0 if their custom photo was already synced in this session or offline;
+  // otherwise wait the ~200-400ms for Firestore profile resolution so the old Google photo never flashes for 3 seconds on login.
+  const [user, setUser] = useState<User | null>(() => {
+    if (!auth.currentUser) return null;
+    const u = auth.currentUser;
+    const alreadySyncedThisSession =
+      typeof sessionStorage !== "undefined" &&
+      sessionStorage.getItem(`profile_photo_synced_${u.uid}`) === "true";
+    const isOffline =
+      typeof navigator !== "undefined" && navigator.onLine === false;
+    return alreadySyncedThisSession || isOffline
+      ? cloneUserWithLiveGetters(u)
+      : null;
+  });
   const [loading, setLoading] = useState(true);
   const [isAdmin, setIsAdmin] = useState<boolean>(() => {
     const u = auth.currentUser;
@@ -380,9 +546,6 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           }
         }
 
-        setUser(patchedCurrentUser);
-        setLoading(false);
-
         // Load instantly from cache
         const normInitialEmail = resolvedEmail.trim().toLowerCase();
         const cachedAdminRaw = localStorage.getItem(`is_admin_cached_${currentUser.uid}`);
@@ -406,13 +569,95 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         setIsAdmin(cachedAdmin);
         setIsRealAdmin(cachedRealAdmin);
 
-        // Always query fresh server documents first when online so deleted/unblocked accounts are never stuck on stale IndexedDB cache
+        const isOfflineNow =
+          typeof navigator !== "undefined" && navigator.onLine === false;
+        const alreadySyncedPhotoThisSession =
+          typeof sessionStorage !== "undefined" &&
+          sessionStorage.getItem(`profile_photo_synced_${currentUser.uid}`) === "true";
+
+        let hasRevealedSession = false;
+        const revealAuthenticatedUser = (
+          overridePhoto?: string,
+          overrideName?: string,
+          overrideEmail?: string
+        ) => {
+          if (hasRevealedSession) return;
+          hasRevealedSession = true;
+          setUser(
+            cloneUserWithLiveGetters(currentUser, {
+              photoURL:
+                overridePhoto !== undefined
+                  ? overridePhoto
+                  : originalPhotoURL || "",
+              displayName:
+                overrideName !== undefined ? overrideName : resolvedName,
+              email:
+                overrideEmail !== undefined ? overrideEmail : resolvedEmail,
+            })
+          );
+          setLoading(false);
+          window.dispatchEvent(new Event("profilePhotoUpdated"));
+        };
+
+        if (isOfflineNow || alreadySyncedPhotoThisSession) {
+          revealAuthenticatedUser();
+        }
+
+        // Safety fallback so a slow network never blocks login longer than 1.8s
+        const revealSafetyTimer = setTimeout(() => {
+          revealAuthenticatedUser();
+        }, 1800);
+
+        const fetchBestSiblingPhoto = async (emailToMatch: string) => {
+          if (!emailToMatch || isOfflineNow) return null;
+          try {
+            const snap = await Promise.race([
+              getDocsFromServer(collection(db, "settings")).catch(() =>
+                getDocs(collection(db, "settings"))
+              ),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 1200)),
+            ]);
+            if (!snap) return null;
+            let bestPhoto = "";
+            let bestPhotoTs = 0;
+            let bestName = "";
+            snap.docs.forEach((d) => {
+              if (!d.id.startsWith("profile_")) return;
+              const dData = d.data();
+              const dEmail = String(dData?.email || "").trim().toLowerCase();
+              if (dEmail !== emailToMatch) return;
+              const pUrl = String(dData?.customPhotoURL || "").trim();
+              if (!pUrl) return;
+              const pTs = Number(dData?.photoUpdatedAt || dData?.updatedAt || 0);
+              const isBetter =
+                !bestPhoto ||
+                (pTs !== bestPhotoTs
+                  ? pTs > bestPhotoTs
+                  : pUrl.startsWith("data:image/") &&
+                    !bestPhoto.startsWith("data:image/"));
+              if (isBetter) {
+                bestPhoto = pUrl;
+                bestPhotoTs = pTs;
+                if (dData?.displayName) {
+                  bestName = String(dData.displayName).trim();
+                }
+              }
+            });
+            return bestPhoto ? { photoUrl: bestPhoto, photoTs: bestPhotoTs, displayName: bestName } : null;
+          } catch {
+            return null;
+          }
+        };
+
+        // Always query fresh server documents first when online so deleted/unblocked accounts and custom profile photos are resolved before first render
         Promise.all([
           fetchFreshDoc(profileDoc),
           fetchFreshDoc(blockedListDoc),
           fetchFreshDoc(deletedListDoc),
+          fetchBestSiblingPhoto(normInitialEmail),
         ])
-          .then(async ([docSnap, blockedSnap, deletedSnap]) => {
+          .then(async ([docSnap, blockedSnap, deletedSnap, siblingProfile]) => {
+            clearTimeout(revealSafetyTimer);
             const normEmail = resolvedEmail.trim().toLowerCase();
 
             // 1. Check deleted_accounts registry first so we know if this account was deleted after any prior ban
@@ -461,6 +706,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
             if (isBlockedInRegistry || isBlockedInProfile) {
               localStorage.setItem(`is_blocked_cached_${currentUser.uid}`, "true");
+              setLoading(false);
               notifyAndEnforceBlockedLogout(BLOCKED_LOGIN_MESSAGE);
               return;
             }
@@ -477,8 +723,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             if (wasDeleted && !signedInExplicitlyNow) {
               // Stale session on a device whose account was deleted by an Admin — force logout and delete any zombie doc
               skipProfileWriteRef.current = true;
-              wipeLocalAccountCache(currentUser.uid);
+              wipeLocalAccountCache(currentUser.uid, normEmail);
               deleteDoc(profileDoc).catch(() => {});
+              setLoading(false);
               notifyAndEnforceBlockedLogout(
                 "Your account was deleted by an administrator. You can sign in again to create a new account."
               );
@@ -521,8 +768,8 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
             if (!isCreatingFreshAccount && docSnap?.exists()) {
               const data = docSnap.data();
-              customPhotoURL = data.customPhotoURL || "";
-              savedName = data.displayName || resolvedName || "";
+              customPhotoURL = String(data.customPhotoURL || "").trim();
+              savedName = data.displayName || siblingProfile?.displayName || resolvedName || "";
               savedEmail = data.email || resolvedEmail || "";
 
               // Never allow temporary PIN unlock (tempAdminAuth) to turn a user into an Admin
@@ -564,47 +811,83 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               const localPhotoTs = Number(
                 localStorage.getItem(`custom_user_photo_ts_${currentUser.uid}`) || 0
               );
-              const docPhotoTs = Number(data.photoUpdatedAt || 0);
+              let docPhotoTs = Number(data.photoUpdatedAt || 0);
               const docUpdatedAt = Number(data.updatedAt || 0);
-              const effectiveRemotePhotoTs = docPhotoTs > 0 ? docPhotoTs : docUpdatedAt;
+              let effectiveRemotePhotoTs = docPhotoTs > 0 ? docPhotoTs : docUpdatedAt;
+
+              // Check if a sibling profile_* doc for the same email has a newer photo or a custom data:image/ photo
+              if (siblingProfile?.photoUrl) {
+                const sibUrl = siblingProfile.photoUrl;
+                const sibTs = siblingProfile.photoTs || 0;
+                const preferSibling =
+                  !customPhotoURL ||
+                  (sibTs > effectiveRemotePhotoTs) ||
+                  (sibUrl.startsWith("data:image/") &&
+                    !customPhotoURL.startsWith("data:image/"));
+                if (preferSibling) {
+                  customPhotoURL = sibUrl;
+                  docPhotoTs = Math.max(docPhotoTs, sibTs);
+                  effectiveRemotePhotoTs = Math.max(effectiveRemotePhotoTs, sibTs);
+                  shouldWritePhotoOnLogin = true;
+                  photoTsToWrite = effectiveRemotePhotoTs || Date.now();
+                }
+              }
+
               const cachedLocalPhoto =
                 localStorage.getItem(`custom_user_photo_${currentUser.uid}`) || "";
-              const remoteHasPhoto = Boolean(String(data.customPhotoURL || "").trim());
+              const remoteHasPhoto = Boolean(customPhotoURL);
 
               if (
                 cachedLocalPhoto &&
                 localPhotoTs > 0 &&
                 (docPhotoTs > 0
                   ? localPhotoTs > docPhotoTs
-                  : localPhotoTs > docUpdatedAt ||
-                    (cachedLocalPhoto.startsWith("data:image/") &&
-                      !String(data.customPhotoURL || "").startsWith("data:image/")))
+                  : localPhotoTs > effectiveRemotePhotoTs &&
+                    cachedLocalPhoto.startsWith("data:image/") &&
+                    !customPhotoURL.startsWith("data:image/"))
               ) {
                 customPhotoURL = cachedLocalPhoto;
                 shouldWritePhotoOnLogin = true;
                 photoTsToWrite = localPhotoTs;
-              } else if (remoteHasPhoto) {
-                customPhotoURL = String(data.customPhotoURL).trim();
-                localStorage.setItem(
-                  `custom_user_photo_${currentUser.uid}`,
-                  customPhotoURL
+                saveResolvedProfilePhotoToCache(
+                  currentUser.uid,
+                  normEmail,
+                  customPhotoURL,
+                  localPhotoTs
                 );
-                if (effectiveRemotePhotoTs > 0) {
-                  localStorage.setItem(
-                    `custom_user_photo_ts_${currentUser.uid}`,
-                    String(effectiveRemotePhotoTs)
-                  );
-                }
+              } else if (remoteHasPhoto) {
+                saveResolvedProfilePhotoToCache(
+                  currentUser.uid,
+                  normEmail,
+                  customPhotoURL,
+                  effectiveRemotePhotoTs || Date.now()
+                );
               } else if (cachedLocalPhoto) {
                 customPhotoURL = cachedLocalPhoto;
                 shouldWritePhotoOnLogin = true;
                 photoTsToWrite = localPhotoTs || Date.now();
+                saveResolvedProfilePhotoToCache(
+                  currentUser.uid,
+                  normEmail,
+                  customPhotoURL,
+                  photoTsToWrite
+                );
+              } else {
+                saveResolvedProfilePhotoToCache(
+                  currentUser.uid,
+                  normEmail,
+                  originalPhotoURL || "",
+                  Date.now()
+                );
               }
               if (savedName) {
                 localStorage.setItem(
                   `custom_user_name_${currentUser.uid}`,
                   savedName
                 );
+                if (normEmail) {
+                  localStorage.setItem(`custom_user_name_email_${normEmail}`, savedName);
+                }
               }
 
               // Load saved theme from Firestore if present; otherwise keep device/cached theme
@@ -635,24 +918,40 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             } else {
               // Brand new account OR re-creating a fresh account after Admin deletion!
               // Reset any old custom name/photo/role/cache so the account starts 100% clean from Google provider data
-              wipeLocalAccountCache(currentUser.uid);
+              wipeLocalAccountCache(currentUser.uid, normEmail);
 
               const freshGoogleName =
                 googleProvider?.displayName ||
                 (resolvedEmail ? resolvedEmail.split("@")[0] : "") ||
                 resolvedName ||
                 "User";
-              const freshGooglePhoto = googleProvider?.photoURL || "";
+              const freshGooglePhoto =
+                (!wasDeleted && siblingProfile?.photoUrl) ||
+                googleProvider?.photoURL ||
+                "";
 
-              savedName = freshGoogleName;
+              savedName = (!wasDeleted && siblingProfile?.displayName) || freshGoogleName;
               savedEmail = resolvedEmail;
               customPhotoURL = freshGooglePhoto;
               originalPhotoURL = freshGooglePhoto;
 
+              saveResolvedProfilePhotoToCache(
+                currentUser.uid,
+                normEmail,
+                customPhotoURL,
+                freshAccountTs
+              );
+              if (savedName) {
+                localStorage.setItem(`custom_user_name_${currentUser.uid}`, savedName);
+                if (normEmail) {
+                  localStorage.setItem(`custom_user_name_email_${normEmail}`, savedName);
+                }
+              }
+
               // Reset Firebase Auth's cached user profile if it still held an old custom displayName (e.g. from Account.tsx)
               updateProfile(currentUser, {
-                displayName: freshGoogleName,
-                photoURL: freshGooglePhoto,
+                displayName: savedName,
+                ...(freshGooglePhoto.startsWith("data:") ? {} : { photoURL: freshGooglePhoto }),
               }).catch(() => {});
 
               makeAdmin = isOwner;
@@ -721,7 +1020,7 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
               }).catch(() => {});
 
               // Purge any other stale profile_* or attempts_* docs in settings with the same email (e.g. old Web/Mobile duplicate UID)
-              if (normEmail) {
+              if (normEmail && wasDeleted) {
                 getDocsFromServer(collection(db, "settings"))
                   .catch(() => getDocs(collection(db, "settings")))
                   .then((settingsSnap) => {
@@ -761,6 +1060,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
                 shouldWritePhotoOnLogin = true;
               }
             }
+
+            // Pre-decode the final resolved profile photo before revealing the authenticated UI so the new photo renders on Frame 1
+            await preloadProfileImage(customPhotoURL);
+            revealAuthenticatedUser(customPhotoURL, savedName, savedEmail);
 
             if (skipProfileWriteRef.current) return;
 
@@ -822,13 +1125,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             setUser((prev) => {
               if (!prev || prev.uid !== currentUser.uid) return prev;
               return cloneUserWithLiveGetters(prev, {
-                photoURL: originalPhotoURL || "",
+                photoURL: customPhotoURL || originalPhotoURL || "",
                 displayName: savedName,
                 email: savedEmail,
               });
             });
+            window.dispatchEvent(new Event("profilePhotoUpdated"));
           })
           .catch((err) => {
+            clearTimeout(revealSafetyTimer);
+            revealAuthenticatedUser();
             console.warn("Profile doc fetch bypassed", err);
           });
 
@@ -960,20 +1266,19 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
           if (!isStalePhotoSnapshot && data.customPhotoURL !== undefined) {
             if (nextPhoto !== prevPhoto) {
               if (nextPhoto) {
-                localStorage.setItem(
-                  `custom_user_photo_${user.uid}`,
-                  nextPhoto
-                );
-                localStorage.setItem(
-                  `custom_user_photo_ts_${user.uid}`,
-                  String(remotePhotoTs || remoteUpdatedAt || Date.now())
+                saveResolvedProfilePhotoToCache(
+                  user.uid,
+                  savedEmail,
+                  nextPhoto,
+                  remotePhotoTs || remoteUpdatedAt || Date.now()
                 );
                 profileIdentityChanged = true;
               } else if (remotePhotoTs > 0 && remotePhotoTs >= localPhotoTs) {
-                localStorage.removeItem(`custom_user_photo_${user.uid}`);
-                localStorage.setItem(
-                  `custom_user_photo_ts_${user.uid}`,
-                  String(remotePhotoTs)
+                saveResolvedProfilePhotoToCache(
+                  user.uid,
+                  savedEmail,
+                  "",
+                  remotePhotoTs
                 );
                 profileIdentityChanged = true;
               }
@@ -985,11 +1290,16 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
             const nextName = data.displayName.trim();
             if (nextName !== prevName) {
               localStorage.setItem(`custom_user_name_${user.uid}`, nextName);
+              const normSnapEmail = String(savedEmail || "").trim().toLowerCase();
+              if (normSnapEmail) {
+                localStorage.setItem(`custom_user_name_email_${normSnapEmail}`, nextName);
+              }
               profileIdentityChanged = true;
             }
           }
           if (profileIdentityChanged) {
             refreshUserAvatar();
+            window.dispatchEvent(new Event("profilePhotoUpdated"));
           }
 
           // If a legacy tempAdminAuth flag is present on a non-owner profile, clean it up in Firestore
@@ -1391,6 +1701,19 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
         } catch (msgErr) {
           console.debug("Could not write global security message:", msgErr);
         }
+
+        publishCloudflareEvent({
+          id: alertRef.id,
+          kind: "security",
+          severity: "high",
+          title: "🚨 Security Lockout Alert",
+          body: alertMessage,
+          canonicalKey: alertRef.id,
+          targetAudience: "admins",
+          sourceUid: user.uid,
+          sourceDeviceId: currentDeviceId,
+          timestamp: now,
+        }).catch(() => {});
 
         // Log out immediately to remove their session access
         setTimeout(() => {

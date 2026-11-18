@@ -10,7 +10,12 @@ import {
   Save,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { useAuth } from "../lib/AuthContext";
+import {
+  useAuth,
+  getResolvedUserPhoto,
+  getResolvedUserName,
+  saveResolvedProfilePhotoToCache,
+} from "../lib/AuthContext";
 import { triggerHaptic } from "../lib/haptics";
 import { updateProfile } from "firebase/auth";
 import { compressProfileImage, readUncroppedImageDataUrl } from "../lib/imageUtils";
@@ -24,23 +29,8 @@ export function Account() {
   const navigate = useNavigate();
   const { user, signOut } = useAuth();
 
-  const resolveCurrentName = () => {
-    if (!user) return "";
-    try {
-      const localName = localStorage.getItem(`custom_user_name_${user.uid}`);
-      if (localName) return localName;
-    } catch {}
-    return user.displayName || "";
-  };
-
-  const resolveCurrentPhoto = () => {
-    if (!user) return "";
-    try {
-      const localPhoto = localStorage.getItem(`custom_user_photo_${user.uid}`);
-      if (localPhoto) return localPhoto;
-    } catch {}
-    return user.photoURL || "";
-  };
+  const resolveCurrentName = () => getResolvedUserName(user, user?.displayName || "");
+  const resolveCurrentPhoto = () => getResolvedUserPhoto(user, user?.photoURL || "");
 
   const [displayName, setDisplayName] = useState(resolveCurrentName);
   const [photoURL, setPhotoURL] = useState(resolveCurrentPhoto);
@@ -161,23 +151,15 @@ export function Account() {
       const isPhotoTooLong =
         trimmedPhoto.length > 1500 || trimmedPhoto.startsWith("data:");
 
-      if (trimmedPhoto) {
-        try {
-          localStorage.setItem(`custom_user_photo_${user.uid}`, trimmedPhoto);
-          localStorage.setItem(`custom_user_photo_ts_${user.uid}`, String(now));
-        } catch (storageErr) {
-          console.warn("Local storage cache photo non-fatal error:", storageErr);
-        }
-      } else {
-        try {
-          localStorage.removeItem(`custom_user_photo_${user.uid}`);
-          localStorage.setItem(`custom_user_photo_ts_${user.uid}`, String(now));
-        } catch (_) {}
-      }
+      saveResolvedProfilePhotoToCache(user.uid, user.email, trimmedPhoto, now);
 
       if (trimmedName) {
         try {
           localStorage.setItem(`custom_user_name_${user.uid}`, trimmedName);
+          const normUserEmail = String(user.email || "").trim().toLowerCase();
+          if (normUserEmail) {
+            localStorage.setItem(`custom_user_name_email_${normUserEmail}`, trimmedName);
+          }
         } catch (_) {}
       }
 
